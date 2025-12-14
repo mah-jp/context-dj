@@ -85,138 +85,143 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // Initialize
     useEffect(() => {
         const init = async () => {
-            // 0. Check Onboarding
-            if (typeof window !== 'undefined') {
-                setNeedsOnboarding(!localStorage.getItem('spotify_client_id'));
-            }
+            try {
+                // 0. Check Onboarding
+                if (typeof window !== 'undefined') {
+                    setNeedsOnboarding(!localStorage.getItem('spotify_client_id'));
+                }
 
-            // 1. Check for Callback Code
-            const params = new URLSearchParams(window.location.search);
-            const code = params.get('code');
-            // Ideally we shouldn't access localStorage if window is undefined, but useEffect runs on client
-            const storedClientId = localStorage.getItem('spotify_client_id');
+                // 1. Check for Callback Code
+                const params = new URLSearchParams(window.location.search);
+                const code = params.get('code');
+                // Ideally we shouldn't access localStorage if window is undefined, but useEffect runs on client
+                const storedClientId = localStorage.getItem('spotify_client_id');
 
-            if (!storedClientId) {
-                setStatus('Please configure settings first.');
-                return;
-            }
-
-            let token = SpotifyAuth.getAccessToken();
-
-            if (code) {
-                setStatus('Authenticating...');
-                token = await SpotifyAuth.handleCallback(storedClientId, code);
-                // Clear code from URL after successful handling
-                window.history.replaceState({}, document.title, window.location.pathname);
-            }
-
-            if (!token || !SpotifyAuth.isAuthenticated()) {
-                // Try refreshing token
-                const newToken = await SpotifyAuth.refreshToken(storedClientId);
-                if (newToken) {
-                    token = newToken;
-                    console.log("Token refreshed successfully");
-                } else {
-                    setStatus('connect_needed');
+                if (!storedClientId) {
+                    setStatus('Please configure settings first.');
                     return;
                 }
-            }
 
-            // 2. Initialize DJ Core
-            setAuthorized(true);
-            setStatus('Ready');
+                let token = SpotifyAuth.getAccessToken();
 
-            // Prevent re-creating DJCore if it exists (though useEffect run once implies it shouldn't exist)
-            if (!djRef.current) {
-                const dj = new DJCore(token);
-
-                // Load AI Config
-                const openaiKey = localStorage.getItem('openai_api_key');
-                const openaiModel = localStorage.getItem('openai_model') || 'gpt-4o-mini';
-                const geminiKey = localStorage.getItem('gemini_api_key');
-                const geminiModel = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
-                const selectedProvider = localStorage.getItem('selected_ai_provider') || 'openai';
-
-                if (selectedProvider === 'gemini' && geminiKey) {
-                    dj.initAI('gemini', geminiKey, geminiModel);
-                } else if (selectedProvider === 'openai' && openaiKey) {
-                    dj.initAI('openai', openaiKey, openaiModel);
-                } else {
-                    // Fallback
-                    if (openaiKey) dj.initAI('openai', openaiKey, openaiModel);
-                    else if (geminiKey) dj.initAI('gemini', geminiKey, geminiModel);
+                if (code) {
+                    setStatus('Authenticating...');
+                    token = await SpotifyAuth.handleCallback(storedClientId, code);
+                    // Clear code from URL after successful handling
+                    window.history.replaceState({}, document.title, window.location.pathname);
                 }
 
-                djRef.current = dj;
-
-                // Restore Schedule
-                const savedSchedule = localStorage.getItem('dj_schedule');
-                if (savedSchedule) {
-                    try {
-                        const parsed = JSON.parse(savedSchedule);
-                        if (Array.isArray(parsed)) {
-                            setSchedule(parsed);
-                            dj.setSchedule(parsed);
-                        }
-                    } catch (e) {
-                        console.error("Failed to load saved schedule", e);
+                if (!token || !SpotifyAuth.isAuthenticated()) {
+                    // Try refreshing token
+                    const newToken = await SpotifyAuth.refreshToken(storedClientId);
+                    if (newToken) {
+                        token = newToken;
+                        console.log("Token refreshed successfully");
+                    } else {
+                        setStatus('connect_needed');
+                        return;
                     }
                 }
-            }
 
-            // 3. Start Polling Loop with Dynamic Interval
-            if (timerRef.current) clearTimeout(timerRef.current);
+                // 2. Initialize DJ Core
+                setAuthorized(true);
+                setStatus('Ready');
 
-            const tick = async () => {
-                let nextDelay = 5000; // Default 5s
+                // Prevent re-creating DJCore if it exists (though useEffect run once implies it shouldn't exist)
+                if (!djRef.current) {
+                    const dj = new DJCore(token);
 
-                try {
-                    if (djRef.current) {
-                        // Check Schedule (AI Logic)
-                        await djRef.current.processDJLoop();
+                    // Load AI Config
+                    const openaiKey = localStorage.getItem('openai_api_key');
+                    const openaiModel = localStorage.getItem('openai_model') || 'gpt-4o-mini';
+                    const geminiKey = localStorage.getItem('gemini_api_key');
+                    const geminiModel = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
+                    const selectedProvider = localStorage.getItem('selected_ai_provider') || 'openai';
 
-                        // Sync UI
-                        const playbackState = await syncUIState();
+                    if (selectedProvider === 'gemini' && geminiKey) {
+                        dj.initAI('gemini', geminiKey, geminiModel);
+                    } else if (selectedProvider === 'openai' && openaiKey) {
+                        dj.initAI('openai', openaiKey, openaiModel);
+                    } else {
+                        // Fallback
+                        if (openaiKey) dj.initAI('openai', openaiKey, openaiModel);
+                        else if (geminiKey) dj.initAI('gemini', geminiKey, geminiModel);
+                    }
 
-                        // Dynamic Interval: If track is ending soon (< 10s), increase polling rate to 1s
-                        if (playbackState && playbackState.is_playing && playbackState.item && playbackState.item.duration_ms && playbackState.progress_ms) {
-                            const remaining = playbackState.item.duration_ms - playbackState.progress_ms;
-                            if (remaining < 10000) {
-                                nextDelay = 1000;
+                    djRef.current = dj;
+
+                    // Restore Schedule
+                    const savedSchedule = localStorage.getItem('dj_schedule');
+                    if (savedSchedule) {
+                        try {
+                            const parsed = JSON.parse(savedSchedule);
+                            if (Array.isArray(parsed)) {
+                                setSchedule(parsed);
+                                dj.setSchedule(parsed);
+                            }
+                        } catch (e) {
+                            console.error("Failed to load saved schedule", e);
+                        }
+                    }
+                }
+
+                // 3. Start Polling Loop with Dynamic Interval
+                if (timerRef.current) clearTimeout(timerRef.current);
+
+                const tick = async () => {
+                    let nextDelay = 5000; // Default 5s
+
+                    try {
+                        if (djRef.current) {
+                            // Check Schedule (AI Logic)
+                            await djRef.current.processDJLoop();
+
+                            // Sync UI
+                            const playbackState = await syncUIState();
+
+                            // Dynamic Interval: If track is ending soon (< 10s), increase polling rate to 1s
+                            if (playbackState && playbackState.is_playing && playbackState.item && playbackState.item.duration_ms && playbackState.progress_ms) {
+                                const remaining = playbackState.item.duration_ms - playbackState.progress_ms;
+                                if (remaining < 10000) {
+                                    nextDelay = 1000;
+                                }
                             }
                         }
+                    } catch (error) {
+                        console.error("Error in DJ Loop tick:", error);
+                        // On error, keep default delay or increase it slightly to avoid rapid error spam
                     }
-                } catch (error) {
-                    console.error("Error in DJ Loop tick:", error);
-                    // On error, keep default delay or increase it slightly to avoid rapid error spam
-                }
 
-                // Auto-refresh token if expiring soon (within 5 minutes)
-                if (authorized) {
-                    const expiresAtStr = localStorage.getItem('spotify_expires_at');
-                    if (expiresAtStr) {
-                        const expiresAt = parseInt(expiresAtStr);
-                        const nowMs = Date.now();
-                        // 5 minutes buffer = 5 * 60 * 1000 = 300000
-                        if (expiresAt - nowMs < 300000) {
-                            console.log('🔄 Token expiring soon, refreshing...');
-                            const clientId = localStorage.getItem('spotify_client_id');
-                            if (clientId) {
-                                const newToken = await SpotifyAuth.refreshToken(clientId);
-                                if (newToken && djRef.current) {
-                                    djRef.current.updateAccessToken(newToken);
-                                    console.log('✅ Token refreshed and updated in DJCore');
+                    // Auto-refresh token if expiring soon (within 5 minutes)
+                    if (authorized) {
+                        const expiresAtStr = localStorage.getItem('spotify_expires_at');
+                        if (expiresAtStr) {
+                            const expiresAt = parseInt(expiresAtStr);
+                            const nowMs = Date.now();
+                            // 5 minutes buffer = 5 * 60 * 1000 = 300000
+                            if (expiresAt - nowMs < 300000) {
+                                console.log('🔄 Token expiring soon, refreshing...');
+                                const clientId = localStorage.getItem('spotify_client_id');
+                                if (clientId) {
+                                    const newToken = await SpotifyAuth.refreshToken(clientId);
+                                    if (newToken && djRef.current) {
+                                        djRef.current.updateAccessToken(newToken);
+                                        console.log('✅ Token refreshed and updated in DJCore');
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Schedule next tick
-                timerRef.current = setTimeout(tick, nextDelay);
-            };
+                    // Schedule next tick
+                    timerRef.current = setTimeout(tick, nextDelay);
+                };
 
-            tick();
+                tick();
+            } catch (initError: any) {
+                console.error("Fatal initialization error:", initError);
+                setStatus(`Init Error: ${initError.message || initError}`);
+            }
         };
 
         // Initialize
