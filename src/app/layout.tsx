@@ -10,6 +10,22 @@ export const metadata: Metadata = {
   title: "ContextDJ - AI Music Curator",
   description: "Your personalized AI DJ that plays the perfect music for your context.",
   manifest: `${basePath}/manifest.json`,
+  metadataBase: new URL("https://contextdj.remoteroom.jp"),
+  openGraph: {
+    title: "ContextDJ - AI Music Curator",
+    description: "Your personalized AI DJ that plays the perfect music for your context.",
+    type: "website",
+    locale: "ja_JP",
+    url: "https://contextdj.remoteroom.jp",
+    siteName: "ContextDJ",
+    images: '/icon-512x512.png',
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ContextDJ - AI Music Curator",
+    description: "Your personalized AI DJ that plays the perfect music for your context.",
+    creator: "@mah_jp",
+  },
 };
 
 export const viewport: Viewport = {
