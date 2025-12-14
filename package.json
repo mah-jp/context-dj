@@ -1,0 +1,33 @@
+{
+  "name": "context-dj",
+  "version": "2025.12.14",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@ducanh2912/next-pwa": "^10.2.9",
+    "@google/generative-ai": "^0.24.1",
+    "@types/uuid": "^10.0.0",
+    "babel-plugin-react-compiler": "^1.0.0",
+    "lucide-react": "^0.556.0",
+    "next": "16.0.7",
+    "openai": "^6.10.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "spotify-web-api-js": "^1.5.2",
+    "uuid": "^13.0.0",
+    "wrangler": "^4.54.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.0.7",
+    "typescript": "^5"
+  }
+}

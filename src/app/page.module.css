@@ -1,0 +1,643 @@
+/* Spotify-like Theme Variables */
+.main {
+  --bg-base: #121212;
+  --bg-elevated: #181818;
+  --bg-highlight: #282828;
+  --text-base: #ffffff;
+  --text-sub: #b3b3b3;
+  --accent: var(--primary);
+
+
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: var(--bg-base);
+  color: var(--text-base);
+  overflow: hidden;
+}
+
+/* Header & Input Area */
+.headerContainer {
+  background-color: #000000;
+  /* Darker header */
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 64px;
+}
+
+.versionText {
+  font-size: 0.75rem;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--text-base);
+  margin: 0;
+  letter-spacing: -0.04em;
+}
+
+.inputBar {
+  flex: 1;
+  max-width: 480px;
+  display: flex;
+  align-items: center;
+  background-color: #242424;
+  border-radius: 24px;
+  /* More rounded for multiline feel, or keep 500px */
+  padding: 8px 12px;
+  /* Slightly more vertical padding */
+  border: 1px solid transparent;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.inputBar:focus-within {
+  background-color: #2a2a2a;
+  border-color: #555;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+.input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-base);
+  font-size: 0.9rem;
+  outline: none;
+  padding: 4px 8px;
+  /* Adjust padding for textarea */
+  resize: none;
+  font-family: inherit;
+  line-height: 1.4;
+  height: 24px;
+  /* Default height */
+  max-height: 200px;
+}
+
+.input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sendBtn,
+.iconBtn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border-radius: 50%;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.voiceBtn {
+  margin-right: 6px;
+  padding: 8px;
+}
+
+.sendBtn,
+.iconBtn {
+  color: var(--accent);
+}
+
+.sendBtn:hover,
+
+.sendBtn {
+  color: var(--accent);
+}
+
+.sendBtn:hover,
+.iconBtn:hover {
+  color: var(--text-base);
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.settingsLink {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 8px;
+  border-radius: 50%;
+  transition: color 0.2s;
+}
+
+.settingsLink:hover {
+  color: var(--text-base);
+}
+
+/* Main Content Grid */
+.contentGrid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  /* Sidebar | Main Content */
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+/* Left Sidebar (Schedule) */
+.sidebar {
+  background-color: var(--bg-base);
+  /* Or elevated */
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow-y: auto;
+  border-right: 1px solid #000;
+  /* Subtle separator if needed, or remove */
+}
+
+/* Main Queue Area */
+.queueArea {
+  background: linear-gradient(180deg, #202020 0%, var(--bg-base) 100%);
+  border-radius: 8px;
+  padding: 24px;
+  overflow-y: auto;
+  position: relative;
+}
+
+/* AI Status Chips */
+.aiStatus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.aiTag {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-base);
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+/* Queue List Styles */
+.queueList {
+  display: flex;
+  flex-direction: column;
+}
+
+.queueHeader {
+  color: var(--text-base);
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+
+.queueItem {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+  color: var(--text-sub);
+  cursor: pointer;
+}
+
+.queueItem:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-base);
+}
+
+.queueIndex {
+  width: 24px;
+  text-align: center;
+  margin-right: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.queueImg {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  object-fit: cover;
+  margin-right: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.queueMeta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.queueTitle {
+  color: var(--text-base);
+  font-size: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queueArtist {
+  font-size: 0.85rem;
+}
+
+.queuePop {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+  width: 60px;
+  justify-content: flex-end;
+}
+
+
+/* Bottom Player Bar */
+.bottomPlayer {
+  height: 90px;
+  background-color: #181818;
+  border-top: 1px solid #282828;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 1000;
+}
+
+.nowPlaying {
+  display: flex;
+  align-items: center;
+  width: 30%;
+  min-width: 180px;
+}
+
+.nowPlayingImg {
+  width: 56px;
+  height: 56px;
+  border-radius: 4px;
+  margin-right: 14px;
+  background-color: #282828;
+}
+
+.nowPlayingText {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.nowPlayingTitle {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-base);
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nowPlayingTitle:hover {
+  text-decoration: underline;
+}
+
+.hoverUnderline:hover {
+  text-decoration: underline !important;
+  text-decoration-color: var(--text-base);
+}
+
+.nowPlayingArtist {
+  font-size: 0.75rem;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nowPlayingArtist:hover {
+  text-decoration: underline;
+  color: var(--text-base);
+}
+
+/* Player Controls (Center) */
+.playerControls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 40%;
+  max-width: 722px;
+}
+
+.controlButtons {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.controlBtn {
+  background: none;
+  border: none;
+  color: var(--accent);
+
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+  color: var(--accent);
+}
+
+@media (hover: hover) {
+  .controlBtn:hover {
+    color: var(--text-base);
+  }
+}
+
+.controlBtn:active {
+  transform: scale(0.95);
+}
+
+.playPauseBtn {
+  background-color: var(--accent);
+  color: #000;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  transition: transform 0.1s, scale 0.1s;
+}
+
+.playPauseBtn:hover {
+  transform: scale(1.05);
+  color: #000;
+}
+
+.playPauseBtn:active {
+  transform: scale(0.95);
+}
+
+/* Extra Controls (Right - Volume etc) */
+.extraControls {
+  width: 30%;
+  min-width: 180px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.deviceLabel {
+  background: transparent;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-size: 0.75rem;
+}
+
+/* Schedule Items in Sidebar */
+.scheduleItem {
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background-color: #121212;
+  /* Nested darker */
+  transition: background-color 0.2s;
+}
+
+.scheduleItem:hover {
+  background-color: #202020;
+}
+
+.scheduleTime {
+  font-size: 0.85rem;
+  color: var(--text-base);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.scheduleQuery {
+  font-size: 0.8rem;
+  color: var(--text-sub);
+  line-height: 1.4;
+}
+
+/* Animations */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Equalizer Animation */
+@keyframes equalize {
+  0% {
+    height: 2px;
+  }
+
+  50% {
+    height: 10px;
+  }
+
+  100% {
+    height: 2px;
+  }
+}
+
+.equalizer {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+  margin-left: 6px;
+  margin-bottom: 2px;
+}
+
+.bar {
+  width: 2px;
+  background-color: var(--accent);
+  animation: equalize 1.6s infinite ease-in-out;
+}
+
+.bar:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.bar:nth-child(2) {
+  animation-delay: 0.4s;
+}
+
+.bar:nth-child(3) {
+  animation-delay: 0.8s;
+}
+
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .contentGrid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .sidebar {
+    display: none;
+    /* Hide schedule on mobile for now or move */
+  }
+
+  .bottomPlayer {
+    padding: 0 8px;
+  }
+
+  /* Header Mobile Optimizations */
+  .headerContainer {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .title,
+  .versionText {
+    display: none;
+    /* Hide logo text and version on mobile to prioritize search bar and settings */
+  }
+
+  .inputBar {
+    max-width: none;
+    /* Let input take full available width */
+  }
+
+  /* Bottom Player Mobile Optimizations */
+  .bottomPlayer {
+    padding: 0 8px;
+    height: 70px;
+    /* Slightly tighter */
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: #181818;
+    /* Ensure bg is solid */
+    border-top: 1px solid #282828;
+    z-index: 9999;
+  }
+
+  /* Add padding to bottom of content so it's not hidden behind player */
+  .contentGrid {
+    padding-bottom: 80px;
+    height: calc(100vh - 64px - 70px);
+    /* Adjust height if needed or just let it scroll */
+    overflow-y: auto;
+  }
+
+  .nowPlaying {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+    /* Allow text truncation */
+  }
+
+  .nowPlayingImg {
+    width: 42px;
+    height: 42px;
+    margin-right: 8px;
+    background-color: #282828;
+  }
+
+  .playerControls {
+    width: auto;
+    max-width: none;
+    flex: 0 0 auto;
+    /* Do not grow */
+  }
+
+  .extraControls {
+    display: flex;
+    /* Unhide for device selection, but hide text */
+    width: auto;
+    min-width: 0;
+    flex: 0 0 auto;
+    margin-left: 8px;
+  }
+
+  .extraControls span {
+    display: none;
+  }
+
+  .onboardingContainer {
+    padding: 1rem !important;
+    justify-content: flex-start !important;
+    padding-top: 2rem !important;
+    height: auto !important;
+    min-height: 100%;
+  }
+
+  .onboardingDescription {
+    font-size: 0.85rem;
+  }
+}
+
+.onboardingContainer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  text-align: center;
+  color: #b3b3b3;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+.onboardingDescription {
+  color: #ccc;
+  margin-bottom: 1.5rem;
+  max-width: 600px;
+  line-height: 1.6;
+}
+
+.toast {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #333;
+  color: #fff;
+  padding: 12px 24px;
+  border-radius: 24px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  font-size: 0.9rem;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
