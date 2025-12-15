@@ -72,8 +72,9 @@ export class AIService {
     async generateSchedule(userRequest: string, currentSchedule?: ScheduleItem[], personalContext?: string): Promise<ScheduleItem[]> {
         const now = new Date();
         const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        const dateStr = now.toLocaleDateString('ja-JP', { weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit' });
 
-        let contextInfo = `Current Time: ${timeStr}\nUser Request: ${userRequest}`;
+        let contextInfo = `Current Date: ${dateStr}\nCurrent Time: ${timeStr}\nUser Request: ${userRequest}`;
 
         if (personalContext && personalContext.trim().length > 0) {
             contextInfo += `\n\n# User Personal Preferences (HIGH PRIORITY)\nPerform the task while strictly adhering to the following user preferences:\n${personalContext}`;
