@@ -213,7 +213,7 @@ export default function Home() {
     <div className={styles.main}>
       {/* 1. Header & Search Bar */}
       <header className={styles.headerContainer}>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+        <div className={styles.titleWrapper}>
           <h1 className={styles.title}>ContextDJ</h1>
           <span className={styles.versionText} style={{ color: '#666', fontWeight: 400 }}>v{process.env.NEXT_PUBLIC_APP_VERSION}</span>
         </div>

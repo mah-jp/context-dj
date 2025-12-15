@@ -39,6 +39,12 @@
   flex-shrink: 0;
 }
 
+.titleWrapper {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
 .title {
   font-size: 1.2rem;
   font-weight: 700;
@@ -50,6 +56,8 @@
 .inputBar {
   flex: 1;
   max-width: 480px;
+  /* Add min-width to allow shrinking on flex containers */
+  min-width: 0;
   display: flex;
   align-items: center;
   background-color: #242424;
@@ -69,6 +77,8 @@
 
 .input {
   flex: 1;
+  /* Allow shrinking */
+  min-width: 0;
   background: transparent;
   border: none;
   color: var(--text-base);
@@ -513,10 +523,14 @@
     gap: 8px;
   }
 
+  .titleWrapper {
+    display: none;
+    /* Hide logo and version wrapper on mobile */
+  }
+
   .title,
   .versionText {
     display: none;
-    /* Hide logo text and version on mobile to prioritize search bar and settings */
   }
 
   .inputBar {

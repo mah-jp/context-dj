@@ -37,6 +37,7 @@ export const viewport: Viewport = {
 };
 
 import { PlayerProvider } from '../context/PlayerContext';
+import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
 
 export default function RootLayout({
   children,
@@ -48,6 +49,7 @@ export default function RootLayout({
       <body className={inter.className}>
         <PlayerProvider>
           {children}
+          <ServiceWorkerRegister />
         </PlayerProvider>
       </body>
     </html>
