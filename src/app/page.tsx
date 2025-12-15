@@ -25,6 +25,8 @@ export default function Home() {
     needsOnboarding,
     deviceName,
     logs,
+    error,
+    clearError,
   } = usePlayer();
 
   const [inputText, setInputText] = useState('');
@@ -42,12 +44,21 @@ export default function Home() {
   const recognitionRef = useRef<any>(null); // SpeechRecognition instance
 
   // Auto-dismiss toast
+  // Auto-dismiss toast
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(null), 4000);
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  // Sync Global Error to Toast
+  useEffect(() => {
+    if (error) {
+      setToast({ msg: `System Message: ${error}`, type: 'error' });
+    }
+  }, [error]);
+
   // Autosize textarea
   useEffect(() => {
     if (textareaRef.current) {
@@ -117,7 +128,8 @@ export default function Home() {
       } else {
         setSchedule(schedule);
         localStorage.setItem('dj_schedule', JSON.stringify(schedule));
-        setStatus(`📅 Schedule created! (${schedule.length} blocks) (作成完了!)`);
+        // Clear status to avoid persistent message, rely on Toast for success
+        setStatus('Ready');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
 
         // Trigger immediate check
@@ -126,7 +138,8 @@ export default function Home() {
 
     } catch (e: any) {
       console.error(e);
-      setStatus(`❌ Error: ${e.message || e}`);
+      // Clear status to avoid persistent message, rely on Toast for error
+      setStatus('Ready');
       setToast({ msg: `Error: ${e.message || "Failed to contact AI"} (エラーが発生しました)`, type: 'error' });
     }
     setInputText('');
@@ -218,80 +231,96 @@ export default function Home() {
           <span className={styles.versionText} style={{ color: '#666', fontWeight: 400 }}>v{process.env.NEXT_PUBLIC_APP_VERSION}</span>
         </div>
 
-        {/* Input Bar centered */}
-        <div className={styles.inputBar} style={{ position: 'relative' }}>
-          {/* Voice Input Button (Moved Left) */}
-          <button
-            onClick={toggleListening}
-            className={`${styles.iconBtn} ${styles.voiceBtn}`}
-            title={isListening ? "Stop Listening" : "Voice Input"}
-            style={{
-              color: isListening ? '#ef4444' : 'var(--primary)'
-            }}
-          >
-            {isListening ? <MicOff size={20} className={isListening ? styles.pulse : ''} /> : <Mic size={20} />}
-          </button>
+        {/* Input Wrapper for columnar layout of Input + Status */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', maxWidth: '480px', position: 'relative' }}>
 
-          <textarea
-            ref={textareaRef}
-            placeholder={isListening ? "Listening..." : "Hey DJ, play some music for..."}
-            className={styles.input}
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onFocus={() => setShowHistory(false)} // Auto hide when typing
-            disabled={!authorized || isListening}
-            rows={1}
-          />
+          {/* Input Bar */}
+          <div className={styles.inputBar} style={{ width: '100%', position: 'relative' }}>
+            {/* Voice Input Button (Moved Left) */}
+            <button
+              onClick={toggleListening}
+              className={`${styles.iconBtn} ${styles.voiceBtn}`}
+              title={isListening ? "Stop Listening" : "Voice Input"}
+              style={{
+                color: isListening ? '#ef4444' : 'var(--primary)'
+              }}
+            >
+              {isListening ? <MicOff size={20} className={isListening ? styles.pulse : ''} /> : <Mic size={20} />}
+            </button>
 
+            <textarea
+              ref={textareaRef}
+              placeholder={isListening ? "Listening..." : "Hey DJ, play some music for..."}
+              className={styles.input}
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={() => setShowHistory(false)} // Auto hide when typing
+              disabled={!authorized || isListening}
+              rows={1}
+            />
 
-          <button
-            className={styles.iconBtn}
-            onClick={() => setShowHistory(!showHistory)}
-            title="History"
-          >
-            <History size={18} />
-          </button>
+            <button
+              className={styles.iconBtn}
+              onClick={() => setShowHistory(!showHistory)}
+              title="History"
+            >
+              <History size={18} />
+            </button>
 
-          <button className={styles.sendBtn} onClick={handleSend} title="Send Request" disabled={!authorized || status.includes('thinking')}>
-            {status.includes('thinking') ? (
-              <Loader size={18} className={styles.spin} />
-            ) : (
-              <Send size={18} />
+            <button className={styles.sendBtn} onClick={handleSend} title="Send Request" disabled={!authorized || status.includes('thinking')}>
+              {status.includes('thinking') ? (
+                <Loader size={18} className={styles.spin} />
+              ) : (
+                <Send size={18} />
+              )}
+            </button>
+
+            {showHistory && history.length > 0 && (
+              <div style={{
+                position: 'absolute',
+                top: '120%',
+                left: 0,
+                right: 0,
+                background: '#282828',
+                borderRadius: '8px',
+                padding: '8px 0',
+                maxHeight: '300px',
+                overflowY: 'auto',
+                boxShadow: '0 16px 24px rgba(0,0,0,0.5)',
+                zIndex: 2000
+              }}>
+                {history.map((item, i) => (
+                  <div
+                    key={i}
+                    onClick={() => handleHistorySelect(item)}
+                    style={{
+                      padding: '8px 16px',
+                      cursor: 'pointer',
+                      fontSize: '0.9rem',
+                      color: '#eee',
+                      borderBottom: '1px solid #333'
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = '#333'}
+                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                  >
+                    {item}
+                  </div>
+                ))}
+              </div>
             )}
-          </button>
+          </div>
 
-          {showHistory && history.length > 0 && (
+          {/* Status Display - Below Input Bar */}
+          {status && status !== 'Ready' && (
             <div style={{
-              position: 'absolute',
-              top: '120%',
-              left: 0,
-              right: 0,
-              background: '#282828',
-              borderRadius: '8px',
-              padding: '8px 0',
-              maxHeight: '300px',
-              overflowY: 'auto',
-              boxShadow: '0 16px 24px rgba(0,0,0,0.5)',
-              zIndex: 2000
+              marginTop: '4px',
+              fontSize: '0.75rem',
+              color: 'var(--accent)',
+              whiteSpace: 'nowrap',
+              pointerEvents: 'none'
             }}>
-              {history.map((item, i) => (
-                <div
-                  key={i}
-                  onClick={() => handleHistorySelect(item)}
-                  style={{
-                    padding: '8px 16px',
-                    cursor: 'pointer',
-                    fontSize: '0.9rem',
-                    color: '#eee',
-                    borderBottom: '1px solid #333'
-                  }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = '#333'}
-                  onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                >
-                  {item}
-                </div>
-              ))}
+              {status}
             </div>
           )}
         </div>

@@ -26,6 +26,7 @@
   justify-content: space-between;
   gap: 20px;
   min-height: 64px;
+  position: relative;
 }
 
 .versionText {
@@ -509,8 +510,11 @@
   }
 
   .sidebar {
-    display: none;
-    /* Hide schedule on mobile for now or move */
+    display: flex;
+    max-height: 120px;
+    border-right: none;
+    border-bottom: 1px solid #333;
+    padding: 8px;
   }
 
   .bottomPlayer {
@@ -524,11 +528,15 @@
   }
 
   .titleWrapper {
-    display: none;
-    /* Hide logo and version wrapper on mobile */
+    display: flex;
+    /* Show logo on mobile */
   }
 
-  .title,
+  .title {
+    display: none;
+    /* Keep title hidden if space is tight, or show it */
+  }
+
   .versionText {
     display: none;
   }

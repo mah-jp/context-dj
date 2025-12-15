@@ -26,6 +26,8 @@ interface PlayerContextType {
     handleRemoveScheduleItem: (index: number) => void;
     needsOnboarding: boolean;
     logs: string[];
+    error: string | null;
+    clearError: () => void;
 }
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
@@ -43,6 +45,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [queue, setQueue] = useState<Track[]>([]);
     const [devices, setDevices] = useState<SpotifyApi.UserDevice[]>([]);
     const [djLogs, setDjLogs] = useState<string[]>([]); // Added logs state
+    const [error, setError] = useState<string | null>(null);
 
     const djRef = useRef<DJCore | null>(null);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -187,9 +190,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                                 }
                             }
                         }
-                    } catch (error) {
+                    } catch (error: any) {
                         console.error("Error in DJ Loop tick:", error);
-                        // On error, keep default delay or increase it slightly to avoid rapid error spam
+                        // Only set error if it's new to avoid render loops, and maybe filter minor ones
+                        const msg = error.message || "Unknown background error";
+                        // Prevent flashing same error
+                        setError(prev => prev === msg ? prev : msg);
                     }
 
                     // Auto-refresh token if expiring soon (within 5 minutes)
@@ -301,7 +307,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             handleTogglePlay,
             handleRemoveScheduleItem,
             needsOnboarding,
-            logs: djLogs
+            logs: djLogs,
+            error,
+            clearError: () => setError(null)
         }}>
             {children}
         </PlayerContext.Provider>
