@@ -13,6 +13,8 @@
 
 🌐 **今すぐ使う:** [contextdj.remoteroom.jp](https://contextdj.remoteroom.jp)
 
+![ContextDJ QR Code](./docs/images/qr-contextdj.png)
+
 ![ContextDJ: リクエスト内容](./docs/images/screenshot_dj-0.png)
 *(スクリーンショット: リクエスト内容を入力)*
 

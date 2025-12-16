@@ -13,6 +13,8 @@ Unlike standard shuffle or playlists, ContextDJ builds a **context-aware schedul
 
 🌐 **Try it now:** [contextdj.remoteroom.jp](https://contextdj.remoteroom.jp/)
 
+![ContextDJ QR Code](./docs/images/qr-contextdj.png)
+
 ![ContextDJ: Request Input](./docs/images/screenshot_dj-0.png)
 *(Screenshot: Inputting a request)*
 
