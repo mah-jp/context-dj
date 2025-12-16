@@ -18,6 +18,7 @@ export default function Settings() {
     const [prefHistory, setPrefHistory] = useState<string[]>([]);
     const [showPrefHistory, setShowPrefHistory] = useState(false);
     const [voiceLang, setVoiceLang] = useState('ja-JP'); // default to Japanese :-)
+    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState(false);
 
     useEffect(() => {
         // Load from local storage
@@ -42,6 +43,9 @@ export default function Settings() {
                 const savedHistory = localStorage.getItem('personal_pref_history');
                 if (savedHistory) setPrefHistory(JSON.parse(savedHistory));
             } catch (e) { console.error("History parse fail", e); }
+
+            // Default false to avoid surprise, or true? User requested it, so let's default false and let them enable.
+            setBackgroundKeepAlive(localStorage.getItem('background_keep_alive') === 'true');
         }
     }, []);
 
@@ -55,6 +59,7 @@ export default function Settings() {
         localStorage.setItem('selected_ai_provider', aiProvider);
         localStorage.setItem('personal_preference', personalPref);
         localStorage.setItem('voice_input_lang', voiceLang);
+        localStorage.setItem('background_keep_alive', String(backgroundKeepAlive));
 
         // Update history if new unique entry
         if (personalPref.trim()) {
@@ -120,7 +125,7 @@ export default function Settings() {
                         placeholder="Your Spotify App Client ID"
                     />
                     <p className={styles.description}>
-                        Required for playback. Create an app at <a href="https://developer.spotify.com" target="_blank" style={{ color: 'var(--primary)' }}>developer.spotify.com</a><br />
+                        Required for playback. Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" style={{ color: 'var(--primary)' }}>developer.spotify.com</a><br />
                         <span style={{ fontSize: '0.9em', color: '#999' }}>音楽再生に必要です。公式サイトでアプリを作成しIDを取得してください。</span>
                     </p>
                     <button
@@ -367,6 +372,36 @@ export default function Settings() {
                     <p className={styles.description}>
                         These preferences will be appended to the AI prompt as high-priority instructions for every request.<br />
                         <span style={{ fontSize: '0.9em', color: '#999' }}>ここで設定した内容は、AIへのリクエストの際に「最優先の指示」として常に追加されます。</span>
+                    </p>
+                </div>
+            </div>
+
+            <div className={styles.section}>
+                <h2 className={styles.sectionTitle}>
+                    Experimental Features
+                    <span style={{ display: 'block', fontSize: '0.6em', fontWeight: 'normal', color: '#888', marginTop: '4px' }}>実験的機能</span>
+                </h2>
+                <div className={styles.inputGroup}>
+                    <label className={styles.label} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                        <input
+                            type="checkbox"
+                            checked={backgroundKeepAlive}
+                            onChange={(e) => setBackgroundKeepAlive(e.target.checked)}
+                            style={{ marginRight: '10px', width: '20px', height: '20px', accentColor: 'var(--primary)' }}
+                        />
+                        <span>
+                            Run in Background (Keep Alive)
+                        </span>
+                    </label>
+                    <p className={styles.description}>
+                        Plays a silent audio loop to keep the app running when screen is off.
+                        <br />
+                        <b>Warning:</b> This may stop music playback if you are listening on the <b>same device</b> (due to Audio Focus). Recommended only when controlling a separate device (PC, Alexa, etc).
+                        <br />
+                        <span style={{ fontSize: '0.9em', color: '#999' }}>
+                            画面消灯時もアプリを動作させ続けるため、無音の音声をループ再生します。<br />
+                            <b>注意:</b> <b>同じ端末</b>で音楽を聴いている場合、再生が止まることがあります (オーディオ権限の競合)。PCやスマートスピーカーを操作する場合にのみ推奨します。
+                        </span>
                     </p>
                 </div>
             </div>

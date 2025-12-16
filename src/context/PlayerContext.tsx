@@ -28,6 +28,7 @@ interface PlayerContextType {
     logs: string[];
     error: string | null;
     clearError: () => void;
+    startBackgroundKeepAlive: () => void;
 }
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
@@ -49,6 +50,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const djRef = useRef<DJCore | null>(null);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
+    const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
 
     // Helper to sync UI with DJ Core state
     const syncUIState = React.useCallback(async () => {
@@ -240,18 +242,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     // Handlers
     const handleNext = async () => {
+        startBackgroundKeepAlive();
         if (djRef.current) {
             await djRef.current.next();
             setTimeout(syncUIState, 500); // Trigger immediate refresh after small delay
         }
     };
     const handlePrev = async () => {
+        startBackgroundKeepAlive();
         if (djRef.current) {
             await djRef.current.previous();
             setTimeout(syncUIState, 500);
         }
     };
     const handleTogglePlay = async () => {
+        startBackgroundKeepAlive();
         if (djRef.current) {
             if (isPlaying) await djRef.current.pause();
             else await djRef.current.resume();
@@ -286,6 +291,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
     };
 
+    const startBackgroundKeepAlive = () => {
+        // Check user setting
+        if (localStorage.getItem('background_keep_alive') !== 'true') return;
+
+        if (!backgroundAudioRef.current) {
+            // 1-second silent MP3
+            const SILENT_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAAtAAADgAAAB5WFb4AAABAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMAAA//uQZAAAAAAA0gAAAAABBQAA0gAAAAEAABAAAAAAAABAAAAAAAAAAAAAAP/7kGQAAAAAADSAAAAAAAEAAADSAAAAAQAAEAAAAAAAQAAAAAAAAAAAAAA//uQZAAAAAAA0gAAAAAAAQAAANIAAAABAAAQAAAAAAAQAAAAAAAAAAAAAAD/+5BkAAAAAADSAAAAAAABAAAA0gAAAAEAABAAAAAAAEAAAAAAAAAAAAAAA//uQZAAAAAAA0gAAAAAAAQAAANIAAAABAAAQAAAAAAAQAAAAAAAAAAAAAAA==';
+            const audio = new Audio(SILENT_MP3);
+            audio.loop = true;
+            audio.volume = 0.01; // Almost silent, but technically playing
+            backgroundAudioRef.current = audio;
+        }
+
+        backgroundAudioRef.current.play().catch(e => {
+            console.warn("Background audio auto-play blocked. User interaction required.", e);
+        });
+        console.log("🔊 Background Keep-Alive Audio Started");
+    };
+
     return (
         <PlayerContext.Provider value={{
             djCore: djRef.current,
@@ -309,7 +333,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             needsOnboarding,
             logs: djLogs,
             error,
-            clearError: () => setError(null)
+            clearError: () => setError(null),
+            startBackgroundKeepAlive
         }}>
             {children}
         </PlayerContext.Provider>

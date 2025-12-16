@@ -27,6 +27,7 @@ export default function Home() {
     logs,
     error,
     clearError,
+    startBackgroundKeepAlive,
   } = usePlayer();
 
   const [inputText, setInputText] = useState('');
@@ -110,6 +111,9 @@ export default function Home() {
 
   const handleSend = async () => {
     if (!inputText.trim() || !djCore) return;
+
+    // Activate background mode (keep alive)
+    startBackgroundKeepAlive();
 
     // Save to history
     const newHistory = [inputText, ...history.filter(h => h !== inputText)].slice(0, 50);
