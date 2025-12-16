@@ -136,10 +136,12 @@ export class DJCore {
                         const extractedTracks = plTracksRes.items
                             .map(item => {
                                 const t = item.track as Track;
-                                if (t) t.contextName = `Playlist: ${bestPlaylist.name}`;
+                                // Filter out episodes or local files
+                                if (!t || t.type !== 'track' || !t.id) return null;
+                                t.contextName = `Playlist: ${bestPlaylist.name}`;
                                 return t;
                             })
-                            .filter(t => t && t.id);
+                            .filter((t): t is Track => t !== null);
 
 
                         this.addLog(`📜 Scanned Playlist: "${bestPlaylist.name}" (${extractedTracks.length} tracks)`);

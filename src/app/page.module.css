@@ -184,7 +184,7 @@
 /* AI Status Chips */
 .aiStatus {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   margin-bottom: 24px;
 }

@@ -432,9 +432,34 @@ export default function Home() {
                   <span style={{ color: 'var(--primary)', fontSize: '0.85rem', fontWeight: 'bold', display: 'flex', alignItems: 'center' }}>
                     <Bot size={16} style={{ marginRight: '6px' }} /> AI Strategy:
                   </span>
-                  {currentQuery.split('|').map((tag, i) => (
-                    <span key={i} className={styles.aiTag}>{tag.trim()}</span>
-                  ))}
+                  <div>
+                    {/* DJ Thought (Comment) */}
+                    {(() => {
+                      const activeItem = schedule.find(item => item.queries ? item.queries.join('|') === currentQuery : item.query === currentQuery);
+                      if (activeItem?.thought) {
+                        return (
+                          <div style={{
+                            marginBottom: '8px',
+                            padding: '8px 12px',
+                            background: 'rgba(255, 255, 255, 0.08)',
+                            borderRadius: '6px',
+                            fontSize: '0.9rem',
+                            fontStyle: 'italic',
+                            color: '#e0e0e0',
+                            borderLeft: '3px solid var(--primary)'
+                          }}>
+                            "{activeItem.thought}"
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+
+                    {/* Tags */}
+                    {currentQuery.split('|').map((tag, i) => (
+                      <span key={i} className={styles.aiTag}>{tag.trim()}</span>
+                    ))}
+                  </div>
                 </div>
               )}
 

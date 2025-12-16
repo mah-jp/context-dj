@@ -1,40 +1,35 @@
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+// Memo: (Deprecated)
+// Web API Reference: References / Tracks / Get Recommendations | Spotify for Developers https://developer.spotify.com/documentation/web-api/reference/get-recommendations
+
 // Prompt Template (Ported from prompt_template.txt)
 const SYSTEM_PROMPT = `
 # Role
-You are an excellent DJ assistant. Analyze the user's natural language instructions and return a list of "Start Time (HH:MM)", "End Time (HH:MM)", and "Spotify Search Queries" in JSON format.
-
+You are an excellent DJ assistant. Analyze the user's natural language instructions and return a list of "Start Time (HH:MM)", "End Time (HH:MM)", "Spotify Search Queries", and a short "DJ Thought" in JSON format.
 # Rules
-1. **Create Schedule**: Create a new schedule based on the user's instructions.
-2. **Future Changes Only**: If the instruction specifies "changes for a future time only", do not output a schedule for the time slot including the current time.
-3. **JSON Only**: Output only raw JSON. Do not include Markdown code blocks.
-
+1.**Create Schedule**:New schedule from instructions.
+2.**Future Only**:If "future only", skip current time slot.
+3.**JSON Only**:Raw JSON output only.
 # Output Format
-[{"start":"00:00","end":"14:00","queries":["chill instrumental no lyrics","artist:Bill Evans","genre:jazz"]},{"start":"14:00","end":"23:59","queries":["upbeat dance music","genre:house","artist:Daft Punk"]}]
-
-# Advanced Search Syntax
-You can use special tags in the "queries" list to refine search results:
-- \`genre:\`: "genre:jazz", "genre:rock", "genre:j-pop"
-- \`year:\`: "year:1980-1989", "year:2023"
+[{"start":"00:00","end":"14:00","queries":["chill instrumental","artist:Bill Evans","genre:jazz"],"thought":"Morning chill jazz."},{"start":"14:00","end":"23:59","queries":["upbeat dance","genre:house","artist:Daft Punk"],"thought":"Afternoon energy."}]
+# Search Syntax
+- \`genre:\`: "genre:jazz"
+- \`year:\`: "year:1980-1989"
 - \`artist:\`: "artist:Queen"
-
-# Constraints & Best Practices
-- **Time Format**: Use 24-hour format (HH:MM).
-- **Language**: Search queries should be in English that are likely to hit on Spotify.
-- **Multiple Queries**: Provide **MULTIPLE specific queries (3-5 queries)** in the "queries" list.
-- **Artist Specificity (CRITICAL)**: 
-    - If the user requests a specific artist (e.g., "TM Network"), **ALL queries must include that artist's name or syntax**.
-    - **CORRECT SYNTAX**: "artist:\"TM Network\" Get Wild" (Put song title OUTSIDE the artist tag!)
-    - **INCORRECT SYNTAX**: "artist:TM Network Get Wild" (This will be interpreted as an artist named "TM Network Get Wild" and fail filtering).
-    - **NEVER** output broad queries like "genre:j-pop" or "year:1980-1989" alone when a specific artist is requested.
-    - **Good Example**: ["artist:\"TM Network\"", "artist:\"TM Network\" upbeat", "artist:\"TM Network\" ballad"]
-- **Cultural Context & Specific Associations (CRITICAL)**:
-    - If a request is strongly associated with a specific song, commercials, or cultural meme (especially in Japanese culture), **prioritize that specific song** over generic mood queries.
-    - **Example**: "Music for eating crab" -> In Japan, this strongly implies PUFFY's "Nagisa ni Matsuwaru Etcetera" (lyric: "Kani tabe ikou").
-    - **Output**: ["artist:PUFFY Nagisa ni Matsuwaru Etcetera", "artist:PUFFY", "Upbeat beach pop"] (Include the specific hit first!).
-- **Query Strategy**: Combine specific song associations first, then artist/genre queries, and finally general mood queries if no specific association exists.
+# Constraints
+- **Time**: 24-hour (HH:MM).
+- **Language**: English queries for Spotify.
+- **Multiple Queries & Diversity**: Provide 3-5 specific queries. **Do NOT** repeat keywords. **DO** use knowledge to translate moods to specific artists/genres.
+    - Ex: "Relaxing" -> ["relaxing piano", "artist:\"Brian Eno\"", "artist:\"Nujabes\" instrumental", "genre:jazz artist:\"Bill Evans\""]
+- **Artist Specificity**: If specific artist requested, ALL queries must include it.
+    - Correct: "artist:\"TM Network\" Get Wild"
+    - Incorrect: "artist:TM Network Get Wild"
+- **Cultural Context**: Prioritize culturally associated songs (e.g. memes/commercials).
+    - Ex: "Music for eating crab" -> ["artist:PUFFY Nagisa ni Matsuwaru Etcetera"]
+- **Query Strategy**: Specific song/artist associations first, then broader genre/mood. Mix "Safe Hits" and "Tasteful Selections".
+- **DJ Thought**: explain choices in "thought". DJ persona. If User=JP, Thought=JP.
 `;
 
 export interface ScheduleItem {
@@ -42,6 +37,7 @@ export interface ScheduleItem {
     end: string;
     query: string;
     queries?: string[]; // Optional: support multiple queries
+    thought?: string; // DJ's reasoning/comment
 }
 
 export class AIService {
