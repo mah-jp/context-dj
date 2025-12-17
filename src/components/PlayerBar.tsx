@@ -148,21 +148,21 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
             {/* Center: Controls */}
             <div className={styles.playerControls}>
                 <div className={styles.controlButtons}>
-                    <button className={styles.controlBtn} onClick={handlePrev} title="Previous">
+                    <button className={styles.controlBtn} onClick={handlePrev} title="Previous" aria-label="Previous Track">
                         <SkipBack size={20} fill="currentColor" />
                     </button>
 
                     {!authorized && status === 'connect_needed' ? (
-                        <button className={styles.controlBtn} onClick={onLogin} style={{ fontSize: '0.8rem', border: '1px solid #fff', borderRadius: '20px', padding: '4px 12px' }}>
+                        <button className={styles.controlBtn} onClick={onLogin} aria-label="Login to Spotify" style={{ fontSize: '0.8rem', border: '1px solid #fff', borderRadius: '20px', padding: '4px 12px' }}>
                             Log in to Spotify
                         </button>
                     ) : (
-                        <button className={`${styles.controlBtn} ${styles.playPauseBtn}`} onClick={handleTogglePlay} disabled={!authorized}>
+                        <button className={`${styles.controlBtn} ${styles.playPauseBtn}`} onClick={handleTogglePlay} disabled={!authorized} aria-label={isPlaying ? 'Pause' : 'Play'}>
                             {isPlaying ? <Pause size={20} fill="black" /> : <Play size={20} fill="black" style={{ marginLeft: '2px' }} />}
                         </button>
                     )}
 
-                    <button className={styles.controlBtn} onClick={handleNext} title="Next">
+                    <button className={styles.controlBtn} onClick={handleNext} title="Next" aria-label="Next Track">
                         <SkipForward size={20} fill="currentColor" />
                     </button>
                 </div>
@@ -176,6 +176,7 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                         className={styles.deviceLabel}
                         onClick={handleShare}
                         title="Share Context"
+                        aria-label="Share Context"
                         style={{ marginRight: '16px', cursor: 'pointer' }}
                     >
                         <Share2 size={16} />
@@ -191,6 +192,7 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                             if (!showDevices) refreshDevices();
                         }}
                         title="Switch Device"
+                        aria-label="Switch Device"
                     >
                         <MonitorSpeaker size={16} />
                         <span>{deviceName || "No Device"}</span>

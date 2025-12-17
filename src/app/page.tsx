@@ -228,7 +228,7 @@ export default function Home() {
   };
 
   return (
-    <div className={styles.main}>
+    <main className={styles.main}>
       {/* 1. Header & Search Bar */}
       <header className={styles.headerContainer}>
         <div className={styles.titleWrapper}>
@@ -525,6 +525,6 @@ export default function Home() {
         showPopularity={showPopularity}
         onLogin={handleLogin}
       />
-    </div>
+    </main>
   );
 }
