@@ -10,6 +10,7 @@ import { usePlayer } from '../context/PlayerContext';
 import Onboarding from '../components/Onboarding';
 import PlayerBar from '../components/PlayerBar';
 import ProcessLogViewer from '../components/ProcessLogViewer';
+import { STORAGE_KEYS } from '../lib/constants';
 
 export default function Home() {
   const {
@@ -71,20 +72,20 @@ export default function Home() {
   useEffect(() => {
     // Check local storage for setup completeness
     if (typeof window !== 'undefined') {
-      const clientId = localStorage.getItem('spotify_client_id');
-      const provider = localStorage.getItem('selected_ai_provider') || 'openai';
+      const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+      const provider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) || 'openai';
       let hasKey = false;
       if (provider === 'gemini') {
-        hasKey = !!localStorage.getItem('gemini_api_key');
+        hasKey = !!localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY);
       } else {
-        hasKey = !!localStorage.getItem('openai_api_key');
+        hasKey = !!localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY);
       }
       setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
     }
   }, [needsOnboarding]);
 
   const handleLogin = () => {
-    const clientId = localStorage.getItem('spotify_client_id');
+    const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
     if (clientId) {
       SpotifyAuth.login(clientId);
     } else {
@@ -94,7 +95,7 @@ export default function Home() {
 
   // Load history on mount
   useEffect(() => {
-    const saved = localStorage.getItem('prompt_history');
+    const saved = localStorage.getItem(STORAGE_KEYS.PROMPT_HISTORY);
     if (saved) {
       try {
         setHistory(JSON.parse(saved));
@@ -118,12 +119,12 @@ export default function Home() {
     // Save to history
     const newHistory = [inputText, ...history.filter(h => h !== inputText)].slice(0, 50);
     setHistory(newHistory);
-    localStorage.setItem('prompt_history', JSON.stringify(newHistory));
+    localStorage.setItem(STORAGE_KEYS.PROMPT_HISTORY, JSON.stringify(newHistory));
     setHistoryIndex(-1);
 
     setStatus('🤖 AI is thinking... (AIが考え中...)');
     try {
-      const personalPref = localStorage.getItem('personal_preference') || '';
+      const personalPref = localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE) || '';
       const schedule = await djCore.createSchedule(inputText, personalPref);
 
       if (!schedule || schedule.length === 0) {
@@ -131,7 +132,7 @@ export default function Home() {
         setStatus('⚠️ No schedule created. (作成失敗)');
       } else {
         setSchedule(schedule);
-        localStorage.setItem('dj_schedule', JSON.stringify(schedule));
+        localStorage.setItem(STORAGE_KEYS.DJ_SCHEDULE, JSON.stringify(schedule));
         // Clear status to avoid persistent message, rely on Toast for success
         setStatus('Ready');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
@@ -194,7 +195,7 @@ export default function Home() {
 
     const recognition = new SpeechRecognition();
     // Default to 'ja-JP' but verify settings
-    const savedLang = typeof window !== 'undefined' ? localStorage.getItem('voice_input_lang') : null;
+    const savedLang = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) : null;
     recognition.lang = savedLang || navigator.language || 'ja-JP';
     recognition.interimResults = true;
     recognition.continuous = false; // Stop after one sentence/pause

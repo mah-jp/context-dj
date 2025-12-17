@@ -1,5 +1,6 @@
 import SpotifyWebApi from 'spotify-web-api-js';
 import { AIService, ScheduleItem } from './ai';
+import { STORAGE_KEYS } from './constants';
 
 export interface Track extends SpotifyApi.TrackObjectFull {
     contextName?: string;
@@ -24,7 +25,7 @@ export class DJCore {
 
         // Restore state
         if (typeof window !== 'undefined') {
-            this.lastQuery = localStorage.getItem('dj_last_query');
+            this.lastQuery = localStorage.getItem(STORAGE_KEYS.DJ_LAST_QUERY);
         }
     }
 
@@ -186,39 +187,31 @@ export class DJCore {
     private applyTrackFilters(tracks: Track[], targetArtists: string[]): Track[] {
         let candidates = tracks;
 
-        // Strict Artist Filtering
-        if (targetArtists.length > 0) {
-            const strictFiltered = tracks.filter(track => {
-                return track.artists.some(a => {
-                    const artistName = a.name.toLowerCase();
-                    return targetArtists.some(target => target.includes(artistName) || artistName.includes(target));
-                });
-            });
+        // Note: We removed Strict Artist Filtering because it was too aggressive for mixed queries.
+        // (e.g. "80s hits" + "Queen" -> previously filtered OUT all non-Queen 80s hits)
+        // Now we trust the search queries to bring relevant results.
 
-            const survivalRate = strictFiltered.length / tracks.length;
-            const isTooAggressive = survivalRate < 0.2 && strictFiltered.length < 5;
+        // Popularity Filtering (Adaptive)
+        const PREFERRED_POPULARITY = 15;
+        const MIN_POPULARITY = 5;
 
-            if (strictFiltered.length > 0 && !isTooAggressive) {
-                this.addLog(`✂️ Filter: Artist Match (${tracks.length} -> ${strictFiltered.length})`);
-                this.logTrackSamples(strictFiltered);
-                candidates = strictFiltered;
-            } else {
-                this.addLog(`⚠️ Filter: Artist Match too strict or 0 hits. Using all tracks.`);
-            }
+        // 1. Try Preferred Filter
+        let filteredTracks = candidates.filter(t => (t.popularity || 0) >= PREFERRED_POPULARITY);
+
+        if (filteredTracks.length < 5 && candidates.length >= 5) {
+            this.addLog(`⚠️ Popularity >= ${PREFERRED_POPULARITY} too strict (${filteredTracks.length} tracks). Relaxing to >= ${MIN_POPULARITY}...`);
+            // 2. Try Relaxed Filter
+            filteredTracks = candidates.filter(t => (t.popularity || 0) >= MIN_POPULARITY);
         }
 
-        // Popularity Filtering
-        const SERENDIPITY_THRESHOLD = 15;
-        let filteredTracks = candidates.filter(t => (t.popularity || 0) >= SERENDIPITY_THRESHOLD);
-
-        this.addLog(`🔍 Filter: Popularity >= ${SERENDIPITY_THRESHOLD} (${filteredTracks.length} / ${candidates.length})`);
-        this.logTrackSamples(filteredTracks);
+        this.addLog(`🔍 Filter: Popularity Check (${filteredTracks.length} / ${candidates.length} kept)`);
 
         if (filteredTracks.length === 0) {
-            this.addLog('⚠️ Filter: No popular tracks. Relaxing filter to allow any.');
-            filteredTracks = candidates;
+            this.addLog('⚠️ No tracks matched popularity criteria. Using all candidates.');
+            return candidates;
         }
 
+        this.logTrackSamples(filteredTracks);
         return filteredTracks;
     }
 
@@ -486,7 +479,7 @@ export class DJCore {
             console.log(`🎧 DJ Change: ${querySignature} `);
             this.lastQuery = querySignature;
             if (typeof window !== 'undefined') {
-                localStorage.setItem('dj_last_query', querySignature);
+                localStorage.setItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
             }
 
             let tracks: Track[] = [];
@@ -509,7 +502,7 @@ export class DJCore {
                 // Revert state so the next loop tick will see this as a 'new' request and try again
                 this.lastQuery = null;
                 if (typeof window !== 'undefined') {
-                    localStorage.removeItem('dj_last_query');
+                    localStorage.removeItem(STORAGE_KEYS.DJ_LAST_QUERY);
                 }
                 throw e; // Propagate error so handleSend can show toast, or loop can log it
             }
@@ -524,7 +517,9 @@ export class DJCore {
             // @ts-ignore
             const response = await this.spotify.getGeneric('https://api.spotify.com/v1/me/player/queue');
             // @ts-ignore
-            return response.queue || [];
+            const queueItems = response.queue || [];
+            // Filter out non-track items (episodes) to prevent UI crashes
+            return queueItems.filter((item: any) => item.type === 'track') as Track[];
         } catch (e) {
             console.warn('Failed to fetch queue:', e);
             return [];

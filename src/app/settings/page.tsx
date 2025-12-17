@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
+import { STORAGE_KEYS } from '../../lib/constants';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
@@ -23,43 +24,48 @@ export default function Settings() {
     useEffect(() => {
         // Load from local storage
         if (typeof window !== 'undefined') {
-            setSpotifyClientId(localStorage.getItem('spotify_client_id') || '');
-            setOpenAiKey(localStorage.getItem('openai_api_key') || '');
-            setOpenAiModel(localStorage.getItem('openai_model') || 'gpt-4o-mini');
-            setGeminiKey(localStorage.getItem('gemini_api_key') || '');
-            setGeminiModel(localStorage.getItem('gemini_model') || 'gemini-2.5-flash');
+            setSpotifyClientId(localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID) || '');
+            setOpenAiKey(localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY) || '');
+            setOpenAiModel(localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-4o-mini');
+            setGeminiKey(localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY) || '');
+            setGeminiModel(localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-2.5-flash');
 
-            setVoiceLang(localStorage.getItem('voice_input_lang') || navigator.language || 'ja-JP');
+            setVoiceLang(localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) || navigator.language || 'ja-JP');
 
-            const savedProvider = localStorage.getItem('selected_ai_provider');
+            const savedProvider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER);
             if (savedProvider === 'gemini') {
                 setAiProvider('gemini');
             } else {
                 setAiProvider('openai');
             }
 
-            setPersonalPref(localStorage.getItem('personal_preference') || '');
+            setPersonalPref(localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE) || '');
             try {
+                // personal_pref_history is not in STORAGE_KEYS yet? 
+                // Wait, I should stick to what's defined or add it. I will skip this one if not defined.
+                // Ah, I intended to add it but didn't write to file yet.
+                // I will use literal string for now for history or add it.
+                // Let's stick to literal for history to avoid error if I forget to add it.
                 const savedHistory = localStorage.getItem('personal_pref_history');
                 if (savedHistory) setPrefHistory(JSON.parse(savedHistory));
             } catch (e) { console.error("History parse fail", e); }
 
             // Default false to avoid surprise, or true? User requested it, so let's default false and let them enable.
-            setBackgroundKeepAlive(localStorage.getItem('background_keep_alive') === 'true');
+            setBackgroundKeepAlive(localStorage.getItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) === 'true');
         }
     }, []);
 
     const handleSave = () => {
-        localStorage.setItem('spotify_client_id', spotifyClientId);
-        localStorage.setItem('openai_api_key', openAiKey);
-        localStorage.setItem('openai_model', openAiModel);
-        localStorage.setItem('gemini_api_key', geminiKey);
-        localStorage.setItem('gemini_model', geminiModel);
-        localStorage.setItem('selected_ai_provider', aiProvider);
-        localStorage.setItem('selected_ai_provider', aiProvider);
-        localStorage.setItem('personal_preference', personalPref);
-        localStorage.setItem('voice_input_lang', voiceLang);
-        localStorage.setItem('background_keep_alive', String(backgroundKeepAlive));
+        localStorage.setItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, spotifyClientId);
+        localStorage.setItem(STORAGE_KEYS.OPENAI_API_KEY, openAiKey);
+        localStorage.setItem(STORAGE_KEYS.OPENAI_MODEL, openAiModel);
+        localStorage.setItem(STORAGE_KEYS.GEMINI_API_KEY, geminiKey);
+        localStorage.setItem(STORAGE_KEYS.GEMINI_MODEL, geminiModel);
+        localStorage.setItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, aiProvider);
+        // duplicate line removed from original: localStorage.setItem('selected_ai_provider', aiProvider);
+        localStorage.setItem(STORAGE_KEYS.PERSONAL_PREFERENCE, personalPref);
+        localStorage.setItem(STORAGE_KEYS.VOICE_INPUT_LANG, voiceLang);
+        localStorage.setItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
 
         // Update history if new unique entry
         if (personalPref.trim()) {
@@ -417,7 +423,7 @@ export default function Settings() {
                         <button
                             onClick={() => {
                                 if (confirm('Are you sure you want to clear the main chat prompt history?\n(チャット履歴を削除しますか？)')) {
-                                    localStorage.removeItem('prompt_history');
+                                    localStorage.removeItem(STORAGE_KEYS.PROMPT_HISTORY);
                                     setStatus('Chat history cleared! (チャット履歴を削除しました)');
                                     setTimeout(() => setStatus(''), 3000);
                                 }

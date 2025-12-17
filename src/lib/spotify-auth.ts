@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { STORAGE_KEYS } from '../lib/constants';
 
 const SPOTIFY_AUTH_URL = 'https://accounts.spotify.com/authorize';
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
@@ -63,7 +64,7 @@ export class SpotifyAuth {
         ].join(' ');
 
         // Store verifier and state locally to verify later
-        localStorage.setItem('spotify_code_verifier', codeVerifier);
+        localStorage.setItem(STORAGE_KEYS.SPOTIFY_VERIFIER, codeVerifier);
         localStorage.setItem('spotify_auth_state', state);
 
         const args = new URLSearchParams({
@@ -81,7 +82,7 @@ export class SpotifyAuth {
 
     // Handle Callback from Spotify
     static async handleCallback(clientId: string, code: string): Promise<string | null> {
-        const codeVerifier = localStorage.getItem('spotify_code_verifier');
+        const codeVerifier = localStorage.getItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
         const redirectUri = this.getRedirectUri();
 
         if (!codeVerifier) {
@@ -118,7 +119,7 @@ export class SpotifyAuth {
 
     // Refresh Token
     static async refreshToken(clientId: string): Promise<string | null> {
-        const refreshToken = localStorage.getItem('spotify_refresh_token');
+        const refreshToken = localStorage.getItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN);
         if (!refreshToken) return null;
 
         try {
@@ -147,22 +148,22 @@ export class SpotifyAuth {
 
     private static setSession(data: any) {
         const expiresAt = Date.now() + data.expires_in * 1000;
-        localStorage.setItem('spotify_access_token', data.access_token);
-        localStorage.setItem('spotify_expires_at', expiresAt.toString());
+        localStorage.setItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN, data.access_token);
+        localStorage.setItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT, expiresAt.toString());
         if (data.refresh_token) {
-            localStorage.setItem('spotify_refresh_token', data.refresh_token);
+            localStorage.setItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, data.refresh_token);
         }
     }
 
     static getAccessToken() {
         if (typeof window === 'undefined') return null;
-        return localStorage.getItem('spotify_access_token');
+        return localStorage.getItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN);
     }
 
     static isAuthenticated() {
         if (typeof window === 'undefined') return false;
-        const token = localStorage.getItem('spotify_access_token');
-        const expiresAt = localStorage.getItem('spotify_expires_at');
+        const token = localStorage.getItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN);
+        const expiresAt = localStorage.getItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
 
         if (!token || !expiresAt) return false;
 
@@ -171,10 +172,10 @@ export class SpotifyAuth {
 
     static logout() {
         if (typeof window === 'undefined') return;
-        localStorage.removeItem('spotify_access_token');
-        localStorage.removeItem('spotify_expires_at');
-        localStorage.removeItem('spotify_refresh_token');
-        localStorage.removeItem('spotify_code_verifier');
+        localStorage.removeItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN);
+        localStorage.removeItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
+        localStorage.removeItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN);
+        localStorage.removeItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
         localStorage.removeItem('spotify_auth_state');
     }
 }

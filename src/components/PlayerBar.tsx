@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { usePlayer } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
-import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Flame } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Flame, Share2 } from 'lucide-react';
 
 interface PlayerBarProps {
     showPopularity: boolean;
@@ -20,12 +20,54 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
         setDevice,
         handlePrev,
         handleNext,
-        handleTogglePlay
+        handleTogglePlay,
+        currentQuery
     } = usePlayer();
 
     // Local UI state
     const [showCover, setShowCover] = useState(false);
     const [showDevices, setShowDevices] = useState(false);
+
+    const handleShare = async () => {
+        if (!currentTrack) return;
+
+        const artistName = (currentTrack.artists || []).map(a => a.name).join(', ') || 'Unknown Artist';
+
+        let rawContext = (currentQuery || 'Freestyle').replace(/\s+/g, ' ').trim();
+        // Truncate context to fit within X (Twitter) character limit (approx 140 Japanese chars)
+        // Cap context at 80 characters to leave room for track info and URL.
+        if (rawContext.length > 80) {
+            rawContext = rawContext.substring(0, 80) + '...';
+        }
+        const contextText = currentQuery ? `"${rawContext}"` : 'Freestyle';
+
+        // Optimize whitespace: replace 2+ spaces with 1, trim
+        const shareText = `🎵 ${currentTrack.name} / ${artistName}\n🧠 Context: ${contextText}\n#ContextDJ`
+            .replace(/ +/g, ' ')
+            .trim();
+        const shareUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://contextdj.remoteroom.jp';
+
+        // Check if mobile to decide sharing method
+        // On Desktop (macOS/Windows), native share menu is often less useful or hides 'Copy'.
+        // We prefer direct X (Twitter) intent on Desktop for better UX.
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        if (isMobile && navigator.share) {
+            try {
+                await navigator.share({
+                    title: 'ContextDJ',
+                    text: shareText,
+                    url: shareUrl,
+                });
+            } catch (err) {
+                console.warn('Share failed:', err);
+            }
+        } else {
+            // Desktop or non-supported browsers: Open X (Twitter) Intent directly
+            const textParam = encodeURIComponent(`${shareText}\n${shareUrl}`);
+            window.open(`https://x.com/intent/post?text=${textParam}`, '_blank');
+        }
+    };
 
     return (
         <div className={styles.bottomPlayer}>
@@ -78,8 +120,8 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                                 )}
                             </div>
                             <div className={styles.nowPlayingArtist}>
-                                <a href={currentTrack.artists[0]?.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} className={styles.hoverUnderline}>
-                                    {currentTrack.artists.map(a => a.name).join(', ')}
+                                <a href={currentTrack.artists?.[0]?.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} className={styles.hoverUnderline}>
+                                    {(currentTrack.artists || []).map(a => a.name).join(', ')}
                                 </a>
                             </div>
                             {currentTrack.contextName && (
@@ -128,6 +170,19 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
 
             {/* Right: Extra Controls */}
             <div className={styles.extraControls}>
+                {/* Share Button */}
+                {currentTrack && (
+                    <button
+                        className={styles.deviceLabel}
+                        onClick={handleShare}
+                        title="Share Context"
+                        style={{ marginRight: '16px', cursor: 'pointer' }}
+                    >
+                        <Share2 size={16} />
+                        <span>Share</span>
+                    </button>
+                )}
+
                 <div style={{ position: 'relative' }}>
                     <button
                         className={styles.deviceLabel}
