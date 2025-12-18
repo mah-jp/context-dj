@@ -2,6 +2,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { CheckCircle, XCircle } from 'lucide-react';
 import styles from '../app/page.module.css';
+import { PRIVACY_NOTICE } from '../lib/constants';
 
 interface OnboardingProps {
     setupStatus: { hasClientId: boolean; hasAiKey: boolean };
@@ -34,6 +35,16 @@ export default function Onboarding({ setupStatus, authorized, onLogin }: Onboard
                         (ContextDJは、あなたのための<b>AI音楽キュレーター</b>です。今の気分や状況を伝えるだけで、その瞬間に最適な音楽を選曲してくれます。)
                     </span>
                 </p>
+
+                {/* Privacy Notice */}
+                <div style={{ padding: '12px', background: 'rgba(3, 218, 198, 0.1)', borderLeft: '4px solid #03dac6', marginBottom: '24px', borderRadius: '4px', maxWidth: '500px', width: '100%' }}>
+                    <p style={{ margin: 0, fontSize: '0.85rem', color: '#eee', lineHeight: '1.4' }}>
+                        🔒 <b>Privacy Notice (プライバシー通知):</b><br />
+                        <span dangerouslySetInnerHTML={{ __html: PRIVACY_NOTICE.EN.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+                        <br /><br />
+                        <span dangerouslySetInnerHTML={{ __html: PRIVACY_NOTICE.JP.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+                    </p>
+                </div>
 
                 <div style={{
                     background: '#181818',

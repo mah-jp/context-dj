@@ -21,3 +21,8 @@ export const STORAGE_KEYS = {
     VOICE_INPUT_LANG: 'voice_input_lang',
     BACKGROUND_KEEP_ALIVE: 'background_keep_alive',
 } as const;
+
+export const PRIVACY_NOTICE = {
+    EN: "All Secure Information (API Keys, etc.) is stored **locally in your browser**. We do NOT send this information to any external server other than the respective AI providers (OpenAI/Google) for the sole purpose of generating responses.",
+    JP: "安全に関わる情報 (APIキーなど) は、すべて**ご利用のブラウザ内にローカル保存**されます。応答生成の目的以外で、各AIプロバイダー (OpenAI/Google) 以外の外部サーバーに情報を送信することは一切ありません。"
+};

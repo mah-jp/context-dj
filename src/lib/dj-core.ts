@@ -52,21 +52,40 @@ export class DJCore {
     // --- Utilities ---
 
     private normalizeTrackName(name: string): string {
-        // Remove text within parentheses
+        // Remove text within parentheses (e.g. "Song (Remaster)")
         name = name.replace(/\(.*?\)/g, '');
-        // Remove text after hyphen
-        name = name.replace(/\s-\s.*/g, '');
+        // Remove text after hyphen if it looks like metadata (e.g. "Song - Remastered 2009")
+        // But be careful not to kill "Title - Subtitle" if it's part of the song
+        // The previous logic was: name.replace(/\s-\s.*remaster.*/, '') in dedupe
+        // The old helper was: name.replace(/\s-\s.*/g, '') -> this is too aggressive!
+        // Let's adopt the stricter logic from dedupe but centralized here.
+        name = name.replace(/\s-\s.*remaster.*/i, '');
+
         return name.trim().toLowerCase();
     }
 
     // --- Search & Filtering ---
 
-    async searchTracks(queriesInput: string | string[]): Promise<Track[]> {
-        this.processLog = []; // Clear log on new search
-        this.addLog("▶️ New DJ Request Started");
-
+    async searchTracks(queriesInput: string | string[], priorityQuery?: string): Promise<Track[]> {
         const queries = Array.isArray(queriesInput) ? queriesInput : [queriesInput];
-        this.addLog(`🔍 Searching for: ${queries.join(', ')}`);
+
+        // 0. Resolve Priority Track
+        let priorityTracks: Track[] = [];
+        if (priorityQuery) {
+            this.addLog(`🌟 Priority Search: ${priorityQuery}`);
+            try {
+                const pRes = await this.spotify.searchTracks(priorityQuery, { limit: 1 });
+                if (pRes.tracks && pRes.tracks.items.length > 0) {
+                    priorityTracks = pRes.tracks.items;
+                    this.addLog(`✅ Found Priority Track: ${priorityTracks[0].name} (${priorityTracks[0].artists[0].name})`);
+                } else {
+                    this.addLog(`⚠️ Priority Search returned 0 results for: ${priorityQuery}`);
+                }
+            } catch (e) {
+                console.warn("Priority search failed:", e);
+                this.addLog(`⚠️ Priority Search Error`);
+            }
+        }
 
         // 1. Parse target artists for strict filtering
         const targetArtists = this.extractTargetArtists(queries);
@@ -75,7 +94,7 @@ export class DJCore {
         // 2. Execute Parallel Search
         let allRawTracks = await this.executeParallelSearch(queries);
 
-        if (allRawTracks.length === 0) {
+        if (allRawTracks.length === 0 && priorityTracks.length === 0) {
             this.addLog("❌ No tracks found from Spotify Search");
             return [];
         }
@@ -88,10 +107,16 @@ export class DJCore {
         const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
 
         // 5. Select Final Set (Shuffle & Pick)
-        // Send ALL filtered tracks to selection to ensure randomness (Serendipity)
-        const finalTracks = this.selectTopTracks(filteredTracks);
+        let finalTracks = this.selectTopTracks(filteredTracks);
 
-        this.addLog(`✅ Final Playlist: ${finalTracks.length} tracks selected`);
+        // 6. Merge Priority Track
+        if (priorityTracks.length > 0) {
+            const pUri = priorityTracks[0].uri;
+            finalTracks = finalTracks.filter(t => t.uri !== pUri);
+            finalTracks = [...priorityTracks, ...finalTracks];
+            this.addLog(`📌 Priority track applied at the top.`);
+        }
+
         return finalTracks;
     }
 
@@ -167,12 +192,8 @@ export class DJCore {
         const uniqueTracks: Track[] = [];
 
         for (const track of tracks) {
-            // "Track Name" + "Artist Name"
-            const cleanName = track.name.toLowerCase()
-                .replace(/\s-\s.*remaster.*/, '')
-                .replace(/\(.*\)/, '')
-                .trim();
-
+            // Use shared normalization
+            const cleanName = this.normalizeTrackName(track.name);
             const cleanArtist = track.artists[0]?.name.toLowerCase().trim() || '';
             const key = `${cleanName}|${cleanArtist}`;
 
@@ -321,6 +342,18 @@ export class DJCore {
             const token = this.spotify.getAccessToken();
             if (!token) throw new Error("No access token available");
 
+            // DISABLE SHUFFLE before playing to ensure priority track is first
+            // Note: This needs to be done on the active device.
+            try {
+                await fetch(`https://api.spotify.com/v1/me/player/shuffle?state=false&device_id=${deviceId}`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                console.log('🔀 Shuffle disabled');
+            } catch (e) {
+                console.warn('Disable shuffle failed:', e);
+            }
+
             const playUrl = `https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`;
             const playBody = JSON.stringify({ uris: uris });
 
@@ -363,6 +396,9 @@ export class DJCore {
         }
     }
 
+    private sessionPlayedUris = new Set<string>();
+    private isRefilling = false;
+
     async createSchedule(instruction: string, personalContext?: string) {
         if (!this.ai) throw new Error("AI not initialized (AIが初期化されていません)");
 
@@ -384,9 +420,7 @@ export class DJCore {
     }
 
     getItemForDate(date: Date): ScheduleItem | null {
-        // Use 'en-GB' for HH:mm:ss format (24h) which is easier to compare than 'en-US' sometimes,
-        // but let's stick to the existing format logic if it works, or standardise.
-        // The existing code used 'en-US' with hour12: false.
+        // Use 'en-US' with hour12: false for HH:mm comparisons
         const currentTime = date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
 
         for (const item of this.schedule) {
@@ -432,7 +466,8 @@ export class DJCore {
             // If we found a next item, and it is DIFFERENT from what we are playing now/last played
             if (nextItem) {
                 const queries = nextItem.queries?.length ? nextItem.queries : (nextItem.query ? [nextItem.query] : []);
-                const nextSignature = queries.join('|');
+                const priorityPart = nextItem.priorityTrack || '';
+                const nextSignature = queries.join('|') + (priorityPart ? '|' + priorityPart : '');
 
                 // If next signature differs from current ACTIVE signature AND we haven't preloaded it yet
                 if (nextSignature && nextSignature !== this.lastQuery &&
@@ -443,7 +478,7 @@ export class DJCore {
                         this.isPreloading = true;
 
                         // Perform search in background (async)
-                        this.searchTracks(queries).then(tracks => {
+                        this.searchTracks(queries, nextItem.priorityTrack).then(tracks => {
                             console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
                             this.preloadedResult = {
                                 signature: nextSignature,
@@ -472,7 +507,7 @@ export class DJCore {
         if (queriesToUse.length === 0) return;
 
         // Signature for change detection
-        const querySignature = queriesToUse.join('|');
+        const querySignature = queriesToUse.join('|') + (currentItem.priorityTrack ? `|${currentItem.priorityTrack}` : '');
 
         // Check if we need to change music
         if (querySignature !== this.lastQuery) {
@@ -481,6 +516,11 @@ export class DJCore {
             if (typeof window !== 'undefined') {
                 localStorage.setItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
             }
+
+            // New Session: Clear Log & History
+            this.processLog = [];
+            this.addLog("▶️ New DJ Request Started");
+            this.sessionPlayedUris.clear();
 
             let tracks: Track[] = [];
 
@@ -492,10 +532,13 @@ export class DJCore {
             } else {
                 // Normal search
                 console.log(`🔎 Performing immediate search for ${querySignature}`);
-                tracks = await this.searchTracks(queriesToUse);
+                tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack);
             }
 
             try {
+                // Register initial tracks to history
+                tracks.forEach(t => this.sessionPlayedUris.add(t.uri));
+
                 await this.playTracks(tracks);
             } catch (e) {
                 console.error("Playback failed, reverting DJ state to allow retry on next tick:", e);
@@ -506,7 +549,76 @@ export class DJCore {
                 }
                 throw e; // Propagate error so handleSend can show toast, or loop can log it
             }
+        } else {
+            // Same context: Check for Auto-Refill (Okawari)
+            await this.checkAndRefillQueue(queriesToUse, currentItem);
         }
+    }
+
+    // --- Auto-Refill Logic ---
+
+    private async checkAndRefillQueue(queries: string[], currentItem: ScheduleItem) {
+        if (this.isRefilling) return;
+
+        try {
+            // 1. Check Queue Depth
+            const queue = await this.getQueue();
+            // Threshold: If 2 or fewer tracks remaining (Current + Next 1)
+            // Note: getQueue usually returns [Next1, Next2...]. It doesn't include currently playing? 
+            // It depends on endpoint behavior. Let's assume queue.length is the 'upcoming' tracks.
+            // If length is small, we need more.
+            if (queue.length <= 2) {
+
+                // 2. Check Time Remaining (Simplified)
+                // Very simple check: If current time is NOT close to end (naive: > 5 mins?)
+                // Or simply: If we are still in the valid block, just refill. 
+                // The loop handles switching when block ends. So if we are in block, we want music.
+                // Refilling near end (e.g. 1 min left) might be wasteful but safe.
+
+                this.isRefilling = true;
+                this.addLog("🥣 Queue running low. Auto-Refill (Okawari) started...");
+
+                // 3. Search Again
+                const newTracks = await this.searchTracks(queries); // No priority track needed for refill usually
+
+                // 4. Filter duplicates (Played in this session OR currently in queue)
+                const queueUris = new Set(queue.map(t => t.uri));
+                const candidates = newTracks.filter(t =>
+                    !this.sessionPlayedUris.has(t.uri) &&
+                    !queueUris.has(t.uri)
+                );
+
+                // 5. Add to Queue
+                const REFILL_COUNT = 5;
+                const toAdd = candidates.slice(0, REFILL_COUNT);
+
+                if (toAdd.length > 0) {
+                    this.addLog(`🥣 Adding ${toAdd.length} fresh tracks to queue...`);
+
+                    // Add sequentially to preserve order
+                    for (const track of toAdd) {
+                        await this.addToQueue(track.uri);
+                        this.sessionPlayedUris.add(track.uri);
+                        // Brief delay to help Spotify digest order
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                    this.addLog(`✅ Refill complete.`);
+                } else {
+                    this.addLog(`⚠️ Refill found no new unique tracks.`);
+                    // Optional: If really out of tracks, maybe clear history to allow repeats?
+                    // For now, let it be.
+                }
+
+                this.isRefilling = false;
+            }
+        } catch (e) {
+            console.warn("Auto-refill failed:", e);
+            this.isRefilling = false;
+        }
+    }
+
+    private async addToQueue(uri: string) {
+        return this.safeControlRequest(`queue?uri=${encodeURIComponent(uri)}`, 'POST');
     }
 
     // --- Queue Management ---

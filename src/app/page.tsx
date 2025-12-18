@@ -354,7 +354,7 @@ export default function Home() {
             <span>My Schedule</span>
           </div>
           {schedule.length > 0 ? schedule.map((item, i) => {
-            const isActive = currentQuery && (item.queries ? item.queries.join('|') === currentQuery : item.query === currentQuery);
+            const isActive = currentQuery === ((item.queries ? item.queries.join('|') : (item.query || '')) + (item.priorityTrack ? '|' + item.priorityTrack : ''));
             return (
               <div
                 key={i}
@@ -436,7 +436,11 @@ export default function Home() {
                   <div>
                     {/* DJ Thought (Comment) */}
                     {(() => {
-                      const activeItem = schedule.find(item => item.queries ? item.queries.join('|') === currentQuery : item.query === currentQuery);
+                      const activeItem = schedule.find(item => {
+                        const baseSig = item.queries ? item.queries.join('|') : (item.query || '');
+                        const fullSig = baseSig + (item.priorityTrack ? '|' + item.priorityTrack : '');
+                        return fullSig === currentQuery;
+                      });
                       if (activeItem?.thought) {
                         return (
                           <div style={{

@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
-import { STORAGE_KEYS } from '../../lib/constants';
+import { STORAGE_KEYS, PRIVACY_NOTICE } from '../../lib/constants';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
@@ -158,11 +158,9 @@ export default function Settings() {
                 <div style={{ padding: '12px', background: 'rgba(3, 218, 198, 0.1)', borderLeft: '4px solid #03dac6', marginBottom: '20px', borderRadius: '4px' }}>
                     <p style={{ margin: 0, fontSize: '0.9rem', color: '#eee' }}>
                         🔒 <b>Privacy Notice (プライバシー通知):</b><br />
-                        All Secure Information (API Keys, etc.) is stored <b>locally in your browser</b>.
-                        We do NOT send this information to any external server other than the respective AI providers (OpenAI/Google) for the sole purpose of generating responses.
+                        <span dangerouslySetInnerHTML={{ __html: PRIVACY_NOTICE.EN.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
                         <br /><br />
-                        安全に関わる情報 (APIキーなど) は、すべて<b>ご利用のブラウザ内にローカル保存</b>されます。
-                        応答生成の目的以外で、各AIプロバイダー (OpenAI/Google) 以外の外部サーバーに情報を送信することは一切ありません。
+                        <span dangerouslySetInnerHTML={{ __html: PRIVACY_NOTICE.JP.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
                     </p>
                 </div>
 
@@ -372,7 +370,7 @@ export default function Settings() {
                         className={styles.input}
                         value={personalPref}
                         onChange={(e) => setPersonalPref(e.target.value)}
-                        placeholder="e.g. I generally prefer 90s rock. / 例: 基本的に90年代ロックが好き。ライブ音源は避けて。"
+                        placeholder="e.g. I generally prefer 90s rock. I love live recordings. / 例: 基本的に90年代ロックが好き。ライブ音源は大好きです。"
                         style={{ height: '80px', resize: 'vertical' }}
                     />
                     <p className={styles.description}>

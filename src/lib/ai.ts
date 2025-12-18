@@ -13,23 +13,29 @@ You are an excellent DJ assistant. Analyze the user's natural language instructi
 2.**Future Only**:If "future only", skip current time slot.
 3.**JSON Only**:Raw JSON output only.
 # Output Format
-[{"start":"00:00","end":"14:00","queries":["chill instrumental","artist:Bill Evans","genre:jazz"],"thought":"Morning chill jazz."},{"start":"14:00","end":"23:59","queries":["upbeat dance","genre:house","artist:Daft Punk"],"thought":"Afternoon energy."}]
+[{"start":"00:00","end":"14:00","queries":["chill instrumental","artist:Bill Evans","genre:jazz"],"priorityTrack":"artist:\"Bill Evans\" Waltz for Debby","thought":"Morning chill jazz."},{"start":"14:00","end":"23:59","queries":["upbeat dance","genre:house","artist:Daft Punk"],"thought":"Afternoon energy."}]
 # Search Syntax
 - \`genre:\`: "genre:jazz"
 - \`year:\`: "year:1980-1989"
 - \`artist:\`: "artist:Queen"
 # Constraints
 - **Time**: 24-hour (HH:MM).
-- **Language**: English queries for Spotify.
+- **Language**: 
+    - **Search Queries**: **HYBRID STRATEGY**.
+      - **Generic Terms (Genre/Mood/Vibes)**: ALWAYS include **English** keywords (e.g. "Female Vocals", "90s Rock", "Piano Jazz") as they perform best on Spotify.
+      - **Specific Artists/Songs**: Use their **Native Language** (e.g. "宇多田ヒカル", "サザンオールスターズ") for accuracy.
+      - **Mix**: Provide a mix of both to maximize results. (e.g. Request "J-Pop female" -> queries: ["J-Pop female vocals", "女性ボーカル J-Pop", "artist:Aiko"])
+      - **CRITICAL**: Do not translate specific song titles unless they are commonly known by the English title globally.
+    - **DJ Thought**: **DETECT** the language used in the "User Request". The \`thought\` field **MUST** be written in that same language. (e.g. Request in French -> Thought in French).
 - **Multiple Queries & Diversity**: Provide 3-5 specific queries. **Do NOT** repeat keywords. **DO** use knowledge to translate moods to specific artists/genres.
     - Ex: "Relaxing" -> ["relaxing piano", "artist:\"Brian Eno\"", "artist:\"Nujabes\" instrumental", "genre:jazz artist:\"Bill Evans\""]
 - **Artist Specificity**: If specific artist requested, ALL queries must include it.
     - Correct: "artist:\"TM Network\" Get Wild"
     - Incorrect: "artist:TM Network Get Wild"
 - **Cultural Context**: Prioritize culturally associated songs (e.g. memes/commercials).
-    - Ex: "Music for eating crab" -> ["artist:PUFFY Nagisa ni Matsuwaru Etcetera"]
+    - Ex: "Music for eating crab" -> ["artist:PUFFY 渚にまつわるエトセトラ"]
+- **Priority Track**: If a specific song represents the core of the request (e.g. "Music for eating crab" -> "渚にまつわるエトセトラ", or explicitly "Play Bohemiam Rhapsody"), set "priorityTrack" to a specific query for that song using its **exact native title**.
 - **Query Strategy**: Specific song/artist associations first, then broader genre/mood. Mix "Safe Hits" and "Tasteful Selections".
-- **DJ Thought**: explain choices in "thought". DJ persona. If User=JP, Thought=JP.
 `;
 
 export interface ScheduleItem {
@@ -37,6 +43,7 @@ export interface ScheduleItem {
     end: string;
     query: string;
     queries?: string[]; // Optional: support multiple queries
+    priorityTrack?: string; // Optional: query for a specific song to play first
     thought?: string; // DJ's reasoning/comment
 }
 
@@ -73,16 +80,16 @@ export class AIService {
         let contextInfo = `Current Date: ${dateStr}\nCurrent Time: ${timeStr}\nUser Request: ${userRequest}`;
 
         if (personalContext && personalContext.trim().length > 0) {
-            contextInfo += `\n\n# User Personal Preferences (HIGH PRIORITY)\nPerform the task while strictly adhering to the following user preferences:\n${personalContext}`;
+            contextInfo += `\n\n# Preferences (Strict)\n${personalContext}`;
         }
 
         if (currentSchedule && currentSchedule.length > 0) {
             contextInfo += `\n\nExisting Schedule:\n${JSON.stringify(currentSchedule)}`;
-            contextInfo += `\n\nInstruction: Merge the new User Request into the Existing Schedule. 
-            - If the new request conflicts with an existing time slot, prioritize the new request for that specific time range.
-            - Keep existing slots that do not conflict.
-            - If the new request is "from 15:00", split any existing slot spanning across 15:00 (e.g. 14:00-16:00 becomes 14:00-15:00 (old) and 15:00-16:00 (new)).
-            - Return the COMPLETE updated schedule.`;
+            contextInfo += `\n\n# Task: Merge Request into Schedule
+1. **Prioritize New Request**: Overwrite conflicting time slots.
+2. **Keep Existing**: Retain non-conflicting slots.
+3. **Split Slots**: If needed (e.g. 14:00-16:00 + req@15:00 -> 14-15 (old) & 15-16 (new)).
+4. **Output**: Return COMPLETE updated schedule.`;
         }
 
         try {
