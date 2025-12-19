@@ -44,6 +44,7 @@ export default function Home() {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null); // SpeechRecognition instance
+  const [showAiThought, setShowAiThought] = useState(false);
 
   // Auto-dismiss toast
   // Auto-dismiss toast
@@ -81,6 +82,7 @@ export default function Home() {
         hasKey = !!localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY);
       }
       setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
+      setShowAiThought(localStorage.getItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
     }
   }, [needsOnboarding]);
 
@@ -435,7 +437,7 @@ export default function Home() {
                   </span>
                   <div>
                     {/* DJ Thought (Comment) */}
-                    {(() => {
+                    {showAiThought && (() => {
                       const activeItem = schedule.find(item => {
                         const baseSig = item.queries ? item.queries.join('|') : (item.query || '');
                         const fullSig = baseSig + (item.priorityTrack ? '|' + item.priorityTrack : '');

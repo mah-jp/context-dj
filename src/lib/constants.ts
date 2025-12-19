@@ -20,6 +20,7 @@ export const STORAGE_KEYS = {
     PERSONAL_PREFERENCE: 'personal_preference',
     VOICE_INPUT_LANG: 'voice_input_lang',
     BACKGROUND_KEEP_ALIVE: 'background_keep_alive',
+    SHOW_AI_THOUGHT: 'show_ai_thought',
 } as const;
 
 export const PRIVACY_NOTICE = {
