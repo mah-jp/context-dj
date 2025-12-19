@@ -13,6 +13,15 @@ export const metadata: Metadata = {
   description: "Your personalized AI DJ that plays the perfect music for your context.",
   manifest: `${basePath}/manifest.json`,
   metadataBase: new URL(appUrl),
+  icons: {
+    icon: [
+      { url: `${basePath}/favicon.ico`, sizes: 'any' },
+      { url: `${basePath}/icon-192x192.png`, sizes: '192x192', type: 'image/png' },
+    ],
+    apple: [
+      { url: `${basePath}/apple-touch-icon.png`, sizes: '180x180', type: 'image/png' },
+    ],
+  },
   openGraph: {
     title: "ContextDJ - AI Music Curator",
     description: "Your personalized AI DJ that plays the perfect music for your context.",
@@ -20,7 +29,7 @@ export const metadata: Metadata = {
     locale: "ja_JP",
     url: appUrl,
     siteName: "ContextDJ",
-    images: '/icon-512x512.png',
+    images: `${basePath}/icon-512x512.png`,
   },
   twitter: {
     card: "summary_large_image",
