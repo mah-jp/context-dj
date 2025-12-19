@@ -74,10 +74,14 @@ export class AIService {
 
     async generateSchedule(userRequest: string, currentSchedule?: ScheduleItem[], personalContext?: string): Promise<ScheduleItem[]> {
         const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
         const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-        const dateStr = now.toLocaleDateString('ja-JP', { weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit' });
 
-        let contextInfo = `Current Date: ${dateStr}\nCurrent Time: ${timeStr}\nUser Request: ${userRequest}`;
+        const fullContextStr = `${year}-${month}-${day} (${weekday}) ${timeStr}`;
+        let contextInfo = `Current Context: ${fullContextStr}\nUser Request: ${userRequest}`;
 
         if (personalContext && personalContext.trim().length > 0) {
             contextInfo += `\n\n# Preferences (Strict)\n${personalContext}`;
