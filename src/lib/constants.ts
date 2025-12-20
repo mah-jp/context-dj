@@ -21,6 +21,7 @@ export const STORAGE_KEYS = {
     VOICE_INPUT_LANG: 'voice_input_lang',
     BACKGROUND_KEEP_ALIVE: 'background_keep_alive',
     SHOW_AI_THOUGHT: 'show_ai_thought',
+    AI_FILTERING_ENABLED: 'ai_filtering_enabled',
 } as const;
 
 export const PRIVACY_NOTICE = {

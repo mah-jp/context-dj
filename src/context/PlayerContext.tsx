@@ -155,6 +155,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     }
 
                     djRef.current = dj;
+                    dj.setStatusCallback(setStatus);
 
                     // Restore Schedule
                     const savedSchedule = localStorage.getItem(STORAGE_KEYS.DJ_SCHEDULE);
@@ -179,6 +180,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     try {
                         if (djRef.current) {
+                            // Sync Config (Experimental Settings)
+                            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
+                            djRef.current.updateConfig({
+                                aiFiltering: savedFiltering === null ? true : savedFiltering === 'true'
+                            });
+
                             // Check Schedule (AI Logic)
                             await djRef.current.processDJLoop();
 

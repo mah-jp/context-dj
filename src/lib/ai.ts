@@ -4,7 +4,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // Memo: (Deprecated)
 // Web API Reference: References / Tracks / Get Recommendations | Spotify for Developers https://developer.spotify.com/documentation/web-api/reference/get-recommendations
 
-// Prompt Template (Ported from prompt_template.txt)
+// Prompt Template
 const SYSTEM_PROMPT = `
 # Role
 You are an excellent DJ assistant. Analyze the user's natural language instructions and return a list of "Start Time (HH:MM)", "End Time (HH:MM)", "Spotify Search Queries", and a short "DJ Thought" in JSON format.
@@ -45,6 +45,7 @@ export interface ScheduleItem {
     queries?: string[]; // Optional: support multiple queries
     priorityTrack?: string; // Optional: query for a specific song to play first
     thought?: string; // DJ's reasoning/comment
+    userRequest?: string; // Original user instruction for context
 }
 
 export class AIService {
@@ -158,16 +159,75 @@ export class AIService {
 
             // Normalize
             if (Array.isArray(schedule)) {
-                return schedule;
+                return schedule.map(item => ({ ...item, userRequest }));
             } else if (typeof schedule === 'object') {
-                // Handle { schedule: [...] } or similar
-                return schedule.schedule || schedule.items || schedule.list || [];
+                const list = schedule.schedule || schedule.items || schedule.list || [];
+                return list.map((item: any) => ({ ...item, userRequest }));
             }
             return [];
 
         } catch (error) {
             console.error('AI Generation Error:', error);
             throw error;
+        }
+    }
+
+    async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, id: string }[], thought?: string): Promise<string[]> {
+        if (tracks.length === 0) return [];
+
+        const trackListStr = tracks.map((t, i) => `${i}: ${t.name} - ${t.artist}`).join('\n');
+        const prompt = `
+# Role
+You are a music critic and DJ assistant. 
+# Task
+Evaluate if the following songs match the User's Request and the DJ's Intent.
+# Input
+- User Request: "${userRequest}"
+${thought ? `- DJ Intent: "${thought}"` : ''}
+- Found Tracks:
+${trackListStr}
+
+# Output Format
+Return ONLY a JSON array of indices (numbers) for songs that are a "GOOD FIT".
+Exclude songs that are clearly irrelevant, wrong genre, or have a completely different mood.
+Example: [0, 2, 5]
+`;
+
+        try {
+            let responseText = '';
+            if (this.backend === 'openai' && this.openai) {
+                const completion = await this.openai.chat.completions.create({
+                    messages: [{ role: "user", content: prompt }],
+                    model: this.modelName,
+                });
+                responseText = completion.choices[0].message.content || '[]';
+            } else if (this.backend === 'gemini') {
+                const apiKey = this.storedKey;
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${apiKey}`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }]
+                    })
+                });
+                if (!response.ok) throw new Error(`Gemini API Error: ${response.status}`);
+                const data = await response.json();
+                responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+            }
+
+            const cleanJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+            const indices = JSON.parse(cleanJson);
+
+            if (Array.isArray(indices)) {
+                return indices
+                    .filter(i => typeof i === 'number' && i >= 0 && i < tracks.length)
+                    .map(i => tracks[i].id);
+            }
+            return tracks.map(t => t.id); // Fallback to all if failed
+        } catch (error) {
+            console.error('AI Filtering Error:', error);
+            return tracks.map(t => t.id); // Fallback
         }
     }
 }

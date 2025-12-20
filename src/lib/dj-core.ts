@@ -16,8 +16,10 @@ export class DJCore {
     private config = {
         minPopularity: 45,
         trackSearchLimit: 40, // Reduced for web perfo
-        onlyOfficial: false
+        onlyOfficial: false,
+        aiFiltering: true
     };
+    private onStatusUpdate?: (status: string) => void;
 
     constructor(accessToken: string) {
         this.spotify = new SpotifyWebApi();
@@ -26,7 +28,13 @@ export class DJCore {
         // Restore state
         if (typeof window !== 'undefined') {
             this.lastQuery = localStorage.getItem(STORAGE_KEYS.DJ_LAST_QUERY);
+            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
+            this.config.aiFiltering = savedFiltering === null ? true : savedFiltering === 'true';
         }
+    }
+
+    updateConfig(config: Partial<typeof this.config>) {
+        this.config = { ...this.config, ...config };
     }
 
     updateAccessToken(token: string) {
@@ -49,16 +57,22 @@ export class DJCore {
         if (this.processLog.length > 100) this.processLog.pop(); // Limit size
     }
 
+    setStatusCallback(cb: (status: string) => void) {
+        this.onStatusUpdate = cb;
+    }
+
+    private updateStatus(status: string) {
+        if (this.onStatusUpdate) {
+            this.onStatusUpdate(status);
+        }
+    }
+
     // --- Utilities ---
 
     private normalizeTrackName(name: string): string {
         // Remove text within parentheses (e.g. "Song (Remaster)")
         name = name.replace(/\(.*?\)/g, '');
         // Remove text after hyphen if it looks like metadata (e.g. "Song - Remastered 2009")
-        // But be careful not to kill "Title - Subtitle" if it's part of the song
-        // The previous logic was: name.replace(/\s-\s.*remaster.*/, '') in dedupe
-        // The old helper was: name.replace(/\s-\s.*/g, '') -> this is too aggressive!
-        // Let's adopt the stricter logic from dedupe but centralized here.
         name = name.replace(/\s-\s.*remaster.*/i, '');
 
         return name.trim().toLowerCase();
@@ -66,7 +80,7 @@ export class DJCore {
 
     // --- Search & Filtering ---
 
-    async searchTracks(queriesInput: string | string[], priorityQuery?: string): Promise<Track[]> {
+    async searchTracks(queriesInput: string | string[], priorityQuery?: string, context?: { userRequest?: string, thought?: string }): Promise<Track[]> {
         const queries = Array.isArray(queriesInput) ? queriesInput : [queriesInput];
 
         // 0. Resolve Priority Track
@@ -106,10 +120,35 @@ export class DJCore {
         // 4. Apply Filters (Strict Artist -> Popularity)
         const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
 
-        // 5. Select Final Set (Shuffle & Pick)
-        let finalTracks = this.selectTopTracks(filteredTracks);
+        // 5. AI Filtering (Smart Selection)
+        let candidates = filteredTracks;
+        if (this.config.aiFiltering && this.ai && context && (context.userRequest || context.thought)) {
+            this.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
+            this.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
+            try {
+                const trackData = candidates.map(t => ({ name: t.name, artist: t.artists[0]?.name || 'Unknown', id: t.uri }));
+                const request = context.userRequest || 'Follow the DJ mood';
+                const goodIds = await this.ai.filterTracksWithAI(request, trackData, context.thought);
 
-        // 6. Merge Priority Track
+                const filtered = candidates.filter(t => goodIds.includes(t.uri));
+                this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${filtered.length} tracks kept.`);
+
+                if (filtered.length > 0) {
+                    candidates = filtered;
+                } else {
+                    this.addLog(`⚠️ AI Filtering removed ALL tracks. Reverting to original set.`);
+                }
+            } catch (e) {
+                this.addLog(`⚠️ AI Filtering failed. Using all candidates.`);
+                console.error(e);
+            }
+            this.updateStatus('Ready');
+        }
+
+        // 6. Select Final Set (Shuffle & Pick)
+        let finalTracks = this.selectTopTracks(candidates);
+
+        // 7. Merge Priority Track
         if (priorityTracks.length > 0) {
             const pUri = priorityTracks[0].uri;
             finalTracks = finalTracks.filter(t => t.uri !== pUri);
@@ -478,7 +517,10 @@ export class DJCore {
                         this.isPreloading = true;
 
                         // Perform search in background (async)
-                        this.searchTracks(queries, nextItem.priorityTrack).then(tracks => {
+                        this.searchTracks(queries, nextItem.priorityTrack, {
+                            userRequest: nextItem.userRequest,
+                            thought: nextItem.thought
+                        }).then(tracks => {
                             console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
                             this.preloadedResult = {
                                 signature: nextSignature,
@@ -532,7 +574,10 @@ export class DJCore {
             } else {
                 // Normal search
                 console.log(`🔎 Performing immediate search for ${querySignature}`);
-                tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack);
+                tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack, {
+                    userRequest: currentItem.userRequest,
+                    thought: currentItem.thought
+                });
             }
 
             try {
@@ -579,7 +624,10 @@ export class DJCore {
                 this.addLog("🥣 Queue running low. Auto-Refill (Okawari) started...");
 
                 // 3. Search Again
-                const newTracks = await this.searchTracks(queries); // No priority track needed for refill usually
+                const newTracks = await this.searchTracks(queries, undefined, {
+                    userRequest: currentItem.userRequest,
+                    thought: currentItem.thought
+                }); // No priority track needed for refill usually
 
                 // 4. Filter duplicates (Played in this session OR currently in queue)
                 const queueUris = new Set(queue.map(t => t.uri));

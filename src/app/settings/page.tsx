@@ -21,6 +21,7 @@ export default function Settings() {
     const [voiceLang, setVoiceLang] = useState('ja-JP'); // default to Japanese :-)
     const [backgroundKeepAlive, setBackgroundKeepAlive] = useState(false);
     const [showAiThought, setShowAiThought] = useState(false);
+    const [aiFilteringEnabled, setAiFilteringEnabled] = useState(true);
 
     useEffect(() => {
         // Load from local storage
@@ -54,6 +55,8 @@ export default function Settings() {
             // Default false to avoid surprise, or true? User requested it, so let's default false and let them enable.
             setBackgroundKeepAlive(localStorage.getItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) === 'true');
             setShowAiThought(localStorage.getItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
+            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
+            setAiFilteringEnabled(savedFiltering === null ? true : savedFiltering === 'true');
         }
     }, []);
 
@@ -69,6 +72,7 @@ export default function Settings() {
         localStorage.setItem(STORAGE_KEYS.VOICE_INPUT_LANG, voiceLang);
         localStorage.setItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
         localStorage.setItem(STORAGE_KEYS.SHOW_AI_THOUGHT, String(showAiThought));
+        localStorage.setItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(aiFilteringEnabled));
 
         // Update history if new unique entry
         if (personalPref.trim()) {
@@ -404,6 +408,23 @@ export default function Settings() {
                     <p className={styles.description}>
                         Display the AI DJ's reasoning and commentary for the current schedule.<br />
                         <span style={{ fontSize: '0.9em', color: '#999' }}>AI DJによる選曲の理由や解説を画面に表示します。</span>
+                    </p>
+                </div>
+                <div className={styles.inputGroup}>
+                    <label className={styles.label} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                        <input
+                            type="checkbox"
+                            checked={aiFilteringEnabled}
+                            onChange={(e) => setAiFilteringEnabled(e.target.checked)}
+                            style={{ marginRight: '10px', width: '20px', height: '20px', accentColor: 'var(--primary)' }}
+                        />
+                        <span>
+                            AI Filtering / Smart Selection (AIによる選曲フィルタリング)
+                        </span>
+                    </label>
+                    <p className={styles.description}>
+                        Uses AI to verify if searched tracks match your request. Improves quality but adds about 30 seconds delay to search.<br />
+                        <span style={{ fontSize: '0.9em', color: '#999' }}>検索された曲がリクエストに合っているかAIが判定し、無関係な曲を除外します。精度が向上しますが、検索時に約30秒の待ち時間が発生します。</span>
                     </p>
                 </div>
                 <div className={styles.inputGroup}>

@@ -275,8 +275,8 @@ export default function Home() {
               <History size={18} />
             </button>
 
-            <button className={styles.sendBtn} onClick={handleSend} title="Send Request" disabled={!authorized || status.includes('thinking')}>
-              {status.includes('thinking') ? (
+            <button className={styles.sendBtn} onClick={handleSend} title="Send Request" disabled={!authorized || status.includes('thinking') || status.includes('Filtering')}>
+              {status.includes('thinking') || status.includes('Filtering') ? (
                 <Loader size={18} className={styles.spin} />
               ) : (
                 <Send size={18} />
