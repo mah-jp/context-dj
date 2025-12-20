@@ -106,10 +106,11 @@ export default function Settings() {
                         alignItems: 'center',
                         gap: '6px',
                         textDecoration: 'none',
-                        color: '#888',
+                        color: 'var(--foreground)',
                         fontSize: '0.9rem',
                         marginLeft: '16px',
-                        marginTop: '4px'
+                        marginTop: '4px',
+                        opacity: 0.8
                     }}
                 >
                     <Github size={16} />
