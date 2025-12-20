@@ -26,6 +26,7 @@ Unlike standard shuffle or playlists, ContextDJ builds a **context-aware schedul
 - **🗣️ Natural Language Interface**: Just tell the DJ what you want to hear. No complex filters needed.
     - **🎙️ Voice Input**: Speak your request directly. Supports multiple languages (configurable in settings).
 - **🧠 AI-Powered Curation**: Supports **OpenAI (GPT-4o)** and **Google Gemini** models to understand nuance and musical context.
+- **🎯 Smart Selection (AI Filtering)**: (Experimental) Automatically verifies if searched tracks genuinely match your request before adding them to the queue. **Enabled by default** for higher relevance.
 - **🔒 Privacy First**: **Bring Your Own Key (BYOK)** architecture. Your API keys (OpenAI/Gemini/Spotify) are stored **locally in your browser** (localStorage). We never see your data.
 - **🌊 Seamless Spotify Integration**: Connects with your Spotify Premium account on the web to play curated playlists on your devices (Spotify app on phone or PC).
 
