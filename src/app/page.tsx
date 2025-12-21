@@ -272,14 +272,14 @@ export default function Home() {
               onClick={() => setShowHistory(!showHistory)}
               title="History"
             >
-              <History size={18} />
+              <History size={20} />
             </button>
 
             <button className={styles.sendBtn} onClick={handleSend} title="Send Request" disabled={!authorized || status.includes('thinking') || status.includes('Filtering')}>
               {status.includes('thinking') || status.includes('Filtering') ? (
-                <Loader size={18} className={styles.spin} />
+                <Loader size={20} className={styles.spin} />
               ) : (
-                <Send size={18} />
+                <Send size={20} />
               )}
             </button>
 

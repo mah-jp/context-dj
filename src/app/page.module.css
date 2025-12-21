@@ -64,8 +64,9 @@
   background-color: #242424;
   border-radius: 24px;
   /* More rounded for multiline feel, or keep 500px */
-  padding: 8px 12px;
-  /* Slightly more vertical padding */
+  padding: 6px;
+  /* Even padding */
+  gap: 4px;
   border: 1px solid transparent;
   transition: background-color 0.2s, border-color 0.2s;
 }
@@ -85,7 +86,7 @@
   color: var(--text-base);
   font-size: 0.9rem;
   outline: none;
-  padding: 4px 8px;
+  padding: 5px 8px;
   /* Adjust padding for textarea */
   resize: none;
   font-family: inherit;
@@ -115,7 +116,6 @@
 }
 
 .voiceBtn {
-  margin-right: 6px;
   padding: 8px;
 }
 
@@ -142,10 +142,14 @@
   padding: 8px;
   border-radius: 50%;
   transition: color 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .settingsLink:hover {
   color: var(--text-base);
+  background-color: rgba(255, 255, 255, 0.1);
 }
 
 /* Main Content Grid */
@@ -367,7 +371,8 @@
   align-items: center;
   justify-content: center;
   transition: color 0.2s;
-  color: var(--accent);
+  padding: 8px;
+  border-radius: 50%;
 }
 
 @media (hover: hover) {
@@ -405,6 +410,7 @@
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  gap: 8px;
 }
 
 .deviceLabel {
@@ -412,9 +418,17 @@
   border: none;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   color: var(--accent);
   font-size: 0.75rem;
+  padding: 6px 10px;
+  border-radius: 18px;
+  transition: background-color 0.2s;
+}
+
+.deviceLabel:hover {
+  background-color: rgba(255, 255, 255, 0.1);
 }
 
 /* Schedule Items in Sidebar */

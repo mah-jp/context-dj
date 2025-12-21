@@ -177,7 +177,6 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                         onClick={handleShare}
                         title="Share Context"
                         aria-label="Share Context"
-                        style={{ marginRight: '16px', cursor: 'pointer' }}
                     >
                         <Share2 size={16} />
                         <span>Share</span>
