@@ -146,8 +146,8 @@ export default function Settings() {
                         onClick={handleLogout}
                         style={{
                             background: 'transparent',
-                            border: '1px solid #cf6679',
-                            color: '#cf6679',
+                            border: '1px solid #ef4444',
+                            color: '#ef4444',
                             padding: '8px 16px',
                             borderRadius: '4px',
                             cursor: 'pointer',
@@ -469,7 +469,7 @@ export default function Settings() {
                                 }
                             }}
                             style={{
-                                background: '#cf6679',
+                                background: '#ef4444',
                                 color: 'white',
                                 border: 'none',
                                 padding: '10px 16px',
@@ -493,7 +493,7 @@ export default function Settings() {
                                 }
                             }}
                             style={{
-                                background: '#b00020',
+                                background: '#dc2626',
                                 color: 'white',
                                 border: 'none',
                                 padding: '10px 16px',

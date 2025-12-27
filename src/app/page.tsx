@@ -381,7 +381,7 @@ export default function Home() {
                   style={{
                     background: 'transparent',
                     border: 'none',
-                    color: '#666',
+                    color: '#b3b3b3',
                     cursor: 'pointer',
                     padding: '4px',
                     display: 'flex',

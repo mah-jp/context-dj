@@ -62,7 +62,7 @@ export default function Onboarding({ setupStatus, authorized, onLogin }: Onboard
 
                     {/* Step 1: Spotify Client ID */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px', opacity: setupStatus.hasClientId ? 0.5 : 1 }}>
-                        {setupStatus.hasClientId ? <CheckCircle size={24} color="var(--primary)" /> : <XCircle size={24} color="#cf6679" />}
+                        {setupStatus.hasClientId ? <CheckCircle size={24} color="var(--primary)" /> : <XCircle size={24} color="#ef4444" />}
                         <div style={{ flex: 1 }}>
                             <div style={{ color: setupStatus.hasClientId ? 'var(--primary)' : '#fff', fontWeight: 'bold' }}>1. Spotify App Settings</div>
                             <div style={{ fontSize: '0.85rem', color: '#888' }}>
@@ -77,7 +77,7 @@ export default function Onboarding({ setupStatus, authorized, onLogin }: Onboard
 
                     {/* Step 2: AI API Key */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px', opacity: setupStatus.hasAiKey ? 0.5 : 1 }}>
-                        {setupStatus.hasAiKey ? <CheckCircle size={24} color="var(--primary)" /> : <XCircle size={24} color="#cf6679" />}
+                        {setupStatus.hasAiKey ? <CheckCircle size={24} color="var(--primary)" /> : <XCircle size={24} color="#ef4444" />}
                         <div style={{ flex: 1 }}>
                             <div style={{ color: setupStatus.hasAiKey ? 'var(--primary)' : '#fff', fontWeight: 'bold' }}>2. AI API Configuration</div>
                             <div style={{ fontSize: '0.85rem', color: '#888' }}>
