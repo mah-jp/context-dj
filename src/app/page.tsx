@@ -5,11 +5,12 @@ import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { DJCore } from '../lib/dj-core'; // Track is inferred usually
-import { Send, History, Loader, Clock, Flame, Bot, AlertTriangle, Trash2, Settings, XCircle, CheckCircle, Info, Mic, MicOff, Github } from 'lucide-react';
+import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
-import Onboarding from '../components/Onboarding';
 import PlayerBar from '../components/PlayerBar';
 import ProcessLogViewer from '../components/ProcessLogViewer';
+import ScheduleSidebar from '../components/ScheduleSidebar';
+import QueueList from '../components/QueueList';
 import { STORAGE_KEYS } from '../lib/constants';
 
 export default function Home() {
@@ -350,165 +351,27 @@ export default function Home() {
       {/* 2. Main Content Grid */}
       <div className={styles.contentGrid}>
         {/* Left Sidebar: Schedule */}
-        <div className={styles.sidebar}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', color: 'var(--primary)', fontWeight: 600 }}>
-            <Clock size={20} />
-            <span>My Schedule</span>
-          </div>
-          {schedule.length > 0 ? schedule.map((item, i) => {
-            const isActive = currentQuery === ((item.queries ? item.queries.join('|') : (item.query || '')) + (item.priorityTrack ? '|' + item.priorityTrack : ''));
-            return (
-              <div
-                key={i}
-                className={styles.scheduleItem}
-                style={{
-                  position: 'relative',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  borderLeft: isActive ? '3px solid var(--primary)' : '3px solid transparent',
-                  background: isActive ? 'rgba(3, 218, 198, 0.05)' : undefined
-                }}
-              >
-                <div style={{ flex: 1, marginRight: '8px' }}>
-                  <div className={styles.scheduleTime} style={{ color: isActive ? 'var(--primary)' : undefined }}>{item.start} - {item.end}</div>
-                  <div className={styles.scheduleQuery}>
-                    {item.queries ? item.queries.join(', ') : item.query}
-                  </div>
-                </div>
-                <button
-                  onClick={() => handleRemoveScheduleItem(i)}
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: '#b3b3b3',
-                    cursor: 'pointer',
-                    padding: '4px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'color 0.2s'
-                  }}
-                  title="Remove schedule item"
-                  onMouseEnter={(e) => e.currentTarget.style.color = '#cf6679'}
-                  onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            );
-          }) : (
-            <div style={{ color: '#555', fontSize: '0.9rem', padding: '1rem' }}>No active schedule.</div>
-          )}
-        </div>
+        <ScheduleSidebar
+          schedule={schedule}
+          currentQuery={currentQuery}
+          onRemoveItem={handleRemoveScheduleItem}
+        />
 
         {/* Main Area: Queue & Strategy */}
-        <div className={styles.queueArea}>
-          {needsOnboarding ? (
-            <Onboarding
-              setupStatus={setupStatus}
-              authorized={authorized}
-              onLogin={handleLogin}
-            />
-          ) : (
-            <>
-              {/* Connection Warning */}
-              {authorized && !deviceName && (
-                <div style={{
-                  marginBottom: '1rem', padding: '12px', background: 'rgba(239, 68, 68, 0.1)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '8px', color: '#fca5a5',
-                  display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.9rem'
-                }}>
-                  <AlertTriangle size={20} />
-                  <span><b>No Active Device:</b> Open Spotify on your phone or computer to start playback.<br />(再生デバイスが見つかりません。スマホまたはPCでSpotifyを開いてください。)</span>
-                </div>
-              )}
-
-              {/* AI Status */}
-              {currentQuery && (
-                <div
-                  className={styles.aiStatus}
-                  onClick={() => setShowLogs(true)}
-                  style={{ cursor: 'pointer' }}
-                  title="Click to view process log"
-                >
-                  <span style={{ color: 'var(--primary)', fontSize: '0.85rem', fontWeight: 'bold', display: 'flex', alignItems: 'center' }}>
-                    <Bot size={16} style={{ marginRight: '6px' }} /> AI Strategy:
-                  </span>
-                  <div>
-                    {/* DJ Thought (Comment) */}
-                    {showAiThought && (() => {
-                      const activeItem = schedule.find(item => {
-                        const baseSig = item.queries ? item.queries.join('|') : (item.query || '');
-                        const fullSig = baseSig + (item.priorityTrack ? '|' + item.priorityTrack : '');
-                        return fullSig === currentQuery;
-                      });
-                      if (activeItem?.thought) {
-                        return (
-                          <div style={{
-                            marginBottom: '8px',
-                            padding: '8px 12px',
-                            background: 'rgba(255, 255, 255, 0.08)',
-                            borderRadius: '6px',
-                            fontSize: '0.9rem',
-                            fontStyle: 'italic',
-                            color: '#e0e0e0',
-                            borderLeft: '3px solid var(--primary)'
-                          }}>
-                            "{activeItem.thought}"
-                          </div>
-                        );
-                      }
-                      return null;
-                    })()}
-
-                    {/* Tags */}
-                    {currentQuery.split('|').map((tag, i) => (
-                      <span key={i} className={styles.aiTag}>{tag.trim()}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <h2 className={styles.queueHeader}>Up Next</h2>
-
-              <div className={styles.queueList}>
-                {queue.length > 0 ? queue.map((track, i) => (
-                  <div
-                    key={i}
-                    className={styles.queueItem}
-                    onClick={() => {
-                      const tracksToPlay = queue.slice(i);
-                      djCore?.playTracks(tracksToPlay);
-                    }}
-                  >
-                    <div className={styles.queueIndex}>{i + 1}</div>
-                    <img
-                      src={track.album?.images?.[0]?.url || ''}
-                      className={styles.queueImg}
-                      alt="art"
-                    />
-                    <div className={styles.queueMeta}>
-                      <div className={styles.queueTitle}>
-                        {track.name}
-                        {track.contextName && <span style={{ fontSize: '0.7em', color: 'var(--primary)', marginLeft: '6px', border: '1px solid var(--primary)', padding: '0 4px', borderRadius: '4px' }}>{track.contextName}</span>}
-                      </div>
-                      <div className={styles.queueArtist}>{track.artists[0]?.name}</div>
-                    </div>
-                    {showPopularity && (
-                      <div className={styles.queuePop} title={`Popularity: ${track.popularity}`} style={{ color: '#ffec3d' }}>
-                        <Flame size={12} fill="#ffec3d" />
-                        <span>{track.popularity}</span>
-                      </div>
-                    )}
-                  </div>
-                )) : (
-                  <div style={{ color: '#555', padding: '2rem', textAlign: 'center' }}>Queue is empty.</div>
-                )}
-              </div>
-            </>
-          )}
-        </div>
+        <QueueList
+          needsOnboarding={needsOnboarding}
+          setupStatus={setupStatus}
+          authorized={authorized}
+          onLogin={handleLogin}
+          deviceName={deviceName}
+          currentQuery={currentQuery}
+          showLogs={() => setShowLogs(true)}
+          showAiThought={showAiThought}
+          schedule={schedule}
+          queue={queue}
+          showPopularity={showPopularity}
+          djCore={djCore}
+        />
       </div>
 
       {/* Log Viewer Modal */}

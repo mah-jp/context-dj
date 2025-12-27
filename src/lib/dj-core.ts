@@ -84,22 +84,7 @@ export class DJCore {
         const queries = Array.isArray(queriesInput) ? queriesInput : [queriesInput];
 
         // 0. Resolve Priority Track
-        let priorityTracks: Track[] = [];
-        if (priorityQuery) {
-            this.addLog(`🌟 Priority Search: ${priorityQuery}`);
-            try {
-                const pRes = await this.spotify.searchTracks(priorityQuery, { limit: 1 });
-                if (pRes.tracks && pRes.tracks.items.length > 0) {
-                    priorityTracks = pRes.tracks.items;
-                    this.addLog(`✅ Found Priority Track: ${priorityTracks[0].name} (${priorityTracks[0].artists[0].name})`);
-                } else {
-                    this.addLog(`⚠️ Priority Search returned 0 results for: ${priorityQuery}`);
-                }
-            } catch (e) {
-                console.warn("Priority search failed:", e);
-                this.addLog(`⚠️ Priority Search Error`);
-            }
-        }
+        const priorityTracks = await this.findPriorityTrack(priorityQuery);
 
         // 1. Parse target artists for strict filtering
         const targetArtists = this.extractTargetArtists(queries);
@@ -121,29 +106,7 @@ export class DJCore {
         const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
 
         // 5. AI Filtering (Smart Selection)
-        let candidates = filteredTracks;
-        if (this.config.aiFiltering && this.ai && context && (context.userRequest || context.thought)) {
-            this.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
-            this.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
-            try {
-                const trackData = candidates.map(t => ({ name: t.name, artist: t.artists[0]?.name || 'Unknown', id: t.uri }));
-                const request = context.userRequest || 'Follow the DJ mood';
-                const goodIds = await this.ai.filterTracksWithAI(request, trackData, context.thought);
-
-                const filtered = candidates.filter(t => goodIds.includes(t.uri));
-                this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${filtered.length} tracks kept.`);
-
-                if (filtered.length > 0) {
-                    candidates = filtered;
-                } else {
-                    this.addLog(`⚠️ AI Filtering removed ALL tracks. Reverting to original set.`);
-                }
-            } catch (e) {
-                this.addLog(`⚠️ AI Filtering failed. Using all candidates.`);
-                console.error(e);
-            }
-            this.updateStatus('Ready');
-        }
+        let candidates = await this.performAIFiltering(filteredTracks, context);
 
         // 6. Select Final Set (Shuffle & Pick)
         let finalTracks = this.selectTopTracks(candidates);
@@ -157,6 +120,59 @@ export class DJCore {
         }
 
         return finalTracks;
+    }
+
+    private async findPriorityTrack(priorityQuery?: string): Promise<Track[]> {
+        if (!priorityQuery) return [];
+
+        this.addLog(`🌟 Priority Search: ${priorityQuery}`);
+        try {
+            const pRes = await this.spotify.searchTracks(priorityQuery, { limit: 1 });
+            if (pRes.tracks && pRes.tracks.items.length > 0) {
+                const tracks = pRes.tracks.items;
+                this.addLog(`✅ Found Priority Track: ${tracks[0].name} (${tracks[0].artists[0].name})`);
+                return tracks;
+            } else {
+                this.addLog(`⚠️ Priority Search returned 0 results for: ${priorityQuery}`);
+                return [];
+            }
+        } catch (e) {
+            console.warn("Priority search failed:", e);
+            this.addLog(`⚠️ Priority Search Error`);
+            return [];
+        }
+    }
+
+    private async performAIFiltering(candidates: Track[], context?: { userRequest?: string, thought?: string }): Promise<Track[]> {
+        if (!this.config.aiFiltering || !this.ai || !context || (!context.userRequest && !context.thought)) {
+            return candidates;
+        }
+
+        this.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
+        this.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
+
+        try {
+            const trackData = candidates.map(t => ({ name: t.name, artist: t.artists[0]?.name || 'Unknown', id: t.uri }));
+            const request = context.userRequest || 'Follow the DJ mood';
+            const goodIds = await this.ai.filterTracksWithAI(request, trackData, context.thought);
+
+            const filtered = candidates.filter(t => goodIds.includes(t.uri));
+            this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${filtered.length} tracks kept.`);
+
+            this.updateStatus('Ready');
+
+            if (filtered.length > 0) {
+                return filtered;
+            } else {
+                this.addLog(`⚠️ AI Filtering removed ALL tracks. Reverting to original set.`);
+                return candidates;
+            }
+        } catch (e) {
+            this.addLog(`⚠️ AI Filtering failed. Using all candidates.`);
+            console.error(e);
+            this.updateStatus('Ready');
+            return candidates;
+        }
     }
 
     private extractTargetArtists(queries: string[]): string[] {
