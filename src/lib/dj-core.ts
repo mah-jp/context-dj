@@ -491,7 +491,7 @@ export class DJCore {
     private preloadedResult: { signature: string, tracks: Track[] } | null = null;
     private isPreloading = false;
 
-    async processDJLoop() {
+    async processDJLoop(silentWait: boolean = true) {
         const now = new Date();
         const currentItem = this.getItemForDate(now);
 
@@ -566,6 +566,18 @@ export class DJCore {
 
             let tracks: Track[] = [];
 
+            // Search condition: Check if we have any devices to play on
+            // This prevents "AI Filtering" (and cost) if the user isn't ready to listen.
+            const devices = await this.getDevices();
+            if (devices.length === 0) {
+                const msg = "⚠️ DJ Search skipped: No available Spotify devices. Please open Spotify.";
+                console.log(msg);
+                if (!silentWait) {
+                    throw new Error("No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)");
+                }
+                return;
+            }
+
             // Check if we have preloaded tracks for this exact signature
             if (this.preloadedResult && this.preloadedResult.signature === querySignature) {
                 console.log(`🚀 Using Preloaded Tracks for ${querySignature}`);
@@ -604,6 +616,12 @@ export class DJCore {
 
     private async checkAndRefillQueue(queries: string[], currentItem: ScheduleItem) {
         if (this.isRefilling) return;
+
+        // 0. Check Playback Status (Don't refill if not playing/active)
+        const playback = await this.getPlaybackState();
+        if (!playback || !playback.device || !playback.device.is_active) {
+            return;
+        }
 
         try {
             // 1. Check Queue Depth

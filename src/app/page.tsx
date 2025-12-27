@@ -140,7 +140,7 @@ export default function Home() {
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
 
         // Trigger immediate check
-        await djCore.processDJLoop();
+        await djCore.processDJLoop(false);
       }
 
     } catch (e: any) {
