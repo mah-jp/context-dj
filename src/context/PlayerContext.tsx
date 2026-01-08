@@ -4,7 +4,7 @@ import React, { createContext, useContext, useEffect, useState, useRef, ReactNod
 import { DJCore, Track } from '../lib/dj-core';
 import { ScheduleItem } from '../lib/ai';
 import { SpotifyAuth } from '../lib/spotify-auth';
-import { STORAGE_KEYS } from '../lib/constants';
+import { STORAGE_KEYS, PLAYBACK_CONSTANTS } from '../lib/constants';
 
 interface PlayerContextType {
     djCore: DJCore | null;
@@ -51,30 +51,43 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const djRef = useRef<DJCore | null>(null);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
+    const djTimerRef = useRef<NodeJS.Timeout | null>(null);
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
 
     // Helper to sync UI with DJ Core state
     const syncUIState = React.useCallback(async () => {
         if (!djRef.current) return null;
 
-        // Sync Playing State
-        const playbackState = await djRef.current.getPlaybackState();
+        // Fetch Data concurrently for better performance and consistency
+        const [playbackState, currentQ, currentDevices] = await Promise.all([
+            djRef.current.getPlaybackState(),
+            djRef.current.getQueue(),
+            djRef.current.getDevices()
+        ]);
+
+        // Sync Devices & Queue
+        setDevices(currentDevices);
+        setQueue(currentQ.slice(0, 20));
+
+        // Determine Device Name
+        // Priority: 1. Playback State Device, 2. Active Device in List, 3. Empty
+        let activeDeviceName = '';
+        if (playbackState && playbackState.device) {
+            activeDeviceName = playbackState.device.name;
+        } else {
+            const activeD = currentDevices.find(d => d.is_active);
+            if (activeD) activeDeviceName = activeD.name;
+        }
+        setDeviceName(activeDeviceName);
+
+        // Sync Track Info
         if (playbackState && playbackState.item && playbackState.item.type === 'track') {
             setCurrentTrack(playbackState.item as Track);
             setIsPlaying(playbackState.is_playing);
-            setDeviceName(playbackState.device.name);
         } else {
             setCurrentTrack(null);
             setIsPlaying(false);
-            setDeviceName(playbackState?.device?.name || '');
         }
-
-        const currentQ = await djRef.current.getQueue();
-        setQueue(currentQ.slice(0, 20));
-
-        // Sync Devices
-        const currentDevices = await djRef.current.getDevices();
-        setDevices(currentDevices);
 
         // Update Status
         const djStatus = djRef.current.getDJStatus();
@@ -90,6 +103,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     // Initialize
     useEffect(() => {
+        let cleanupListeners: (() => void) | null = null;
+
         const init = async () => {
             try {
                 // 0. Check Onboarding
@@ -172,68 +187,99 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     }
                 }
 
-                // 3. Start Polling Loop with Dynamic Interval
-                if (timerRef.current) clearTimeout(timerRef.current);
+                // 3. Start Separate Loops (UI & DJ Logic)
+                // This decoupling ensures UI/Device status updates don't freeze while AI is thinking.
 
-                const tick = async () => {
-                    let nextDelay = 5000; // Default 5s
+                if (timerRef.current) clearTimeout(timerRef.current);
+                if (djTimerRef.current) clearTimeout(djTimerRef.current);
+
+                // --- UI Loop (High Priority, Non-Blocking) ---
+                const runUILoop = async () => {
+                    let nextDelay: number = PLAYBACK_CONSTANTS.UI_POLL_INTERVAL_MS;
 
                     try {
                         if (djRef.current) {
-                            // Sync Config (Experimental Settings)
-                            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
-                            djRef.current.updateConfig({
-                                aiFiltering: savedFiltering === null ? true : savedFiltering === 'true'
-                            });
-
-                            // Check Schedule (AI Logic)
-                            await djRef.current.processDJLoop();
-
                             // Sync UI
                             const playbackState = await syncUIState();
 
                             // Dynamic Interval: If track is ending soon (< 10s), increase polling rate to 1s
                             if (playbackState && playbackState.is_playing && playbackState.item && playbackState.item.duration_ms && playbackState.progress_ms) {
                                 const remaining = playbackState.item.duration_ms - playbackState.progress_ms;
-                                if (remaining < 10000) {
-                                    nextDelay = 1000;
+                                if (remaining < PLAYBACK_CONSTANTS.TRACK_REMAINING_THRESHOLD_MS) {
+                                    nextDelay = PLAYBACK_CONSTANTS.UI_POLL_FAST_INTERVAL_MS;
                                 }
                             }
                         }
-                    } catch (error: any) {
-                        console.error("Error in DJ Loop tick:", error);
-                        // Only set error if it's new to avoid render loops, and maybe filter minor ones
-                        const msg = error.message || "Unknown background error";
-                        // Prevent flashing same error
-                        setError(prev => prev === msg ? prev : msg);
+                    } catch (error) {
+                        console.error("Error in UI Loop:", error);
                     }
 
-                    // Auto-refresh token if expiring soon (within 5 minutes)
+                    // Auto-refresh token if expiring soon (Keep this in UI loop as it's lightweight logic)
                     if (authorized) {
                         const expiresAtStr = localStorage.getItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
                         if (expiresAtStr) {
                             const expiresAt = parseInt(expiresAtStr);
-                            const nowMs = Date.now();
-                            // 5 minutes buffer = 5 * 60 * 1000 = 300000
-                            if (expiresAt - nowMs < 300000) {
-                                console.log('🔄 Token expiring soon, refreshing...');
+                            if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
                                 const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
                                 if (clientId) {
-                                    const newToken = await SpotifyAuth.refreshToken(clientId);
-                                    if (newToken && djRef.current) {
-                                        djRef.current.updateAccessToken(newToken);
-                                        console.log('✅ Token refreshed and updated in DJCore');
-                                    }
+                                    SpotifyAuth.refreshToken(clientId).then(token => {
+                                        if (token && djRef.current) djRef.current.updateAccessToken(token);
+                                    }).catch(e => console.error("Token Refresh Failed:", e));
                                 }
                             }
                         }
                     }
 
-                    // Schedule next tick
-                    timerRef.current = setTimeout(tick, nextDelay);
+                    timerRef.current = setTimeout(runUILoop, nextDelay);
                 };
 
-                tick();
+                // --- DJ Logic Loop (AI, Heavy Process) ---
+                const runDJLoop = async () => {
+                    let nextDelay = PLAYBACK_CONSTANTS.DJ_LOOP_INTERVAL_MS;
+
+                    try {
+                        if (djRef.current) {
+                            // Sync Config
+                            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
+                            djRef.current.updateConfig({
+                                aiFiltering: savedFiltering === null ? true : savedFiltering === 'true'
+                            });
+
+                            // Check Schedule (AI Logic) - This may block for seconds during AI request
+                            await djRef.current.processDJLoop();
+                        }
+                    } catch (error: any) {
+                        console.error("Error in DJ Loop:", error);
+                        const msg = error.message || "Unknown background error";
+                        setError(prev => prev === msg ? prev : msg);
+                    }
+
+                    djTimerRef.current = setTimeout(runDJLoop, nextDelay);
+                };
+
+                // Start both loops
+                runUILoop();
+                runDJLoop();
+
+                // Visibility/Focus Restoration
+                const handleVisible = () => {
+                    if (document.visibilityState === 'visible') {
+                        if (timerRef.current) clearTimeout(timerRef.current);
+                        runUILoop();
+                    }
+                };
+                const handleFocus = () => {
+                    if (timerRef.current) clearTimeout(timerRef.current);
+                    runUILoop();
+                };
+
+                document.addEventListener('visibilitychange', handleVisible);
+                window.addEventListener('focus', handleFocus);
+
+                cleanupListeners = () => {
+                    document.removeEventListener('visibilitychange', handleVisible);
+                    window.removeEventListener('focus', handleFocus);
+                };
             } catch (initError: any) {
                 console.error("Fatal initialization error:", initError);
                 setStatus(`Init Error: ${initError.message || initError}`);
@@ -245,6 +291,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         return () => {
             if (timerRef.current) clearTimeout(timerRef.current);
+            if (djTimerRef.current) clearTimeout(djTimerRef.current);
+            if (cleanupListeners) cleanupListeners();
         };
     }, [syncUIState]); // Run ONCE on mount (with syncUIState stable)
 

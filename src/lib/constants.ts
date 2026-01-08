@@ -28,3 +28,11 @@ export const PRIVACY_NOTICE = {
     EN: "All Secure Information (API Keys, etc.) is stored **locally in your browser**. We do NOT send this information to any external server other than the respective AI providers (OpenAI/Google) for the sole purpose of generating responses.",
     JP: "安全に関わる情報 (APIキーなど) は、すべて**ご利用のブラウザ内にローカル保存**されます。応答生成の目的以外で、各AIプロバイダー (OpenAI/Google) 以外の外部サーバーに情報を送信することは一切ありません。"
 };
+
+export const PLAYBACK_CONSTANTS = {
+    UI_POLL_INTERVAL_MS: 3000,
+    UI_POLL_FAST_INTERVAL_MS: 1000,
+    DJ_LOOP_INTERVAL_MS: 5000,
+    TOKEN_REFRESH_BUFFER_MS: 300000, // 5 minutes
+    TRACK_REMAINING_THRESHOLD_MS: 10000,
+} as const;
