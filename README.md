@@ -1,7 +1,7 @@
+[ Languages: **English** | [日本語](README.ja.md) (Japanese) ]
+
 # ContextDJ
 <img src="public/icon-192x192.png" width="96" height="96" alt="ContextDJ Icon">
-
-[日本語版はこちら (Japanese)](./README.ja.md)
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Next.js](https://img.shields.io/badge/built%20with-Next.js-black)
