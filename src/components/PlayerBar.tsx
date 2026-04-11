@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { usePlayer } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
-import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Flame, Share2 } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Flame, Share2, Sparkles } from 'lucide-react';
+import { STORAGE_KEYS } from '../lib/constants';
 
 interface PlayerBarProps {
     showPopularity: boolean;
@@ -9,6 +10,23 @@ interface PlayerBarProps {
 }
 
 export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
+    const [showAiThought, setShowAiThought] = useState(true);
+
+    useEffect(() => {
+        if (typeof window !== 'undefined') {
+            const stored = localStorage.getItem(STORAGE_KEYS.SHOW_AI_THOUGHT);
+            setShowAiThought(stored === null ? true : stored === 'true');
+        }
+    }, []);
+
+    const toggleAiThought = () => {
+        const newVal = !showAiThought;
+        setShowAiThought(newVal);
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(STORAGE_KEYS.SHOW_AI_THOUGHT, String(newVal));
+        }
+    };
+
     const {
         status,
         authorized,
@@ -21,7 +39,9 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
         handlePrev,
         handleNext,
         handleTogglePlay,
-        currentQuery
+        currentQuery,
+        currentThought,
+        schedule
     } = usePlayer();
 
     // Local UI state
@@ -90,6 +110,18 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                     />
                 </div>
             )}
+            {/* DJ Insight Pop-up */}
+            {showAiThought && currentThought && (
+                <div className={styles.djInsight} onClick={() => toggleAiThought()} title="Click to hide insight">
+                    <div className={styles.djInsightIcon}>
+                        <Sparkles size={20} />
+                    </div>
+                    <div className={styles.djInsightContent}>
+                        <div className={styles.djInsightHeader}>DJ Insight</div>
+                        <div className={styles.djInsightText}>{currentThought}</div>
+                    </div>
+                </div>
+            )}
 
             {/* Left: Now Playing Info */}
             <div className={styles.nowPlaying}>
@@ -148,7 +180,7 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
             {/* Center: Controls */}
             <div className={styles.playerControls}>
                 <div className={styles.controlButtons}>
-                    <button className={styles.controlBtn} onClick={handlePrev} title="Previous" aria-label="Previous Track">
+                    <button className={styles.controlBtn} onClick={handlePrev} title="Previous" aria-label="Previous Track" style={{ color: 'var(--primary)' }}>
                         <SkipBack size={20} fill="currentColor" />
                     </button>
 
@@ -162,7 +194,7 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                         </button>
                     )}
 
-                    <button className={styles.controlBtn} onClick={handleNext} title="Next" aria-label="Next Track">
+                    <button className={styles.controlBtn} onClick={handleNext} title="Next" aria-label="Next Track" style={{ color: 'var(--primary)' }}>
                         <SkipForward size={20} fill="currentColor" />
                     </button>
                 </div>
@@ -170,6 +202,18 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
 
             {/* Right: Extra Controls */}
             <div className={styles.extraControls}>
+                {/* AI Insight Toggle */}
+                <button
+                    className={styles.deviceLabel}
+                    onClick={() => toggleAiThought()}
+                    title={showAiThought ? "Hide DJ Insight" : "Show DJ Insight"}
+                    aria-label="Toggle DJ Insight"
+                    style={{ color: showAiThought ? '#ffec3d' : 'var(--primary)' }}
+                >
+                    <Sparkles size={16} fill={showAiThought ? "#ffec3d" : "none"} />
+                    <span style={{ color: showAiThought ? '#ffec3d' : 'var(--primary)' }}>Insight</span>
+                </button>
+
                 {/* Share Button */}
                 {currentTrack && (
                     <button

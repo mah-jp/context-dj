@@ -12,7 +12,6 @@ interface QueueListProps {
     deviceName: string;
     currentQuery: string | null;
     showLogs: () => void;
-    showAiThought: boolean;
     schedule: ScheduleItem[];
     queue: Track[];
     showPopularity: boolean;
@@ -27,7 +26,6 @@ export default function QueueList({
     deviceName,
     currentQuery,
     showLogs,
-    showAiThought,
     schedule,
     queue,
     showPopularity,
@@ -64,35 +62,9 @@ export default function QueueList({
                             title="Click to view process log"
                         >
                             <span style={{ color: 'var(--primary)', fontSize: '0.85rem', fontWeight: 'bold', display: 'flex', alignItems: 'center' }}>
-                                <Bot size={16} style={{ marginRight: '6px' }} /> AI Strategy:
+                                <Bot size={16} style={{ marginRight: '6px' }} /> Search Keywords:
                             </span>
                             <div>
-                                {/* DJ Thought (Comment) */}
-                                {showAiThought && (() => {
-                                    const activeItem = schedule.find(item => {
-                                        const baseSig = item.queries ? item.queries.join('|') : (item.query || '');
-                                        const fullSig = baseSig + (item.priorityTrack ? '|' + item.priorityTrack : '');
-                                        return fullSig === currentQuery;
-                                    });
-                                    if (activeItem?.thought) {
-                                        return (
-                                            <div style={{
-                                                marginBottom: '8px',
-                                                padding: '8px 12px',
-                                                background: 'rgba(255, 255, 255, 0.08)',
-                                                borderRadius: '6px',
-                                                fontSize: '0.9rem',
-                                                fontStyle: 'italic',
-                                                color: '#e0e0e0',
-                                                borderLeft: '3px solid var(--primary)'
-                                            }}>
-                                                "{activeItem.thought}"
-                                            </div>
-                                        );
-                                    }
-                                    return null;
-                                })()}
-
                                 {/* Tags */}
                                 {currentQuery.split('|').map((tag, i) => (
                                     <span key={i} className={styles.aiTag}>{tag.trim()}</span>

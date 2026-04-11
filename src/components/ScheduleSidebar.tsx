@@ -7,29 +7,45 @@ interface ScheduleSidebarProps {
     schedule: ScheduleItem[];
     currentQuery: string | null;
     onRemoveItem: (index: number) => void;
+    onRecallItem: (item: ScheduleItem) => void;
 }
 
-export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem }: ScheduleSidebarProps) {
+export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
+    const isPast = (endTime: string) => {
+        try {
+            const [hours, minutes] = endTime.split(':').map(Number);
+            const now = new Date();
+            const end = new Date();
+            end.setHours(hours, minutes, 0, 0);
+            return now > end;
+        } catch (e) {
+            return false;
+        }
+    };
+
     return (
         <div className={styles.sidebar}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', color: 'var(--primary)', fontWeight: 600 }}>
-                <Clock size={20} />
-                <span>My Schedule</span>
-            </div>
             {schedule.length > 0 ? schedule.map((item, i) => {
-                const isActive = currentQuery === ((item.queries ? item.queries.join('|') : (item.query || '')) + (item.priorityTrack ? '|' + item.priorityTrack : ''));
+                const past = isPast(item.end);
+                const isActive = !past && currentQuery === ((item.queries ? item.queries.join('|') : (item.query || '')) + (item.priorityTrack ? '|' + item.priorityTrack : ''));
+
                 return (
                     <div
                         key={i}
-                        className={styles.scheduleItem}
+                        className={`${styles.scheduleItem} ${past ? styles.pastItem : ''}`}
+                        onClick={() => past && onRecallItem(item)}
                         style={{
                             position: 'relative',
                             display: 'flex',
                             justifyContent: 'space-between',
                             alignItems: 'flex-start',
                             borderLeft: isActive ? '3px solid var(--primary)' : '3px solid transparent',
-                            background: isActive ? 'rgba(3, 218, 198, 0.05)' : undefined
+                            background: isActive ? 'rgba(3, 218, 198, 0.05)' : undefined,
+                            opacity: past ? 0.5 : 1,
+                            cursor: past ? 'pointer' : 'default',
+                            transition: 'all 0.2s'
                         }}
+                        title={past ? "Click to recall this context / クリックでこの文脈を再利用" : undefined}
                     >
                         <div style={{ flex: 1, marginRight: '8px' }}>
                             <div className={styles.scheduleTime} style={{ color: isActive ? 'var(--primary)' : undefined }}>{item.start} - {item.end}</div>
@@ -38,7 +54,10 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem }
                             </div>
                         </div>
                         <button
-                            onClick={() => onRemoveItem(i)}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onRemoveItem(i);
+                            }}
                             style={{
                                 background: 'transparent',
                                 border: 'none',
@@ -48,7 +67,8 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem }
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                transition: 'color 0.2s'
+                                transition: 'color 0.2s',
+                                zIndex: 2
                             }}
                             title="Remove schedule item"
                             onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}

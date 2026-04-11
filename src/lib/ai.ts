@@ -9,33 +9,27 @@ const SYSTEM_PROMPT = `
 # Role
 You are an excellent DJ assistant. Analyze the user's natural language instructions and return a list of "Start Time (HH:MM)", "End Time (HH:MM)", "Spotify Search Queries", and a short "DJ Thought" in JSON format.
 # Rules
-1.**Create Schedule**:New schedule from instructions.
-2.**Future Only**:If "future only", skip current time slot.
-3.**JSON Only**:Raw JSON output only.
+1.**Immediate Response**: If the user's request is a general mood or activity (e.g., "I want to eat crab", "Chill time"), **ACT IMMEDIATELY**. The first item in the schedule **MUST** start from the "Current Time" provided in the context. Do NOT wait for a "typical" time (like 12:00 for lunch) unless explicitly requested.
+2.**Create Schedule**: New schedule from instructions. Overwrite/merge logic applies.
+3.**Future Only**: If the user explicitly says "future only" or "tonight", you may skip the current time.
+4.**JSON Only**: Raw JSON output only.
 # Output Format
-[{"start":"00:00","end":"14:00","queries":["chill instrumental","artist:Bill Evans","genre:jazz"],"priorityTrack":"artist:\"Bill Evans\" Waltz for Debby","thought":"Morning chill jazz."},{"start":"14:00","end":"23:59","queries":["upbeat dance","genre:house","artist:Daft Punk"],"thought":"Afternoon energy."}]
+[{"start":"HH:MM (Current or Requested)","end":"HH:MM","queries":["query1","query2"],"priorityTrack":"optional","thought":"DJ comment"}]
 # Search Syntax
 - \`genre:\`: "genre:jazz"
 - \`year:\`: "year:1980-1989"
 - \`artist:\`: "artist:Queen"
 # Constraints
-- **Time**: 24-hour (HH:MM).
+- **Time**: 24-hour (HH:MM). **CRITICAL**: The first block should almost always start at the current time to start music now.
 - **Language**: 
     - **Search Queries**: **HYBRID STRATEGY**.
-      - **Generic Terms (Genre/Mood/Vibes)**: ALWAYS include **English** keywords (e.g. "Female Vocals", "90s Rock", "Piano Jazz") as they perform best on Spotify.
-      - **Specific Artists/Songs**: Use their **Native Language** (e.g. "宇多田ヒカル", "サザンオールスターズ") for accuracy.
-      - **Mix**: Provide a mix of both to maximize results. (e.g. Request "J-Pop female" -> queries: ["J-Pop female vocals", "女性ボーカル J-Pop", "artist:Aiko"])
-      - **CRITICAL**: Do not translate specific song titles unless they are commonly known by the English title globally.
-    - **DJ Thought**: **DETECT** the language used in the "User Request". The \`thought\` field **MUST** be written in that same language. (e.g. Request in French -> Thought in French).
-- **Multiple Queries & Diversity**: Provide 3-5 specific queries. **Do NOT** repeat identical keywords or queries. **DO** use knowledge to translate moods to specific artists/genres.
-    - Ex: "Relaxing" -> ["relaxing piano", "artist:\"Brian Eno\"", "artist:\"Nujabes\" instrumental", "genre:jazz artist:\"Bill Evans\""]
-- **Artist Specificity**: If specific artist requested, ALL queries must include it.
-    - Correct: "artist:\"TM Network\" Get Wild"
-    - Incorrect: "artist:TM Network Get Wild"
-- **Cultural Context**: Prioritize culturally associated songs (e.g. memes/commercials).
-    - Ex: "Music for eating crab" -> ["artist:PUFFY 渚にまつわるエトセトラ"]
-- **Priority Track**: If a specific song represents the core of the request (e.g. "Music for eating crab" -> "渚にまつわるエトセトラ", or explicitly "Play Bohemiam Rhapsody"), set "priorityTrack" to a specific query for that song using its **exact native title**.
-- **Query Strategy**: Specific song/artist associations first, then broader genre/mood. Mix "Safe Hits" and "Tasteful Selections".
+      - **Generic Terms (Genre/Mood/Vibes)**: ALWAYS include **English** keywords.
+      - **Specific Artists/Songs**: Use their **Native Language**.
+      - **Mix**: Provide a mix of both.
+    - **DJ Thought**: **DETECT** the language used in the "User Request". The \`thought\` field **MUST** be written in that same language.
+- **Multiple Queries & Diversity**: Provide 3-5 specific queries. Do NOT repeat keywords.
+- **Priority Track**: If a specific song or iconic association exists (e.g. "Crab" -> "渚にまつわるエトセトラ"), set "priorityTrack".
+- **Query Strategy**: Specific song/artist associations first, then broader genre/mood.
 `;
 
 export interface ScheduleItem {
@@ -52,7 +46,7 @@ export class AIService {
     private openai?: OpenAI;
     private storedKey?: string; // API Key for REST usage
     private backend: 'openai' | 'gemini' = 'gemini';
-    private modelName: string = 'gemini-2.5-flash';
+    private modelName: string = 'gemini-3-flash-preview';
 
     constructor(backend: 'openai' | 'gemini', apiKey: string, modelName?: string) {
         this.backend = backend;
@@ -178,9 +172,17 @@ export class AIService {
         const trackListStr = tracks.map((t, i) => `${i}: ${t.name} - ${t.artist}`).join('\n');
         const prompt = `
 # Role
-You are a music critic and DJ assistant. 
+You are a music critic and expert DJ assistant.
 # Task
-Evaluate if the following songs match the User's Request and the DJ's Intent.
+Evaluate if the following songs match the User's Request and the DJ's Intent by estimating their audio characteristics.
+Since the official Audio Features API is unavailable, you must use your internal knowledge to judge each track.
+
+# Criteria for "GOOD FIT"
+1. **Artist Match (STRICT)**: If the user explicitly mentions an artist, prioritize or strictly require them. Do NOT replace them with similar artists unless the request is broad.
+2. **Genre & Style**: Does it belong to the requested genre?
+3. **Estimated BPM & Energy**: Does the tempo and intensity match?
+4. **Vibe Match**: Overall, would a professional DJ play this song in this context?
+
 # Input
 - User Request: "${userRequest}"
 ${thought ? `- DJ Intent: "${thought}"` : ''}
@@ -189,8 +191,8 @@ ${trackListStr}
 
 # Output Format
 Return ONLY a JSON array of indices (numbers) for songs that are a "GOOD FIT".
-Exclude songs that are clearly irrelevant, wrong genre, or have a completely different mood.
-Example: [0, 2, 5]
+Crucial: If a specific artist was requested, 80-100% of your selection should ideally be from that artist.
+Example: [1, 4, 7]
 `;
 
         try {

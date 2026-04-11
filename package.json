@@ -1,6 +1,6 @@
 {
   "name": "context-dj",
-  "version": "2026.01.08",
+  "version": "2026.04.12",
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
@@ -26,6 +26,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "baseline-browser-mapping": "^2.10.18",
     "eslint": "^9",
     "eslint-config-next": "16.0.7",
     "typescript": "^5"

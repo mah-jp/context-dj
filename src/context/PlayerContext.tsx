@@ -17,6 +17,7 @@ interface PlayerContextType {
     schedule: ScheduleItem[];
     setSchedule: (s: ScheduleItem[]) => void;
     currentQuery: string | null;
+    currentThought: string | null;
     queue: Track[];
     devices: SpotifyApi.UserDevice[];
     refreshDevices: () => Promise<void>;
@@ -43,6 +44,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [deviceName, setDeviceName] = useState('');
     const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
     const [currentQuery, setCurrentQuery] = useState<string | null>(null);
+    const [currentThought, setCurrentThought] = useState<string | null>(null);
     const [needsOnboarding, setNeedsOnboarding] = useState(false);
     const [queue, setQueue] = useState<Track[]>([]);
     const [devices, setDevices] = useState<SpotifyApi.UserDevice[]>([]);
@@ -92,6 +94,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         // Update Status
         const djStatus = djRef.current.getDJStatus();
         setCurrentQuery(djStatus.currentQuery);
+        setCurrentThought(djStatus.currentThought);
 
         // Sync Logs
         if (typeof djRef.current.getProcessLog === 'function') {
@@ -378,6 +381,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             schedule,
             setSchedule,
             currentQuery,
+            currentThought,
             queue,
             devices,
             refreshDevices,

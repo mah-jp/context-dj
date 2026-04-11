@@ -70,10 +70,12 @@ export class DJCore {
     // --- Utilities ---
 
     private normalizeTrackName(name: string): string {
-        // Remove text within parentheses (e.g. "Song (Remaster)")
-        name = name.replace(/\(.*?\)/g, '');
-        // Remove text after hyphen if it looks like metadata (e.g. "Song - Remastered 2009")
-        name = name.replace(/\s-\s.*remaster.*/i, '');
+        // Remove text within parentheses (half-width and full-width)
+        name = name.replace(/[(\[（［].*?[)\]）］]/g, '');
+        // Remove common metadata patterns after hyphen or space
+        name = name.replace(/\s[-/〜~]\s.*$/g, '');
+        // Remove remastered/version strings
+        name = name.replace(/(remaster|version|live|edit|radio|mix).*$/i, '');
 
         return name.trim().toLowerCase();
     }
@@ -109,7 +111,7 @@ export class DJCore {
         let candidates = await this.performAIFiltering(filteredTracks, context);
 
         // 6. Select Final Set (Shuffle & Pick)
-        let finalTracks = this.selectTopTracks(candidates);
+        let finalTracks = this.selectTopTracks(candidates, targetArtists);
 
         // 7. Merge Priority Track
         if (priorityTracks.length > 0) {
@@ -202,8 +204,8 @@ export class DJCore {
 
             try {
                 const [trackRes, playlistRes] = await Promise.all([
-                    this.spotify.searchTracks(searchQuery, { limit: this.config.trackSearchLimit }),
-                    this.spotify.searchPlaylists(searchQuery, { limit: 2 })
+                    this.spotify.searchTracks(searchQuery, { limit: 30 }), // Increased for more direct artist hits
+                    this.spotify.searchPlaylists(searchQuery, { limit: 8 }) // Increased for more curated variety
                 ]);
 
                 if (trackRes.tracks && trackRes.tracks.items) {
@@ -211,25 +213,27 @@ export class DJCore {
                 }
 
                 if (playlistRes.playlists && playlistRes.playlists.items.length > 0) {
-                    const bestPlaylist = playlistRes.playlists.items[0];
-                    try {
-                        const plTracksRes = await this.spotify.getPlaylistTracks(bestPlaylist.id, { limit: 20 });
-                        const extractedTracks = plTracksRes.items
-                            .map(item => {
-                                const t = item.track as Track;
-                                // Filter out episodes or local files
-                                if (!t || t.type !== 'track' || !t.id) return null;
-                                t.contextName = `Playlist: ${bestPlaylist.name}`;
-                                return t;
-                            })
-                            .filter((t): t is Track => t !== null);
+                    // Process top playlists (up to 3) to get curated diversity
+                    const targetPlaylists = playlistRes.playlists.items.slice(0, 3);
 
+                    for (const pl of targetPlaylists) {
+                        try {
+                            const plTracksRes = await this.spotify.getPlaylistTracks(pl.id, { limit: 25 });
+                            const extractedTracks = plTracksRes.items
+                                .map(item => {
+                                    const t = item.track as Track;
+                                    if (!t || t.type !== 'track' || !t.id) return null;
+                                    t.contextName = `Playlist: ${pl.name}`;
+                                    return t;
+                                })
+                                .filter((t): t is Track => t !== null);
 
-                        this.addLog(`📜 Scanned Playlist: "${bestPlaylist.name}" (${extractedTracks.length} tracks)`);
-                        this.logTrackSamples(extractedTracks);
-                        allRawTracks.push(...extractedTracks);
-                    } catch (plErr) {
-                        console.warn(`⚠️ Failed to load tracks from playlist ${bestPlaylist.name}:`, plErr);
+                            this.addLog(`📜 Scanned Playlist: "${pl.name}" (${extractedTracks.length} tracks)`);
+                            this.logTrackSamples(extractedTracks);
+                            allRawTracks.push(...extractedTracks);
+                        } catch (plErr) {
+                            console.warn(`⚠️ Failed to load tracks from playlist ${pl.name}:`, plErr);
+                        }
                     }
                 }
             } catch (error) {
@@ -237,8 +241,7 @@ export class DJCore {
             }
         }));
 
-        // DO NOT SORT BY POPULARITY HERE. 
-        // Just shuffle gently to mix results from different queries
+        // Shuffle gently to mix results from different queries
         return allRawTracks.sort(() => Math.random() - 0.5);
     }
 
@@ -247,7 +250,6 @@ export class DJCore {
         const uniqueTracks: Track[] = [];
 
         for (const track of tracks) {
-            // Use shared normalization
             const cleanName = this.normalizeTrackName(track.name);
             const cleanArtist = track.artists[0]?.name.toLowerCase().trim() || '';
             const key = `${cleanName}|${cleanArtist}`;
@@ -262,10 +264,6 @@ export class DJCore {
 
     private applyTrackFilters(tracks: Track[], targetArtists: string[]): Track[] {
         let candidates = tracks;
-
-        // Note: We removed Strict Artist Filtering because it was too aggressive for mixed queries.
-        // (e.g. "80s hits" + "Queen" -> previously filtered OUT all non-Queen 80s hits)
-        // Now we trust the search queries to bring relevant results.
 
         // Popularity Filtering (Adaptive)
         const PREFERRED_POPULARITY = 15;
@@ -298,18 +296,38 @@ export class DJCore {
         this.addLog(`   👉 [Sample]: ${samples} ${more}`);
     }
 
-    private selectTopTracks(tracks: Track[]): Track[] {
+    private shuffle<T>(array: T[]): T[] {
+        const arr = [...array];
+        for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+    }
+
+    private selectTopTracks(tracks: Track[], targetArtists: string[] = []): Track[] {
         const MAX_TOP_TRACKS = 40;
 
-        // Shuffle FIRST to ensure Serendipity
-        // We do strictly random shuffle here.
-        const shuffled = [...tracks].sort(() => Math.random() - 0.5);
+        // Sort to prioritize Target Artists, then Playlists, then others
+        const sorted = this.shuffle(tracks).sort((a, b) => {
+            const aName = (a.artists[0]?.name || '').toLowerCase();
+            const bName = (b.artists[0]?.name || '').toLowerCase();
 
-        // Then take the top N
-        const sliceCount = Math.min(MAX_TOP_TRACKS, shuffled.length);
-        const finalSelection = shuffled.slice(0, sliceCount);
+            const aIsTarget = targetArtists.some(ta => aName.includes(ta)) ? 1 : 0;
+            const bIsTarget = targetArtists.some(ta => bName.includes(ta)) ? 1 : 0;
 
-        return finalSelection;
+            if (aIsTarget !== bIsTarget) return bIsTarget - aIsTarget;
+
+            // Secondary priority: Playlist tracks (but only if artist doesn't match)
+            const aIsPl = a.contextName?.startsWith('Playlist:') ? 1 : 0;
+            const bIsPl = b.contextName?.startsWith('Playlist:') ? 1 : 0;
+            if (aIsPl !== bIsPl) return bIsPl - aIsPl;
+
+            return 0; // Keep shuffle order
+        });
+
+        const sliceCount = Math.min(MAX_TOP_TRACKS, sorted.length);
+        return sorted.slice(0, sliceCount);
     }
 
     // --- Device Management ---
@@ -452,6 +470,7 @@ export class DJCore {
     }
 
     private sessionPlayedUris = new Set<string>();
+    private sessionPlayedKeys = new Set<string>();
     private isRefilling = false;
 
     async createSchedule(instruction: string, personalContext?: string) {
@@ -579,6 +598,7 @@ export class DJCore {
             this.processLog = [];
             this.addLog("▶️ New DJ Request Started");
             this.sessionPlayedUris.clear();
+            this.sessionPlayedKeys.clear();
 
             let tracks: Track[] = [];
 
@@ -610,7 +630,11 @@ export class DJCore {
 
             try {
                 // Register initial tracks to history
-                tracks.forEach(t => this.sessionPlayedUris.add(t.uri));
+                tracks.forEach(t => {
+                    this.sessionPlayedUris.add(t.uri);
+                    const key = `${this.normalizeTrackName(t.name)}|${t.artists[0]?.name.toLowerCase().trim() || ''}`;
+                    this.sessionPlayedKeys.add(key);
+                });
 
                 await this.playTracks(tracks);
             } catch (e) {
@@ -664,11 +688,17 @@ export class DJCore {
                 }); // No priority track needed for refill usually
 
                 // 4. Filter duplicates (Played in this session OR currently in queue)
-                const queueUris = new Set(queue.map(t => t.uri));
-                const candidates = newTracks.filter(t =>
-                    !this.sessionPlayedUris.has(t.uri) &&
-                    !queueUris.has(t.uri)
-                );
+                const queueKeys = new Set(queue.map(item => {
+                    const t = item as Track;
+                    return `${this.normalizeTrackName(t.name)}|${t.artists[0]?.name.toLowerCase().trim() || ''}`;
+                }));
+
+                const candidates = newTracks.filter(t => {
+                    const key = `${this.normalizeTrackName(t.name)}|${t.artists[0]?.name.toLowerCase().trim() || ''}`;
+                    return !this.sessionPlayedUris.has(t.uri) &&
+                        !this.sessionPlayedKeys.has(key) &&
+                        !queueKeys.has(key);
+                });
 
                 // 5. Add to Queue
                 const REFILL_COUNT = 5;
@@ -681,6 +711,8 @@ export class DJCore {
                     for (const track of toAdd) {
                         await this.addToQueue(track.uri);
                         this.sessionPlayedUris.add(track.uri);
+                        const key = `${this.normalizeTrackName(track.name)}|${track.artists[0]?.name.toLowerCase().trim() || ''}`;
+                        this.sessionPlayedKeys.add(key);
                         // Brief delay to help Spotify digest order
                         await new Promise(r => setTimeout(r, 200));
                     }
@@ -731,14 +763,14 @@ export class DJCore {
 
     // --- Status Inspection ---
     getDJStatus() {
+        const currentItem = this.getCurrentItem();
         return {
-            currentScheduleItem: this.getCurrentItem(),
+            currentScheduleItem: currentItem,
             currentQuery: this.lastQuery,
+            currentThought: currentItem?.thought || null,
             config: this.config
         };
     }
-
-
 
     // --- Controls ---
     // Replaced library calls with direct fetch to avoid JSON parse errors on 204 responses

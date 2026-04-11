@@ -4,13 +4,15 @@ import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
-import { DJCore } from '../lib/dj-core'; // Track is inferred usually
+import { DJCore } from '../lib/dj-core';
+import { ScheduleItem } from '../lib/ai';
 import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import PlayerBar from '../components/PlayerBar';
 import ProcessLogViewer from '../components/ProcessLogViewer';
 import ScheduleSidebar from '../components/ScheduleSidebar';
 import QueueList from '../components/QueueList';
+import DynamicBackground from '../components/DynamicBackground';
 import { STORAGE_KEYS } from '../lib/constants';
 
 export default function Home() {
@@ -19,6 +21,7 @@ export default function Home() {
     authorized,
     status,
     setStatus,
+    currentTrack,
     schedule,
     setSchedule,
     currentQuery,
@@ -182,6 +185,31 @@ export default function Home() {
     }
   };
 
+  const handleRecallItem = (item: ScheduleItem) => {
+    // Priority: queries (specific) > query (backup) > userRequest (broad)
+    let text = '';
+    if (item.queries && item.queries.length > 0) {
+      text = item.queries.join(', ');
+    } else if (item.query) {
+      text = item.query;
+    } else {
+      text = item.userRequest || '';
+    }
+
+    if (!text) return;
+
+    setInputText(text);
+
+    // Focus and scroll to input
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+      // Smooth scroll if needed (though usually it's in view)
+      textareaRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    setToast({ msg: 'Context recalled! You can edit or press Send. (文脈を読み込みました)', type: 'info' });
+  };
+
   // Voice Input Handler
   const toggleListening = () => {
     if (isListening) {
@@ -232,6 +260,8 @@ export default function Home() {
 
   return (
     <main className={styles.main}>
+      {/* Use the smallest image (last in array) for the blur to massively save CPU/GPU */}
+      <DynamicBackground imageUrl={currentTrack?.album?.images?.[currentTrack.album.images.length - 1]?.url} />
       {/* 1. Header & Search Bar */}
       <header className={styles.headerContainer}>
         <div className={styles.titleWrapper}>
@@ -272,11 +302,18 @@ export default function Home() {
               className={styles.iconBtn}
               onClick={() => setShowHistory(!showHistory)}
               title="History"
+              style={{ color: showHistory ? '#ffec3d' : 'var(--primary)' }}
             >
               <History size={20} />
             </button>
 
-            <button className={styles.sendBtn} onClick={handleSend} title="Send Request" disabled={!authorized || status.includes('thinking') || status.includes('Filtering')}>
+            <button
+              className={styles.sendBtn}
+              onClick={handleSend}
+              title="Send Request"
+              disabled={!authorized || status.includes('thinking') || status.includes('Filtering')}
+              style={{ color: 'var(--primary)' }}
+            >
               {status.includes('thinking') || status.includes('Filtering') ? (
                 <Loader size={20} className={styles.spin} />
               ) : (
@@ -296,7 +333,7 @@ export default function Home() {
                 maxHeight: '300px',
                 overflowY: 'auto',
                 boxShadow: '0 16px 24px rgba(0,0,0,0.5)',
-                zIndex: 2000
+                zIndex: 3000
               }}>
                 {history.map((item, i) => (
                   <div
@@ -337,7 +374,7 @@ export default function Home() {
           <button
             className={styles.iconBtn}
             onClick={() => setShowPopularity(!showPopularity)}
-            style={{ color: showPopularity ? '#ffec3d' : undefined }}
+            style={{ color: showPopularity ? '#ffec3d' : 'var(--primary)' }}
             title={showPopularity ? "Hide Popularity" : "Show Popularity"}
           >
             <Flame size={20} fill={showPopularity ? "#ffec3d" : "none"} />
@@ -355,6 +392,7 @@ export default function Home() {
           schedule={schedule}
           currentQuery={currentQuery}
           onRemoveItem={handleRemoveScheduleItem}
+          onRecallItem={handleRecallItem}
         />
 
         {/* Main Area: Queue & Strategy */}
@@ -366,7 +404,6 @@ export default function Home() {
           deviceName={deviceName}
           currentQuery={currentQuery}
           showLogs={() => setShowLogs(true)}
-          showAiThought={showAiThought}
           schedule={schedule}
           queue={queue}
           showPopularity={showPopularity}
