@@ -6,7 +6,7 @@ import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { DJCore } from '../lib/dj-core';
 import { ScheduleItem } from '../lib/ai';
-import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info } from 'lucide-react';
+import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info, Camera } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import PlayerBar from '../components/PlayerBar';
 import ProcessLogViewer from '../components/ProcessLogViewer';
@@ -37,6 +37,7 @@ export default function Home() {
 
   const [inputText, setInputText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [setupStatus, setSetupStatus] = useState({ hasClientId: false, hasAiKey: false });
 
   const [showHistory, setShowHistory] = useState(false);
@@ -89,6 +90,41 @@ export default function Home() {
       setShowAiThought(localStorage.getItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
     }
   }, [needsOnboarding]);
+
+  // Image Vision Handler
+  const handleCameraClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !djCore) return;
+
+    try {
+      setStatus('Analyzing Photo... (AIが写真から情景を読み取っています)');
+      
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = (reader.result as string).split(',')[1];
+        const mimeType = file.type;
+        
+        try {
+          const description = await djCore.analyzeImage(base64, mimeType);
+          setInputText(description);
+          setToast({ msg: 'Vision Analysis complete! (画像解析完了。選曲イメージを生成しました)', type: 'success' });
+          setStatus('Ready');
+        } catch (err: any) {
+          setToast({ msg: `Vision Error: ${err.message}`, type: 'error' });
+          setStatus('Error in Vision');
+        } finally {
+          if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      setStatus('Ready');
+    }
+  };
 
   const handleLogin = () => {
     const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
@@ -274,6 +310,24 @@ export default function Home() {
 
           {/* Input Bar */}
           <div className={styles.inputBar} style={{ width: '100%', position: 'relative' }}>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleImageUpload}
+              accept="image/*"
+              capture="environment"
+              style={{ display: 'none' }}
+            />
+            
+            <button
+              className={styles.iconBtn}
+              onClick={handleCameraClick}
+              title="Camera/Vision Input"
+              style={{ color: 'var(--primary)' }}
+            >
+              <Camera size={20} />
+            </button>
+
             {/* Voice Input Button (Moved Left) */}
             <button
               onClick={toggleListening}

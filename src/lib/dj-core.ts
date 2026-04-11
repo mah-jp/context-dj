@@ -45,6 +45,11 @@ export class DJCore {
         this.ai = new AIService(backend, apiKey, modelName);
     }
 
+    async analyzeImage(base64Image: string, mimeType: string): Promise<string> {
+        if (!this.ai) throw new Error("AI service not initialized (AIサービスが初期化されていません)");
+        return this.ai.analyzeImage(base64Image, mimeType);
+    }
+
     getProcessLog(): string[] {
         return this.processLog;
     }

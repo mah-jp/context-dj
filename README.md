@@ -23,16 +23,12 @@ Unlike standard shuffle or playlists, ContextDJ builds a **context-aware schedul
 
 ## ✨ Key Features
 
-- **🎨 Immersive Experience**: A high-fidelity dynamic background that shifts and adapts based on the currently playing album art, providing a cinematic atmosphere.
-- **✨ DJ Insight**: Access the "inner thoughts" of your AI DJ in real-time. Understand the creative reasoning and mood changes behind every transition.
-- **🗣️ Natural Language Interface**: Just tell the DJ what you want to hear. No complex filters needed.
-    - **🎙️ Voice Input**: Speak your request directly. Supports multiple languages (configurable in settings).
-- **🧠 AI-Powered Curation**: Supports **OpenAI (GPT-4o)** and **Google Gemini** models to understand nuance and musical context.
-- **🎯 Smart Selection (AI Filtering)**: (Experimental) Automatically verifies if searched tracks genuinely match your request before adding them to the queue. **Enabled by default** for higher relevance.
-- **🥣 Auto-Refill (Okawari)**: The DJ automatically queues up more tracks ("Okawari") when the playlist runs low, ensuring the music never stops.
-- **📱 Responsive & PWA Support**: Optimized for both Desktop and Mobile (2-row compact player bar). Installable as a PWA for a native experience.
-- **🔒 Privacy First**: **Bring Your Own Key (BYOK)** architecture. Your API keys are stored **locally in your browser** (localStorage). We never see your data.
-- **🌊 Seamless Spotify Integration**: Connects with your Spotify Premium account to play curated tracks across your devices.
+- **📸 Context Vision**: Use your camera to "show" the DJ your environment. The AI analyzes visual context, artistic mood/lighting to suggest perfect soundtracks.
+- **♻️ Context Recall**: Instantly re-summon past moods. Clicking archived schedule items lets you remix and reuse previous contexts.
+- **✨ DJ Insight**: Real-time visibility into the AI's creative "train of thought," explaining why each track and transition was chosen.
+- **🎯 AI Filtering**: An automated verification layer that ensures Spotify search results genuinely match your complex requests.
+- **🥣 Auto-Refill (Okawari)**: An intelligent, endless loop that automatically generates new schedule items before the music stops.
+- **🔒 Privacy First (BYOK)**: Direct client-to-service communication. Your API keys (Spotify, OpenAI, Gemini) never leave your browser.
 
 ## 🚀 Getting Started
 

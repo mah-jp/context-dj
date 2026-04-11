@@ -7,7 +7,6 @@
   --text-sub: #b3b3b3;
   --accent: var(--primary);
 
-
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -532,7 +531,6 @@
   animation-delay: 0.8s;
 }
 
-
 /* Responsive adjustments */
 @media (max-width: 768px) {
   .contentGrid {
@@ -549,10 +547,10 @@
     /* Prevent flex crushing */
     border-right: none;
     border-bottom: 1px solid #333;
-    padding: 6px 8px; /* Tightened padding even more */
+    padding: 6px 8px;
+    /* Tightened padding even more */
     gap: 0;
   }
-
 
   .bottomPlayer {
     padding: 0 8px;
@@ -560,13 +558,13 @@
 
   /* Header Mobile Optimizations */
   .headerContainer {
-    padding: 8px;
-    gap: 8px;
+    padding: 6px 4px;
+    /* Extreme tight padding for mobile widths */
+    gap: 4px;
   }
 
   .titleWrapper {
-    display: flex;
-    /* Show logo on mobile */
+    display: none;
   }
 
   .title {
@@ -580,7 +578,26 @@
 
   .inputBar {
     max-width: none;
-    /* Let input take full available width */
+    gap: 2px;
+    padding: 2px 4px;
+    margin: 0;
+  }
+
+  .headerRight {
+    gap: 2px;
+    margin-left: 2px;
+  }
+
+  .iconBtn,
+  .sendBtn {
+    padding: 4px;
+    /* Shrink button footprint on mobile */
+  }
+
+  .input {
+    min-width: 50px;
+    /* Allow textarea to shrink significantly */
+    font-size: 0.9rem;
   }
 
   /* Bottom Player Mobile Optimizations */

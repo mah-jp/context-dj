@@ -232,4 +232,66 @@ Example: [1, 4, 7]
             return tracks.map(t => t.id); // Fallback
         }
     }
+
+    async analyzeImage(base64Image: string, mimeType: string): Promise<string> {
+        const VISION_PROMPT = `
+Analyze this image for music curation. 
+Instructions:
+- Describe the scene realistically, artistically, and musically.
+- OUTPUT ONLY a single, evocative sentence in Japanese.
+- DO NOT include headers (e.g., "1.", "Realism:"), preambles, or any other text.
+- Example: "海辺の夕暮れ、暖かなオレンジの光に包まれた静かなジャズが流れるカフェの雰囲気。"
+`;
+
+        try {
+            if (this.backend === 'openai' && this.openai) {
+                // OpenAI Vision
+                const response = await this.openai.chat.completions.create({
+                    model: this.modelName.includes('gpt-4') ? this.modelName : "gpt-4o-mini",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text", text: VISION_PROMPT },
+                                {
+                                    type: "image_url",
+                                    image_url: {
+                                        "url": `data:${mimeType};base64,${base64Image}`,
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                });
+                return response.choices[0].message.content || 'No description.';
+            } else if (this.backend === 'gemini') {
+                // Gemini Vision
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${this.storedKey}`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [
+                                { text: VISION_PROMPT },
+                                { inline_data: { mime_type: mimeType, data: base64Image } }
+                            ]
+                        }]
+                    })
+                });
+
+                if (!response.ok) {
+                    const err = await response.text();
+                    throw new Error(`Gemini Vision Error: ${response.status} - ${err}`);
+                }
+
+                const data = await response.json();
+                return data.candidates?.[0]?.content?.parts?.[0]?.text || 'No description.';
+            }
+        } catch (e) {
+            console.error('Vision Analysis Failed:', e);
+            throw e;
+        }
+        return "AI backend not configured for Vision.";
+    }
 }
