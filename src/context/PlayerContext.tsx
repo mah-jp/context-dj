@@ -157,9 +157,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     // Load AI Config
                     const openaiKey = localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY);
-                    const openaiModel = localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-4o-mini';
+                    const openaiModel = localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-5.4-mini';
                     const geminiKey = localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY);
-                    const geminiModel = localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-2.0-flash';
+                    const geminiModel = localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-3.5-flash';
                     const selectedProvider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) || 'openai';
 
                     if (selectedProvider === 'gemini' && geminiKey) {

@@ -46,14 +46,14 @@ export class AIService {
     private openai?: OpenAI;
     private storedKey?: string; // API Key for REST usage
     private backend: 'openai' | 'gemini' = 'gemini';
-    private modelName: string = 'gemini-3-flash-preview';
+    private modelName: string = 'gemini-3.5-flash';
 
     constructor(backend: 'openai' | 'gemini', apiKey: string, modelName?: string) {
         this.backend = backend;
         if (modelName) {
             this.modelName = modelName;
         } else if (backend === 'openai') {
-            this.modelName = 'gpt-4o-mini';
+            this.modelName = 'gpt-5.4-mini';
         }
 
         if (backend === 'openai') {
@@ -247,7 +247,7 @@ Instructions:
             if (this.backend === 'openai' && this.openai) {
                 // OpenAI Vision
                 const response = await this.openai.chat.completions.create({
-                    model: this.modelName.includes('gpt-4') ? this.modelName : "gpt-4o-mini",
+                    model: (this.modelName.includes('gpt-4') || this.modelName.includes('gpt-5')) ? this.modelName : "gpt-5.4-mini",
                     messages: [
                         {
                             role: "user",

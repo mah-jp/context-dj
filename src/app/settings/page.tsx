@@ -27,9 +27,9 @@ export default function Settings() {
         if (typeof window !== 'undefined') {
             setSpotifyClientId(localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID) || '');
             setOpenAiKey(localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY) || '');
-            setOpenAiModel(localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-4o-mini');
+            setOpenAiModel(localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-5.4-mini');
             setGeminiKey(localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY) || '');
-            setGeminiModel(localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-2.5-flash');
+            setGeminiModel(localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-3.5-flash');
 
             setVoiceLang(localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) || navigator.language || 'ja-JP');
 
@@ -229,11 +229,11 @@ export default function Settings() {
                                 className={styles.input}
                                 value={openAiModel}
                                 onChange={(e) => setOpenAiModel(e.target.value)}
-                                placeholder="gpt-4o-mini"
+                                placeholder="gpt-5.4-mini"
                             />
                             <p className={styles.description}>
-                                Optional. Default: gpt-4o-mini.<br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は gpt-4o-mini が使用されます。</span>
+                                Optional. Default: gpt-5.4-mini.<br />
+                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は gpt-5.4-mini が使用されます。</span>
                             </p>
                         </div>
                     </>
@@ -268,11 +268,11 @@ export default function Settings() {
                                 className={styles.input}
                                 value={geminiModel}
                                 onChange={(e) => setGeminiModel(e.target.value)}
-                                placeholder="gemini-2.5-flash"
+                                placeholder="gemini-3.5-flash"
                             />
                             <p className={styles.description}>
-                                Optional. Default: gemini-2.5-flash. See <a href="https://ai.google.dev/models/gemini" target="_blank" style={{ color: 'var(--primary)' }}>Gemini Models</a>.<br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は gemini-2.5-flash が使用されます。</span>
+                                Optional. Default: gemini-3.5-flash. See <a href="https://ai.google.dev/models/gemini" target="_blank" style={{ color: 'var(--primary)' }}>Gemini Models</a>.<br />
+                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は gemini-3.5-flash が使用されます。</span>
                             </p>
                         </div>
                     </>
