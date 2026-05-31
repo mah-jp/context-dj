@@ -7,29 +7,24 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // Prompt Template
 const SYSTEM_PROMPT = `
 # Role
-You are an excellent DJ assistant. Analyze the user's natural language instructions and return a list of "Start Time (HH:MM)", "End Time (HH:MM)", "Spotify Search Queries", and a short "DJ Thought" in JSON format.
-# Rules
-1.**Immediate Response**: If the user's request is a general mood or activity (e.g., "I want to eat crab", "Chill time"), **ACT IMMEDIATELY**. The first item in the schedule **MUST** start from the "Current Time" provided in the context. Do NOT wait for a "typical" time (like 12:00 for lunch) unless explicitly requested.
-2.**Create Schedule**: New schedule from instructions. Overwrite/merge logic applies.
-3.**Future Only**: If the user explicitly says "future only" or "tonight", you may skip the current time.
-4.**JSON Only**: Raw JSON output only.
-# Output Format
-[{"start":"HH:MM (Current or Requested)","end":"HH:MM","queries":["query1","query2"],"priorityTrack":"optional","thought":"DJ comment"}]
-# Search Syntax
-- \`genre:\`: "genre:jazz"
-- \`year:\`: "year:1980-1989"
-- \`artist:\`: "artist:Queen"
-# Constraints
-- **Time**: 24-hour (HH:MM). **CRITICAL**: The first block should almost always start at the current time to start music now.
-- **Language**: 
-    - **Search Queries**: **HYBRID STRATEGY**.
-      - **Generic Terms (Genre/Mood/Vibes)**: ALWAYS include **English** keywords.
-      - **Specific Artists/Songs**: Use their **Native Language**.
-      - **Mix**: Provide a mix of both.
-    - **DJ Thought**: **DETECT** the language used in the "User Request". The \`thought\` field **MUST** be written in that same language.
-- **Multiple Queries & Diversity**: Provide 3-5 specific queries. Do NOT repeat keywords.
-- **Priority Track**: If a specific song or iconic association exists (e.g. "Crab" -> "渚にまつわるエトセトラ"), set "priorityTrack".
-- **Query Strategy**: Specific song/artist associations first, then broader genre/mood.
+You are ContextDJ, an expert radio DJ and music curator. Your mission is to analyze user requests, understand the emotional and situational context (time of day, mood, activity), and design a seamless music schedule.
+
+# Design Principles
+1. **Immediate Response (Start Now)**: If the user's request is a general mood or activity (e.g., "I want to relax", "Chill time"), the first item in the schedule MUST start from the current time provided in the context. Do not wait for a typical time (like 12:00) unless explicitly requested.
+2. **Seamless Flow & Transitions**: Ensure a logical flow between time blocks. The mood and energy should transition smoothly (e.g., transitioning from high-energy afternoon beats to low-key lounge music in the evening).
+3. **Future Preference**: If the user explicitly mentions "future only", "tonight", or a specific future time, you may skip the current time for the initial block.
+
+# Spotify Query Generation Rules
+- **Hybrid Query Strategy**:
+  - **Specific Artists/Songs**: Use their exact native spelling (e.g., artist:"宇多田ヒカル", artist:"Tatsuro Yamashita").
+  - **Broad Genres/Moods/Vibes**: ALWAYS use English keywords, as Spotify's search performs best with them (e.g., genre:jazz, genre:rnb, vibe:chill).
+  - **Mix**: Provide a mix of specific and broad queries to give the player a diverse candidate pool.
+- **Query Density & Variety**: Provide 3 to 5 distinct, non-repetitive search queries per block. Do not repeat the same keywords within a block.
+- **Priority Track**: If the user explicitly requests a specific song or artist, or if a block has an iconic starting track (e.g., "Crab" -> "渚にまつわるエトセトラ"), specify it in the priorityTrack field with a precise query (e.g., track:"Plastic Love" artist:"Mariya Takeuchi").
+
+# DJ Thought Rules
+- Detect the language of the user's request. Write the thought field in that exact language.
+- Speak in a friendly, sophisticated, and passionate radio-DJ tone. Explain the vibe of the selection and the flow of the transition.
 `;
 
 export interface ScheduleItem {
@@ -100,16 +95,14 @@ export class AIService {
                         { role: "system", content: SYSTEM_PROMPT },
                         { role: "user", content: contextInfo }
                     ],
-                    model: this.modelName, // Cost effective
+                    model: this.modelName,
+                    response_format: { type: "json_object" }
                 });
                 responseText = completion.choices[0].message.content || '[]';
 
             } else if (this.backend === 'gemini') {
-                // Direct REST API call to debug/bypass SDK issues
+                // Direct REST API call with Structured Output config
                 const apiKey = this.storedKey;
-
-                // 2. Generate Content
-                // Use Flash model to avoid 429 Rate Limits on free tier (Pro quota is strict)
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${apiKey}`;
 
                 const response = await fetch(url, {
@@ -122,7 +115,28 @@ export class AIService {
                             parts: [{
                                 text: SYSTEM_PROMPT + "\n\n" + contextInfo
                             }]
-                        }]
+                        }],
+                        generationConfig: {
+                            responseMimeType: "application/json",
+                            responseSchema: {
+                                type: "array",
+                                description: "Timeline schedule of DJ sets.",
+                                items: {
+                                    type: "object",
+                                    properties: {
+                                        start: { type: "string" },
+                                        end: { type: "string" },
+                                        queries: {
+                                            type: "array",
+                                            items: { type: "string" }
+                                        },
+                                        priorityTrack: { type: "string" },
+                                        thought: { type: "string" }
+                                    },
+                                    required: ["start", "end", "queries", "thought"]
+                                }
+                            }
+                        }
                     })
                 });
 
@@ -137,7 +151,7 @@ export class AIService {
 
             console.log('AI Raw Output:', responseText);
 
-            // Cleanup response (remove markdown if present)
+            // Cleanup response (ensure it can be parsed cleanly)
             const cleanJson = responseText
                 .replace(/```json/g, '')
                 .replace(/```/g, '')
@@ -173,26 +187,26 @@ export class AIService {
         const prompt = `
 # Role
 You are a music critic and expert DJ assistant.
+
 # Task
-Evaluate if the following songs match the User's Request and the DJ's Intent by estimating their audio characteristics.
-Since the official Audio Features API is unavailable, you must use your internal knowledge to judge each track.
+Evaluate if the following candidate tracks from Spotify match the User's Request and the DJ's Intent.
+Since the official Spotify Audio Features API is unavailable, you must use your internal knowledge of the songs to judge each track.
 
 # Criteria for "GOOD FIT"
-1. **Artist Match (STRICT)**: If the user explicitly mentions an artist, prioritize or strictly require them. Do NOT replace them with similar artists unless the request is broad.
-2. **Genre & Style**: Does it belong to the requested genre?
-3. **Estimated BPM & Energy**: Does the tempo and intensity match?
-4. **Vibe Match**: Overall, would a professional DJ play this song in this context?
+1. **Negative Filtering (CRITICAL)**:
+   - Exclude "music box" (オルゴール), "karaoke" (カラオケ), "instrumental cover" (カバー) of popular songs (unless explicitly requested). We want the original artist's track.
+   - Exclude low-quality live recordings or audiobooks/podcasts that slipped into search results.
+2. **Artist Match (STRICT)**:
+   - If the user explicitly mentions an artist, prioritize or strictly require them. Keep their tracks (80-100% of selection) and exclude cover versions by other artists.
+3. **Estimated Audio Profile Alignment**:
+   - Estimate the BPM, Energy (intensity), Valence (mood/brightness), and instrumentation of the tracks based on your internal knowledge.
+   - Ensure the track matches the tempo and vibe described in the DJ Intent (e.g., do not keep high-energy electronic music if the vibe is "calm piano jazz").
 
 # Input
 - User Request: "${userRequest}"
 ${thought ? `- DJ Intent: "${thought}"` : ''}
 - Found Tracks:
 ${trackListStr}
-
-# Output Format
-Return ONLY a JSON array of indices (numbers) for songs that are a "GOOD FIT".
-Crucial: If a specific artist was requested, 80-100% of your selection should ideally be from that artist.
-Example: [1, 4, 7]
 `;
 
         try {
@@ -201,6 +215,7 @@ Example: [1, 4, 7]
                 const completion = await this.openai.chat.completions.create({
                     messages: [{ role: "user", content: prompt }],
                     model: this.modelName,
+                    response_format: { type: "json_object" }
                 });
                 responseText = completion.choices[0].message.content || '[]';
             } else if (this.backend === 'gemini') {
@@ -210,7 +225,15 @@ Example: [1, 4, 7]
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }]
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: {
+                            responseMimeType: "application/json",
+                            responseSchema: {
+                                type: "array",
+                                description: "Array of indices representing tracks that match the criteria.",
+                                items: { type: "integer" }
+                            }
+                        }
                     })
                 });
                 if (!response.ok) throw new Error(`Gemini API Error: ${response.status}`);
@@ -235,12 +258,12 @@ Example: [1, 4, 7]
 
     async analyzeImage(base64Image: string, mimeType: string): Promise<string> {
         const VISION_PROMPT = `
-Analyze this image for music curation. 
+Analyze the visual scene in this image and translate its mood into music curation concepts.
 Instructions:
-- Describe the scene realistically, artistically, and musically.
-- OUTPUT ONLY a single, evocative sentence in Japanese.
-- DO NOT include headers (e.g., "1.", "Realism:"), preambles, or any other text.
-- Example: "海辺の夕暮れ、暖かなオレンジの光に包まれた静かなジャズが流れるカフェの雰囲気。"
+- Observe colors, light, textures, emotions, and overall atmosphere.
+- Synthesize these visual elements into a future-looking, highly evocative Japanese sentence that describes the scene and directly suggests the appropriate musical texture (e.g., instrumentation, tempo, mood, genre).
+- Example: "黄金色の柔らかな夕陽が差し込む静かな部屋。温かみのあるアコースティックギターと、BPM70程度のゆったりとしたローファイビーツが溶け合う穏やかな空間。"
+- Output ONLY the sentence. Do not include headers, quotes, or preambles.
 `;
 
         try {
