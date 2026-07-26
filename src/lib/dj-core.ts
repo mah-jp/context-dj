@@ -1,10 +1,9 @@
 import SpotifyWebApi from 'spotify-web-api-js';
-import { AIService, ScheduleItem } from './ai';
-import { STORAGE_KEYS } from './constants';
+import { AIService } from './ai';
+import { STORAGE_KEYS, PLAYBACK_CONSTANTS } from './constants';
+import { AIProvider, ScheduleItem, Track, DJConfig } from './types';
 
-export interface Track extends SpotifyApi.TrackObjectFull {
-    contextName?: string;
-}
+export type { Track };
 
 export class DJCore {
     private spotify: SpotifyWebApi.SpotifyWebApiJs;
@@ -13,9 +12,9 @@ export class DJCore {
     private processLog: string[] = [];
     private lastQuery: string | null = null;
     private activeDeviceId: string | null = null;
-    private config = {
-        minPopularity: 45,
-        trackSearchLimit: 40, // Reduced for web perfo
+    private config: DJConfig = {
+        minPopularity: PLAYBACK_CONSTANTS.MIN_TRACK_POPULARITY,
+        trackSearchLimit: PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT,
         onlyOfficial: false,
         aiFiltering: true
     };
@@ -33,7 +32,7 @@ export class DJCore {
         }
     }
 
-    updateConfig(config: Partial<typeof this.config>) {
+    updateConfig(config: Partial<DJConfig>) {
         this.config = { ...this.config, ...config };
     }
 
@@ -41,7 +40,7 @@ export class DJCore {
         this.spotify.setAccessToken(token);
     }
 
-    initAI(backend: 'openai' | 'gemini', apiKey: string, modelName?: string) {
+    initAI(backend: AIProvider, apiKey: string, modelName?: string) {
         this.ai = new AIService(backend, apiKey, modelName);
     }
 
@@ -675,7 +674,7 @@ export class DJCore {
             // Note: getQueue usually returns [Next1, Next2...]. It doesn't include currently playing? 
             // It depends on endpoint behavior. Let's assume queue.length is the 'upcoming' tracks.
             // If length is small, we need more.
-            if (queue.length <= 2) {
+            if (queue.length < PLAYBACK_CONSTANTS.MIN_QUEUE_SIZE_FOR_REFILL) {
 
                 // 2. Check Time Remaining (Simplified)
                 // Very simple check: If current time is NOT close to end (naive: > 5 mins?)

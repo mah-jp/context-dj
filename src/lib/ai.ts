@@ -1,5 +1,9 @@
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { DEFAULT_MODELS } from './constants';
+import { AIProvider, ScheduleItem } from './types';
+
+export type { ScheduleItem };
 
 // Memo: (Deprecated)
 // Web API Reference: References / Tracks / Get Recommendations | Spotify for Developers https://developer.spotify.com/documentation/web-api/reference/get-recommendations
@@ -27,28 +31,18 @@ You are ContextDJ, an expert radio DJ and music curator. Your mission is to anal
 - Speak in a friendly, sophisticated, and passionate radio-DJ tone. Explain the vibe of the selection and the flow of the transition.
 `;
 
-export interface ScheduleItem {
-    start: string;
-    end: string;
-    query: string;
-    queries?: string[]; // Optional: support multiple queries
-    priorityTrack?: string; // Optional: query for a specific song to play first
-    thought?: string; // DJ's reasoning/comment
-    userRequest?: string; // Original user instruction for context
-}
-
 export class AIService {
     private openai?: OpenAI;
     private storedKey?: string; // API Key for REST usage
-    private backend: 'openai' | 'gemini' = 'gemini';
-    private modelName: string = 'gemini-3.5-flash';
+    private backend: AIProvider = 'gemini';
+    private modelName: string = DEFAULT_MODELS.GEMINI;
 
-    constructor(backend: 'openai' | 'gemini', apiKey: string, modelName?: string) {
+    constructor(backend: AIProvider, apiKey: string, modelName?: string) {
         this.backend = backend;
         if (modelName) {
             this.modelName = modelName;
         } else if (backend === 'openai') {
-            this.modelName = 'gpt-5.4-mini';
+            this.modelName = DEFAULT_MODELS.OPENAI;
         }
 
         if (backend === 'openai') {
@@ -270,7 +264,7 @@ Instructions:
             if (this.backend === 'openai' && this.openai) {
                 // OpenAI Vision
                 const response = await this.openai.chat.completions.create({
-                    model: (this.modelName.includes('gpt-4') || this.modelName.includes('gpt-5')) ? this.modelName : "gpt-5.4-mini",
+                    model: (this.modelName.includes('gpt-4') || this.modelName.includes('gpt-5')) ? this.modelName : DEFAULT_MODELS.OPENAI,
                     messages: [
                         {
                             role: "user",

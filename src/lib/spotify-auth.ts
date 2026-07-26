@@ -65,7 +65,7 @@ export class SpotifyAuth {
 
         // Store verifier and state locally to verify later
         localStorage.setItem(STORAGE_KEYS.SPOTIFY_VERIFIER, codeVerifier);
-        localStorage.setItem('spotify_auth_state', state);
+        localStorage.setItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE, state);
 
         const args = new URLSearchParams({
             response_type: 'code',
@@ -176,6 +176,6 @@ export class SpotifyAuth {
         localStorage.removeItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
         localStorage.removeItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN);
         localStorage.removeItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
-        localStorage.removeItem('spotify_auth_state');
+        localStorage.removeItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE);
     }
 }

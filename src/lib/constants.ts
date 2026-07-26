@@ -1,3 +1,5 @@
+import { AIProvider } from './types';
+
 export const STORAGE_KEYS = {
     // Spotify Auth
     SPOTIFY_CLIENT_ID: 'spotify_client_id',
@@ -5,6 +7,7 @@ export const STORAGE_KEYS = {
     SPOTIFY_REFRESH_TOKEN: 'spotify_refresh_token',
     SPOTIFY_EXPIRES_AT: 'spotify_expires_at',
     SPOTIFY_VERIFIER: 'spotify_verifier',
+    SPOTIFY_AUTH_STATE: 'spotify_auth_state',
 
     // AI Settings
     SELECTED_AI_PROVIDER: 'selected_ai_provider',
@@ -18,10 +21,23 @@ export const STORAGE_KEYS = {
     DJ_LAST_QUERY: 'dj_last_query',
     PROMPT_HISTORY: 'prompt_history',
     PERSONAL_PREFERENCE: 'personal_preference',
+    PERSONAL_PREFERENCE_HISTORY: 'personal_pref_history',
     VOICE_INPUT_LANG: 'voice_input_lang',
     BACKGROUND_KEEP_ALIVE: 'background_keep_alive',
     SHOW_AI_THOUGHT: 'show_ai_thought',
     AI_FILTERING_ENABLED: 'ai_filtering_enabled',
+} as const;
+
+export const DEFAULT_MODELS = {
+    OPENAI: 'gpt-5.4-mini',
+    GEMINI: 'gemini-3.6-flash',
+} as const;
+
+export const DEFAULTS = {
+    AI_PROVIDER: 'openai' as AIProvider,
+    VOICE_LANG: 'ja-JP',
+    BACKGROUND_KEEP_ALIVE: false,
+    AI_FILTERING_ENABLED: true,
 } as const;
 
 export const PRIVACY_NOTICE = {
@@ -35,4 +51,7 @@ export const PLAYBACK_CONSTANTS = {
     DJ_LOOP_INTERVAL_MS: 5000,
     TOKEN_REFRESH_BUFFER_MS: 300000, // 5 minutes
     TRACK_REMAINING_THRESHOLD_MS: 10000,
+    MIN_QUEUE_SIZE_FOR_REFILL: 3,
+    TRACK_SEARCH_LIMIT: 40,
+    MIN_TRACK_POPULARITY: 45,
 } as const;

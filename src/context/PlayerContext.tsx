@@ -1,10 +1,10 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
-import { DJCore, Track } from '../lib/dj-core';
-import { ScheduleItem } from '../lib/ai';
+import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
-import { STORAGE_KEYS, PLAYBACK_CONSTANTS } from '../lib/constants';
+import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
+import { AIProvider, ScheduleItem, Track } from '../lib/types';
 
 interface PlayerContextType {
     djCore: DJCore | null;
@@ -157,10 +157,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     // Load AI Config
                     const openaiKey = localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY);
-                    const openaiModel = localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-5.4-mini';
+                    const openaiModel = localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || DEFAULT_MODELS.OPENAI;
                     const geminiKey = localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY);
-                    const geminiModel = localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-3.5-flash';
-                    const selectedProvider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) || 'openai';
+                    const geminiModel = localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || DEFAULT_MODELS.GEMINI;
+                    const selectedProvider = (localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
 
                     if (selectedProvider === 'gemini' && geminiKey) {
                         dj.initAI('gemini', geminiKey, geminiModel);

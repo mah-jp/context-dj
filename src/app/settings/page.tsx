@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
-import { STORAGE_KEYS, PRIVACY_NOTICE } from '../../lib/constants';
+import { STORAGE_KEYS, PRIVACY_NOTICE, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
+import { AIProvider } from '../../lib/types';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
@@ -13,27 +14,27 @@ export default function Settings() {
     const [openAiModel, setOpenAiModel] = useState('');
     const [geminiKey, setGeminiKey] = useState('');
     const [geminiModel, setGeminiModel] = useState('');
-    const [aiProvider, setAiProvider] = useState<'openai' | 'gemini'>('openai');
+    const [aiProvider, setAiProvider] = useState<AIProvider>(DEFAULTS.AI_PROVIDER);
     const [status, setStatus] = useState('');
     const [personalPref, setPersonalPref] = useState('');
     const [prefHistory, setPrefHistory] = useState<string[]>([]);
     const [showPrefHistory, setShowPrefHistory] = useState(false);
-    const [voiceLang, setVoiceLang] = useState('ja-JP'); // default to Japanese :-)
-    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState(false);
-    const [aiFilteringEnabled, setAiFilteringEnabled] = useState(true);
+    const [voiceLang, setVoiceLang] = useState(DEFAULTS.VOICE_LANG);
+    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState(DEFAULTS.BACKGROUND_KEEP_ALIVE);
+    const [aiFilteringEnabled, setAiFilteringEnabled] = useState(DEFAULTS.AI_FILTERING_ENABLED);
 
     useEffect(() => {
         // Load from local storage
         if (typeof window !== 'undefined') {
             setSpotifyClientId(localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID) || '');
             setOpenAiKey(localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY) || '');
-            setOpenAiModel(localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || 'gpt-5.4-mini');
+            setOpenAiModel(localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || DEFAULT_MODELS.OPENAI);
             setGeminiKey(localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY) || '');
-            setGeminiModel(localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || 'gemini-3.5-flash');
+            setGeminiModel(localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || DEFAULT_MODELS.GEMINI);
 
-            setVoiceLang(localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) || navigator.language || 'ja-JP');
+            setVoiceLang(localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) || navigator.language || DEFAULTS.VOICE_LANG);
 
-            const savedProvider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER);
+            const savedProvider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider | null;
             if (savedProvider === 'gemini') {
                 setAiProvider('gemini');
             } else {
@@ -42,19 +43,13 @@ export default function Settings() {
 
             setPersonalPref(localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE) || '');
             try {
-                // personal_pref_history is not in STORAGE_KEYS yet? 
-                // Wait, I should stick to what's defined or add it. I will skip this one if not defined.
-                // Ah, I intended to add it but didn't write to file yet.
-                // I will use literal string for now for history or add it.
-                // Let's stick to literal for history to avoid error if I forget to add it.
-                const savedHistory = localStorage.getItem('personal_pref_history');
+                const savedHistory = localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY);
                 if (savedHistory) setPrefHistory(JSON.parse(savedHistory));
             } catch (e) { console.error("History parse fail", e); }
 
-            // Default false to avoid surprise, or true? User requested it, so let's default false and let them enable.
             setBackgroundKeepAlive(localStorage.getItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) === 'true');
             const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
-            setAiFilteringEnabled(savedFiltering === null ? true : savedFiltering === 'true');
+            setAiFilteringEnabled(savedFiltering === null ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true');
         }
     }, []);
 
@@ -75,7 +70,7 @@ export default function Settings() {
         if (personalPref.trim()) {
             const newHistory = [personalPref, ...prefHistory.filter(h => h !== personalPref)].slice(0, 10);
             setPrefHistory(newHistory);
-            localStorage.setItem('personal_pref_history', JSON.stringify(newHistory));
+            localStorage.setItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, JSON.stringify(newHistory));
         }
 
         setStatus('Settings saved! (設定を保存しました)');
@@ -118,8 +113,6 @@ export default function Settings() {
                     <span>View Source on GitHub</span>
                 </a>
             </header>
-
-
 
             <div className={styles.section}>
                 <h2 className={styles.sectionTitle}>Spotify Configuration</h2>
@@ -229,11 +222,11 @@ export default function Settings() {
                                 className={styles.input}
                                 value={openAiModel}
                                 onChange={(e) => setOpenAiModel(e.target.value)}
-                                placeholder="gpt-5.4-mini"
+                                placeholder={DEFAULT_MODELS.OPENAI}
                             />
                             <p className={styles.description}>
-                                Optional. Default: gpt-5.4-mini.<br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は gpt-5.4-mini が使用されます。</span>
+                                Optional. Default: {DEFAULT_MODELS.OPENAI}.<br />
+                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は {DEFAULT_MODELS.OPENAI} が使用されます。</span>
                             </p>
                         </div>
                     </>
@@ -268,11 +261,11 @@ export default function Settings() {
                                 className={styles.input}
                                 value={geminiModel}
                                 onChange={(e) => setGeminiModel(e.target.value)}
-                                placeholder="gemini-3.5-flash"
+                                placeholder={DEFAULT_MODELS.GEMINI}
                             />
                             <p className={styles.description}>
-                                Optional. Default: gemini-3.5-flash. See <a href="https://ai.google.dev/models/gemini" target="_blank" style={{ color: 'var(--primary)' }}>Gemini Models</a>.<br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は gemini-3.5-flash が使用されます。</span>
+                                Optional. Default: {DEFAULT_MODELS.GEMINI}. See <a href="https://ai.google.dev/models/gemini" target="_blank" style={{ color: 'var(--primary)' }}>Gemini Models</a>.<br />
+                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は {DEFAULT_MODELS.GEMINI} が使用されます。</span>
                             </p>
                         </div>
                     </>
@@ -467,7 +460,7 @@ export default function Settings() {
                         <button
                             onClick={() => {
                                 if (confirm('Are you sure you want to clear your personal preferences history?\n(設定履歴を削除しますか？)')) {
-                                    localStorage.removeItem('personal_pref_history');
+                                    localStorage.removeItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY);
                                     setPrefHistory([]);
                                     setStatus('References history cleared! (設定履歴を削除しました)');
                                     setTimeout(() => setStatus(''), 3000);

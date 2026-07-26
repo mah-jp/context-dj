@@ -1,8 +1,8 @@
 import styles from '../app/page.module.css';
-import { DJCore, Track } from '../lib/dj-core';
+import { DJCore } from '../lib/dj-core';
 import { Bot, Flame, AlertTriangle } from 'lucide-react';
 import Onboarding from './Onboarding';
-import { ScheduleItem } from '../lib/ai';
+import { Track, ScheduleItem } from '../lib/types';
 
 interface QueueListProps {
     needsOnboarding: boolean;

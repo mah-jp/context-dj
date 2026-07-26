@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react';
 import styles from '../app/page.module.css';
 import { Clock, Trash2 } from 'lucide-react';
-import { ScheduleItem } from '../lib/ai';
+import { ScheduleItem } from '../lib/types';
 
 interface ScheduleSidebarProps {
     schedule: ScheduleItem[];

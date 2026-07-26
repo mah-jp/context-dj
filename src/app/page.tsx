@@ -5,7 +5,6 @@ import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { DJCore } from '../lib/dj-core';
-import { ScheduleItem } from '../lib/ai';
 import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info, Camera } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import PlayerBar from '../components/PlayerBar';
@@ -13,7 +12,8 @@ import ProcessLogViewer from '../components/ProcessLogViewer';
 import ScheduleSidebar from '../components/ScheduleSidebar';
 import QueueList from '../components/QueueList';
 import DynamicBackground from '../components/DynamicBackground';
-import { STORAGE_KEYS } from '../lib/constants';
+import { STORAGE_KEYS, DEFAULTS } from '../lib/constants';
+import { ScheduleItem, AIProvider } from '../lib/types';
 
 export default function Home() {
   const {
@@ -79,7 +79,7 @@ export default function Home() {
     // Check local storage for setup completeness
     if (typeof window !== 'undefined') {
       const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-      const provider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) || 'openai';
+      const provider = (localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
       let hasKey = false;
       if (provider === 'gemini') {
         hasKey = !!localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY);
@@ -263,7 +263,7 @@ export default function Home() {
     const recognition = new SpeechRecognition();
     // Default to 'ja-JP' but verify settings
     const savedLang = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) : null;
-    recognition.lang = savedLang || navigator.language || 'ja-JP';
+    recognition.lang = savedLang || navigator.language || DEFAULTS.VOICE_LANG;
     recognition.interimResults = true;
     recognition.continuous = false; // Stop after one sentence/pause
 
