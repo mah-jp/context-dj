@@ -19,9 +19,9 @@ export default function Settings() {
     const [personalPref, setPersonalPref] = useState('');
     const [prefHistory, setPrefHistory] = useState<string[]>([]);
     const [showPrefHistory, setShowPrefHistory] = useState(false);
-    const [voiceLang, setVoiceLang] = useState(DEFAULTS.VOICE_LANG);
-    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState(DEFAULTS.BACKGROUND_KEEP_ALIVE);
-    const [aiFilteringEnabled, setAiFilteringEnabled] = useState(DEFAULTS.AI_FILTERING_ENABLED);
+    const [voiceLang, setVoiceLang] = useState<string>(DEFAULTS.VOICE_LANG);
+    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState<boolean>(DEFAULTS.BACKGROUND_KEEP_ALIVE);
+    const [aiFilteringEnabled, setAiFilteringEnabled] = useState<boolean>(DEFAULTS.AI_FILTERING_ENABLED);
 
     useEffect(() => {
         // Load from local storage

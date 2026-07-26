@@ -35,9 +35,9 @@ export const DEFAULT_MODELS = {
 
 export const DEFAULTS = {
     AI_PROVIDER: 'openai' as AIProvider,
-    VOICE_LANG: 'ja-JP',
-    BACKGROUND_KEEP_ALIVE: false,
-    AI_FILTERING_ENABLED: true,
+    VOICE_LANG: 'ja-JP' as string,
+    BACKGROUND_KEEP_ALIVE: false as boolean,
+    AI_FILTERING_ENABLED: true as boolean,
 } as const;
 
 export const PRIVACY_NOTICE = {
