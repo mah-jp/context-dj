@@ -1,7 +1,8 @@
 import SpotifyWebApi from 'spotify-web-api-js';
 import { AIService } from './ai';
-import { STORAGE_KEYS, PLAYBACK_CONSTANTS } from './constants';
+import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
 import { AIProvider, ScheduleItem, Track, DJConfig } from './types';
+import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
 
 export type { Track };
 
@@ -25,11 +26,9 @@ export class DJCore {
         this.spotify.setAccessToken(accessToken);
 
         // Restore state
-        if (typeof window !== 'undefined') {
-            this.lastQuery = localStorage.getItem(STORAGE_KEYS.DJ_LAST_QUERY);
-            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
-            this.config.aiFiltering = savedFiltering === null ? true : savedFiltering === 'true';
-        }
+        this.lastQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, null as any);
+        const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
+        this.config.aiFiltering = savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
     }
 
     updateConfig(config: Partial<DJConfig>) {
@@ -594,9 +593,7 @@ export class DJCore {
         if (querySignature !== this.lastQuery) {
             console.log(`🎧 DJ Change: ${querySignature} `);
             this.lastQuery = querySignature;
-            if (typeof window !== 'undefined') {
-                localStorage.setItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
-            }
+            setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
 
             // New Session: Clear Log & History
             this.processLog = [];
@@ -645,9 +642,7 @@ export class DJCore {
                 console.error("Playback failed, reverting DJ state to allow retry on next tick:", e);
                 // Revert state so the next loop tick will see this as a 'new' request and try again
                 this.lastQuery = null;
-                if (typeof window !== 'undefined') {
-                    localStorage.removeItem(STORAGE_KEYS.DJ_LAST_QUERY);
-                }
+                removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
                 throw e; // Propagate error so handleSend can show toast, or loop can log it
             }
         } else {

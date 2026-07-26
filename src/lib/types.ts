@@ -20,3 +20,51 @@ export interface DJConfig {
     onlyOfficial: boolean;
     aiFiltering: boolean;
 }
+
+// Web Speech API Types
+export interface SpeechRecognitionAlternative {
+    readonly transcript: string;
+    readonly confidence: number;
+}
+
+export interface SpeechRecognitionResult {
+    readonly isFinal: boolean;
+    readonly length: number;
+    item(index: number): SpeechRecognitionAlternative;
+    [index: number]: SpeechRecognitionAlternative;
+}
+
+export interface SpeechRecognitionResultList {
+    readonly length: number;
+    item(index: number): SpeechRecognitionResult;
+    [index: number]: SpeechRecognitionResult;
+}
+
+export interface SpeechRecognitionEvent extends Event {
+    readonly resultIndex: number;
+    readonly results: SpeechRecognitionResultList;
+}
+
+export interface ISpeechRecognition extends EventTarget {
+    continuous: boolean;
+    interimResults: boolean;
+    lang: string;
+    onstart: ((this: ISpeechRecognition, ev: Event) => void) | null;
+    onresult: ((this: ISpeechRecognition, ev: SpeechRecognitionEvent) => void) | null;
+    onerror: ((this: ISpeechRecognition, ev: Event) => void) | null;
+    onend: ((this: ISpeechRecognition, ev: Event) => void) | null;
+    start(): void;
+    stop(): void;
+    abort(): void;
+}
+
+export interface ISpeechRecognitionConstructor {
+    new (): ISpeechRecognition;
+}
+
+declare global {
+    interface Window {
+        SpeechRecognition?: ISpeechRecognitionConstructor;
+        webkitSpeechRecognition?: ISpeechRecognitionConstructor;
+    }
+}

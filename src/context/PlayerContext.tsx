@@ -5,6 +5,7 @@ import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
 import { AIProvider, ScheduleItem, Track } from '../lib/types';
+import { getStorageItem, setStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 
 interface PlayerContextType {
     djCore: DJCore | null;
@@ -111,22 +112,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         const init = async () => {
             try {
                 // 0. Check Onboarding
-                if (typeof window !== 'undefined') {
-                    setNeedsOnboarding(!localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID));
-                }
+                setNeedsOnboarding(!getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID));
 
                 // 1. Check for Callback Code
                 const params = new URLSearchParams(window.location.search);
                 const code = params.get('code');
-                // Ideally we shouldn't access localStorage if window is undefined, but useEffect runs on client
-                const storedClientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+                const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
 
                 if (!storedClientId) {
                     setStatus('Please configure settings first.');
                     return;
                 }
 
-                let token = SpotifyAuth.getAccessToken();
+                let token: string | null = SpotifyAuth.getAccessToken();
 
                 if (code) {
                     setStatus('Authenticating...');
@@ -156,11 +154,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     const dj = new DJCore(token);
 
                     // Load AI Config
-                    const openaiKey = localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY);
-                    const openaiModel = localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || DEFAULT_MODELS.OPENAI;
-                    const geminiKey = localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY);
-                    const geminiModel = localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || DEFAULT_MODELS.GEMINI;
-                    const selectedProvider = (localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
+                    const openaiKey = getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '');
+                    const openaiModel = getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI);
+                    const geminiKey = getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '');
+                    const geminiModel = getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI);
+                    const selectedProvider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider) || DEFAULTS.AI_PROVIDER;
 
                     if (selectedProvider === 'gemini' && geminiKey) {
                         dj.initAI('gemini', geminiKey, geminiModel);
@@ -176,17 +174,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     dj.setStatusCallback(setStatus);
 
                     // Restore Schedule
-                    const savedSchedule = localStorage.getItem(STORAGE_KEYS.DJ_SCHEDULE);
-                    if (savedSchedule) {
-                        try {
-                            const parsed = JSON.parse(savedSchedule);
-                            if (Array.isArray(parsed)) {
-                                setSchedule(parsed);
-                                dj.setSchedule(parsed);
-                            }
-                        } catch (e) {
-                            console.error("Failed to load saved schedule", e);
-                        }
+                    const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
+                    if (savedSchedule.length > 0) {
+                        setSchedule(savedSchedule);
+                        dj.setSchedule(savedSchedule);
                     }
                 }
 
@@ -219,11 +210,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     // Auto-refresh token if expiring soon (Keep this in UI loop as it's lightweight logic)
                     if (authorized) {
-                        const expiresAtStr = localStorage.getItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
+                        const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
                         if (expiresAtStr) {
                             const expiresAt = parseInt(expiresAtStr);
                             if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
-                                const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+                                const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
                                 if (clientId) {
                                     SpotifyAuth.refreshToken(clientId).then(token => {
                                         if (token && djRef.current) djRef.current.updateAccessToken(token);
@@ -243,9 +234,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     try {
                         if (djRef.current) {
                             // Sync Config
-                            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
+                            const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
                             djRef.current.updateConfig({
-                                aiFiltering: savedFiltering === null ? true : savedFiltering === 'true'
+                                aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
                             });
 
                             // Check Schedule (AI Logic) - This may block for seconds during AI request
@@ -331,7 +322,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             // Update Local State
             setSchedule([...newSchedule]);
             // Persist
-            localStorage.setItem(STORAGE_KEYS.DJ_SCHEDULE, JSON.stringify(newSchedule));
+            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, newSchedule);
         }
     };
 
@@ -352,7 +343,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const startBackgroundKeepAlive = () => {
         // Check user setting
-        if (localStorage.getItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) !== 'true') return;
+        if (getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) !== 'true') return;
 
         if (!backgroundAudioRef.current) {
             // 1-second silent MP3

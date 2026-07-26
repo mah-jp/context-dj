@@ -6,6 +6,7 @@ import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
 import { STORAGE_KEYS, PRIVACY_NOTICE, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
 import { AIProvider } from '../../lib/types';
+import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../../lib/storage';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
@@ -25,52 +26,46 @@ export default function Settings() {
 
     useEffect(() => {
         // Load from local storage
-        if (typeof window !== 'undefined') {
-            setSpotifyClientId(localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID) || '');
-            setOpenAiKey(localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY) || '');
-            setOpenAiModel(localStorage.getItem(STORAGE_KEYS.OPENAI_MODEL) || DEFAULT_MODELS.OPENAI);
-            setGeminiKey(localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY) || '');
-            setGeminiModel(localStorage.getItem(STORAGE_KEYS.GEMINI_MODEL) || DEFAULT_MODELS.GEMINI);
+        setSpotifyClientId(getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, ''));
+        setOpenAiKey(getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, ''));
+        setOpenAiModel(getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI));
+        setGeminiKey(getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, ''));
+        setGeminiModel(getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI));
 
-            setVoiceLang(localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) || navigator.language || DEFAULTS.VOICE_LANG);
+        setVoiceLang(getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, navigator.language || DEFAULTS.VOICE_LANG));
 
-            const savedProvider = localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider | null;
-            if (savedProvider === 'gemini') {
-                setAiProvider('gemini');
-            } else {
-                setAiProvider('openai');
-            }
-
-            setPersonalPref(localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE) || '');
-            try {
-                const savedHistory = localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY);
-                if (savedHistory) setPrefHistory(JSON.parse(savedHistory));
-            } catch (e) { console.error("History parse fail", e); }
-
-            setBackgroundKeepAlive(localStorage.getItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) === 'true');
-            const savedFiltering = localStorage.getItem(STORAGE_KEYS.AI_FILTERING_ENABLED);
-            setAiFilteringEnabled(savedFiltering === null ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true');
+        const savedProvider = getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider;
+        if (savedProvider === 'gemini') {
+            setAiProvider('gemini');
+        } else {
+            setAiProvider('openai');
         }
+
+        setPersonalPref(getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, ''));
+        setPrefHistory(getStoredJSON<string[]>(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, []));
+
+        setBackgroundKeepAlive(getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, '') === 'true');
+        const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
+        setAiFilteringEnabled(savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true');
     }, []);
 
     const handleSave = () => {
-        localStorage.setItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, spotifyClientId);
-        localStorage.setItem(STORAGE_KEYS.OPENAI_API_KEY, openAiKey);
-        localStorage.setItem(STORAGE_KEYS.OPENAI_MODEL, openAiModel);
-        localStorage.setItem(STORAGE_KEYS.GEMINI_API_KEY, geminiKey);
-        localStorage.setItem(STORAGE_KEYS.GEMINI_MODEL, geminiModel);
-        localStorage.setItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, aiProvider);
-        // duplicate line removed from original: localStorage.setItem('selected_ai_provider', aiProvider);
-        localStorage.setItem(STORAGE_KEYS.PERSONAL_PREFERENCE, personalPref);
-        localStorage.setItem(STORAGE_KEYS.VOICE_INPUT_LANG, voiceLang);
-        localStorage.setItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
-        localStorage.setItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(aiFilteringEnabled));
+        setStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, spotifyClientId);
+        setStorageItem(STORAGE_KEYS.OPENAI_API_KEY, openAiKey);
+        setStorageItem(STORAGE_KEYS.OPENAI_MODEL, openAiModel);
+        setStorageItem(STORAGE_KEYS.GEMINI_API_KEY, geminiKey);
+        setStorageItem(STORAGE_KEYS.GEMINI_MODEL, geminiModel);
+        setStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, aiProvider);
+        setStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, personalPref);
+        setStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, voiceLang);
+        setStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
+        setStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(aiFilteringEnabled));
 
         // Update history if new unique entry
         if (personalPref.trim()) {
             const newHistory = [personalPref, ...prefHistory.filter(h => h !== personalPref)].slice(0, 10);
             setPrefHistory(newHistory);
-            localStorage.setItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, JSON.stringify(newHistory));
+            setStoredJSON(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, newHistory);
         }
 
         setStatus('Settings saved! (設定を保存しました)');
@@ -460,7 +455,7 @@ export default function Settings() {
                         <button
                             onClick={() => {
                                 if (confirm('Are you sure you want to clear your personal preferences history?\n(設定履歴を削除しますか？)')) {
-                                    localStorage.removeItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY);
+                                    removeStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY);
                                     setPrefHistory([]);
                                     setStatus('References history cleared! (設定履歴を削除しました)');
                                     setTimeout(() => setStatus(''), 3000);

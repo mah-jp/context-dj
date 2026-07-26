@@ -3,6 +3,7 @@ import { usePlayer } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
 import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Flame, Share2, Sparkles } from 'lucide-react';
 import { STORAGE_KEYS } from '../lib/constants';
+import { getStorageItem, setStorageItem } from '../lib/storage';
 
 interface PlayerBarProps {
     showPopularity: boolean;
@@ -13,18 +14,14 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
     const [showAiThought, setShowAiThought] = useState(true);
 
     useEffect(() => {
-        if (typeof window !== 'undefined') {
-            const stored = localStorage.getItem(STORAGE_KEYS.SHOW_AI_THOUGHT);
-            setShowAiThought(stored === null ? true : stored === 'true');
-        }
+        const stored = getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT, '');
+        setShowAiThought(stored === '' ? true : stored === 'true');
     }, []);
 
     const toggleAiThought = () => {
         const newVal = !showAiThought;
         setShowAiThought(newVal);
-        if (typeof window !== 'undefined') {
-            localStorage.setItem(STORAGE_KEYS.SHOW_AI_THOUGHT, String(newVal));
-        }
+        setStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT, String(newVal));
     };
 
     const {

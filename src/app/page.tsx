@@ -13,7 +13,8 @@ import ScheduleSidebar from '../components/ScheduleSidebar';
 import QueueList from '../components/QueueList';
 import DynamicBackground from '../components/DynamicBackground';
 import { STORAGE_KEYS, DEFAULTS } from '../lib/constants';
-import { ScheduleItem, AIProvider } from '../lib/types';
+import { ScheduleItem, AIProvider, ISpeechRecognition, SpeechRecognitionEvent } from '../lib/types';
+import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 
 export default function Home() {
   const {
@@ -48,7 +49,7 @@ export default function Home() {
   const [history, setHistory] = useState<string[]>([]); // Prompt history
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [isListening, setIsListening] = useState(false);
-  const recognitionRef = useRef<any>(null); // SpeechRecognition instance
+  const recognitionRef = useRef<ISpeechRecognition | null>(null);
   const [showAiThought, setShowAiThought] = useState(false);
 
   // Auto-dismiss toast
@@ -77,18 +78,16 @@ export default function Home() {
 
   useEffect(() => {
     // Check local storage for setup completeness
-    if (typeof window !== 'undefined') {
-      const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-      const provider = (localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
-      let hasKey = false;
-      if (provider === 'gemini') {
-        hasKey = !!localStorage.getItem(STORAGE_KEYS.GEMINI_API_KEY);
-      } else {
-        hasKey = !!localStorage.getItem(STORAGE_KEYS.OPENAI_API_KEY);
-      }
-      setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
-      setShowAiThought(localStorage.getItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
+    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+    const provider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
+    let hasKey = false;
+    if (provider === 'gemini') {
+      hasKey = !!getStorageItem(STORAGE_KEYS.GEMINI_API_KEY);
+    } else {
+      hasKey = !!getStorageItem(STORAGE_KEYS.OPENAI_API_KEY);
     }
+    setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
+    setShowAiThought(getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
   }, [needsOnboarding]);
 
   // Image Vision Handler
@@ -100,34 +99,39 @@ export default function Home() {
     const file = e.target.files?.[0];
     if (!file || !djCore) return;
 
+    // Verify format
+    if (!file.type.startsWith('image/')) {
+      setToast({ msg: 'Please select an image file. (画像ファイルを選択してください)', type: 'error' });
+      return;
+    }
+
+    setStatus('📸 Analyzing image... (画像を解析中...)');
     try {
-      setStatus('Analyzing Photo... (AIが写真から情景を読み取っています)');
-      
+      // Convert to Base64
       const reader = new FileReader();
       reader.onload = async () => {
-        const base64 = (reader.result as string).split(',')[1];
-        const mimeType = file.type;
-        
+        const base64Data = (reader.result as string).split(',')[1];
         try {
-          const description = await djCore.analyzeImage(base64, mimeType);
-          setInputText(description);
-          setToast({ msg: 'Vision Analysis complete! (画像解析完了。選曲イメージを生成しました)', type: 'success' });
+          const generatedPrompt = await djCore.analyzeImage(base64Data, file.type);
+          setInputText(generatedPrompt);
+          setToast({ msg: 'Visual scene description generated! (画像を解釈しました)', type: 'success' });
           setStatus('Ready');
         } catch (err: any) {
-          setToast({ msg: `Vision Error: ${err.message}`, type: 'error' });
-          setStatus('Error in Vision');
-        } finally {
-          if (fileInputRef.current) fileInputRef.current.value = '';
+          console.error("Vision Analysis Error:", err);
+          setToast({ msg: `Failed to analyze image: ${err.message || err}`, type: 'error' });
+          setStatus('⚠️ Image Analysis Failed');
         }
       };
       reader.readAsDataURL(file);
-    } catch (err) {
+    } catch (err: any) {
+      console.error(err);
+      setToast({ msg: 'Failed to read image file.', type: 'error' });
       setStatus('Ready');
     }
   };
 
   const handleLogin = () => {
-    const clientId = localStorage.getItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
     if (clientId) {
       SpotifyAuth.login(clientId);
     } else {
@@ -137,13 +141,9 @@ export default function Home() {
 
   // Load history on mount
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.PROMPT_HISTORY);
-    if (saved) {
-      try {
-        setHistory(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to parse history", e);
-      }
+    const saved = getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []);
+    if (saved.length > 0) {
+      setHistory(saved);
     }
   }, []);
 
@@ -161,12 +161,12 @@ export default function Home() {
     // Save to history
     const newHistory = [inputText, ...history.filter(h => h !== inputText)].slice(0, 50);
     setHistory(newHistory);
-    localStorage.setItem(STORAGE_KEYS.PROMPT_HISTORY, JSON.stringify(newHistory));
+    setStoredJSON(STORAGE_KEYS.PROMPT_HISTORY, newHistory);
     setHistoryIndex(-1);
 
     setStatus('🤖 AI is thinking... (AIが考え中...)');
     try {
-      const personalPref = localStorage.getItem(STORAGE_KEYS.PERSONAL_PREFERENCE) || '';
+      const personalPref = getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, '');
       const schedule = await djCore.createSchedule(inputText, personalPref);
 
       if (!schedule || schedule.length === 0) {
@@ -174,7 +174,7 @@ export default function Home() {
         setStatus('⚠️ No schedule created. (作成失敗)');
       } else {
         setSchedule(schedule);
-        localStorage.setItem(STORAGE_KEYS.DJ_SCHEDULE, JSON.stringify(schedule));
+        setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, schedule);
         // Clear status to avoid persistent message, rely on Toast for success
         setStatus('Ready');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
@@ -254,29 +254,28 @@ export default function Home() {
       return;
     }
 
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setToast({ msg: 'Voice input not supported in this browser.', type: 'error' });
       return;
     }
 
     const recognition = new SpeechRecognition();
-    // Default to 'ja-JP' but verify settings
-    const savedLang = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEYS.VOICE_INPUT_LANG) : null;
+    const savedLang = getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, '');
     recognition.lang = savedLang || navigator.language || DEFAULTS.VOICE_LANG;
     recognition.interimResults = true;
     recognition.continuous = false; // Stop after one sentence/pause
 
     recognition.onstart = () => setIsListening(true);
 
-    recognition.onresult = (event: any) => {
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
       const transcript = Array.from(event.results)
-        .map((result: any) => result[0].transcript)
+        .map((result) => result[0].transcript)
         .join('');
       setInputText(transcript);
     };
 
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (event: Event & { error?: string }) => {
       console.error(event.error);
       setIsListening(false);
       // Ignore no-speech error
