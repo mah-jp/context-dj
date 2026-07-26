@@ -13,8 +13,10 @@ import ScheduleSidebar from '../components/ScheduleSidebar';
 import QueueList from '../components/QueueList';
 import DynamicBackground from '../components/DynamicBackground';
 import { STORAGE_KEYS, DEFAULTS } from '../lib/constants';
-import { ScheduleItem, AIProvider, ISpeechRecognition, SpeechRecognitionEvent } from '../lib/types';
+import { ScheduleItem, AIProvider } from '../lib/types';
 import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+import { useVoiceInput } from '../hooks/useVoiceInput';
+import { useVisionInput } from '../hooks/useVisionInput';
 
 export default function Home() {
   const {
@@ -38,7 +40,6 @@ export default function Home() {
 
   const [inputText, setInputText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [setupStatus, setSetupStatus] = useState({ hasClientId: false, hasAiKey: false });
 
   const [showHistory, setShowHistory] = useState(false);
@@ -48,9 +49,20 @@ export default function Home() {
 
   const [history, setHistory] = useState<string[]>([]); // Prompt history
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [isListening, setIsListening] = useState(false);
-  const recognitionRef = useRef<ISpeechRecognition | null>(null);
   const [showAiThought, setShowAiThought] = useState(false);
+
+  // Custom Hooks
+  const { isListening, toggleListening } = useVoiceInput({
+    onResult: setInputText,
+    onError: (msg) => setToast({ msg, type: 'error' }),
+  });
+
+  const { fileInputRef, handleCameraClick, handleImageUpload } = useVisionInput({
+    djCore,
+    onPromptGenerated: setInputText,
+    setStatus,
+    setToast,
+  });
 
   // Auto-dismiss toast
   // Auto-dismiss toast
@@ -89,46 +101,6 @@ export default function Home() {
     setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
     setShowAiThought(getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
   }, [needsOnboarding]);
-
-  // Image Vision Handler
-  const handleCameraClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !djCore) return;
-
-    // Verify format
-    if (!file.type.startsWith('image/')) {
-      setToast({ msg: 'Please select an image file. (画像ファイルを選択してください)', type: 'error' });
-      return;
-    }
-
-    setStatus('📸 Analyzing image... (画像を解析中...)');
-    try {
-      // Convert to Base64
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const base64Data = (reader.result as string).split(',')[1];
-        try {
-          const generatedPrompt = await djCore.analyzeImage(base64Data, file.type);
-          setInputText(generatedPrompt);
-          setToast({ msg: 'Visual scene description generated! (画像を解釈しました)', type: 'success' });
-          setStatus('Ready');
-        } catch (err: any) {
-          console.error("Vision Analysis Error:", err);
-          setToast({ msg: `Failed to analyze image: ${err.message || err}`, type: 'error' });
-          setStatus('⚠️ Image Analysis Failed');
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (err: any) {
-      console.error(err);
-      setToast({ msg: 'Failed to read image file.', type: 'error' });
-      setStatus('Ready');
-    }
-  };
 
   const handleLogin = () => {
     const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
@@ -244,53 +216,6 @@ export default function Home() {
     }
 
     setToast({ msg: 'Context recalled! You can edit or press Send. (文脈を読み込みました)', type: 'info' });
-  };
-
-  // Voice Input Handler
-  const toggleListening = () => {
-    if (isListening) {
-      if (recognitionRef.current) recognitionRef.current.stop();
-      setIsListening(false);
-      return;
-    }
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setToast({ msg: 'Voice input not supported in this browser.', type: 'error' });
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    const savedLang = getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, '');
-    recognition.lang = savedLang || navigator.language || DEFAULTS.VOICE_LANG;
-    recognition.interimResults = true;
-    recognition.continuous = false; // Stop after one sentence/pause
-
-    recognition.onstart = () => setIsListening(true);
-
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = Array.from(event.results)
-        .map((result) => result[0].transcript)
-        .join('');
-      setInputText(transcript);
-    };
-
-    recognition.onerror = (event: Event & { error?: string }) => {
-      console.error(event.error);
-      setIsListening(false);
-      // Ignore no-speech error
-      if (event.error !== 'no-speech') {
-        setToast({ msg: 'Voice recognition error.', type: 'error' });
-      }
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      // Optionally auto-send? No, let user confirm.
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
   };
 
   return (

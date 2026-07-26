@@ -3,6 +3,7 @@ import { AIService } from './ai';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
 import { AIProvider, ScheduleItem, Track, DJConfig } from './types';
 import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
+import { normalizeTrackName, generateTrackKey } from './dj-utils';
 
 export type { Track };
 
@@ -73,14 +74,7 @@ export class DJCore {
     // --- Utilities ---
 
     private normalizeTrackName(name: string): string {
-        // Remove text within parentheses (half-width and full-width)
-        name = name.replace(/[(\[（［].*?[)\]）］]/g, '');
-        // Remove common metadata patterns after hyphen or space
-        name = name.replace(/\s[-/〜~]\s.*$/g, '');
-        // Remove remastered/version strings
-        name = name.replace(/(remaster|version|live|edit|radio|mix).*$/i, '');
-
-        return name.trim().toLowerCase();
+        return normalizeTrackName(name);
     }
 
     // --- Search & Filtering ---
