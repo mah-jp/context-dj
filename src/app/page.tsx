@@ -229,7 +229,17 @@ export default function Home() {
       {/* 1. Header & Search Bar */}
       <header className={styles.headerContainer}>
         <div className={styles.titleWrapper}>
-          <h1 className={styles.title}>ContextDJ</h1>
+          <h1 className={styles.title}>
+            <a
+              href="https://github.com/mah-jp/context-dj"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.titleLink}
+              title="View ContextDJ on GitHub"
+            >
+              ContextDJ
+            </a>
+          </h1>
           <span className={styles.versionText} style={{ color: '#666', fontWeight: 400 }}>v{process.env.NEXT_PUBLIC_APP_VERSION}</span>
         </div>
 

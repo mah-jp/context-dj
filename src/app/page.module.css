@@ -58,6 +58,17 @@
   letter-spacing: -0.04em;
 }
 
+.titleLink {
+  color: inherit;
+  text-decoration: none;
+  transition: color 0.2s ease, opacity 0.2s ease;
+}
+
+.titleLink:hover {
+  color: var(--primary);
+  opacity: 0.9;
+}
+
 .inputBar {
   flex: 1;
   max-width: 480px;
