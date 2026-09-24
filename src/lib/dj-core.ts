@@ -199,11 +199,29 @@ export class DJCore {
 
         this.addLog(`🌟 Priority Search: ${priorityQuery}`);
         try {
-            const pRes = await this.spotify.searchTracks(priorityQuery, { limit: 1 });
+            // Fetch top 5 candidates to avoid picking unrelated popular songs that partially match keywords
+            const pRes = await this.spotify.searchTracks(priorityQuery, { limit: 5 });
             if (pRes.tracks && pRes.tracks.items.length > 0) {
-                const tracks = pRes.tracks.items;
-                this.addLog(`✅ Found Priority Track: ${tracks[0].name} (${tracks[0].artists[0].name})`);
-                return tracks;
+                const tracks = pRes.tracks.items as Track[];
+
+                // Extract artist intent if query has artist: or exact name
+                let targetArtist = '';
+                const artistMatch = priorityQuery.match(/artist:\s*["']?([^"'\s]+)["']?/i);
+                if (artistMatch) {
+                    targetArtist = artistMatch[1].toLowerCase();
+                } else {
+                    targetArtist = priorityQuery.replace(/["']/g, '').trim().toLowerCase();
+                }
+
+                // Look for an exact or substring artist match first
+                const matched = tracks.find(t => {
+                    const aName = (t.artists[0]?.name || '').toLowerCase();
+                    return aName.includes(targetArtist) || targetArtist.includes(aName);
+                });
+
+                const bestTrack = matched || tracks[0];
+                this.addLog(`✅ Found Priority Track: ${bestTrack.name} (${bestTrack.artists[0]?.name})`);
+                return [bestTrack];
             } else {
                 this.addLog(`⚠️ Priority Search returned 0 results for: ${priorityQuery}`);
                 return [];
@@ -337,8 +355,10 @@ export class DJCore {
         const allRawTracks: Track[] = [];
 
         await Promise.all(queries.map(async (query) => {
-            const cleanQuery = query.replace(/"/g, '').replace(/'/g, '');
-            const searchQuery = this.config.onlyOfficial ? `owner:spotify ${cleanQuery}` : cleanQuery;
+            // Do NOT strip quotes from queries.
+            // Quotes are critical for Spotify exact match (e.g. artist:"u-full" or "u-full").
+            // Stripping them turns artist:"u-full" into artist:u-full where "-" is parsed as NOT operator!
+            const searchQuery = this.config.onlyOfficial ? `owner:spotify ${query}` : query;
 
             try {
                 const [trackRes, playlistRes] = await Promise.all([
@@ -398,31 +418,49 @@ export class DJCore {
         return uniqueTracks;
     }
 
-    private applyTrackFilters(tracks: Track[], _targetArtists?: string[]): Track[] {
+    private applyTrackFilters(tracks: Track[], targetArtists: string[] = []): Track[] {
         const candidates = tracks;
 
-        // Popularity Filtering (Adaptive)
+        // Separate tracks by target artists (MUST be preserved regardless of popularity)
+        const targetTracks: Track[] = [];
+        const nonTargetCandidates: Track[] = [];
+
+        if (targetArtists.length > 0) {
+            candidates.forEach(t => {
+                const aName = (t.artists[0]?.name || '').toLowerCase();
+                if (targetArtists.some(ta => aName.includes(ta) || ta.includes(aName))) {
+                    targetTracks.push(t);
+                } else {
+                    nonTargetCandidates.push(t);
+                }
+            });
+            if (targetTracks.length > 0) {
+                this.addLog(`🎯 Preserved ${targetTracks.length} tracks by requested artist(s) without popularity cutoff`);
+            }
+        } else {
+            nonTargetCandidates.push(...candidates);
+        }
+
+        // Popularity Filtering (Adaptive) for non-target candidates
         const PREFERRED_POPULARITY = 15;
         const MIN_POPULARITY = 5;
 
-        // 1. Try Preferred Filter
-        let filteredTracks = candidates.filter(t => (t.popularity || 0) >= PREFERRED_POPULARITY);
+        let filteredTracks = nonTargetCandidates.filter(t => (t.popularity || 0) >= PREFERRED_POPULARITY);
 
-        if (filteredTracks.length < 5 && candidates.length >= 5) {
+        if (filteredTracks.length < 5 && nonTargetCandidates.length >= 5) {
             this.addLog(`⚠️ Popularity >= ${PREFERRED_POPULARITY} too strict (${filteredTracks.length} tracks). Relaxing to >= ${MIN_POPULARITY}...`);
-            // 2. Try Relaxed Filter
-            filteredTracks = candidates.filter(t => (t.popularity || 0) >= MIN_POPULARITY);
+            filteredTracks = nonTargetCandidates.filter(t => (t.popularity || 0) >= MIN_POPULARITY);
         }
 
-        this.addLog(`🔍 Filter: Popularity Check (${filteredTracks.length} / ${candidates.length} kept)`);
-
-        if (filteredTracks.length === 0) {
+        if (filteredTracks.length === 0 && targetTracks.length === 0) {
             this.addLog('⚠️ No tracks matched popularity criteria. Using all candidates.');
             return candidates;
         }
 
-        this.logTrackSamples(filteredTracks);
-        return filteredTracks;
+        const combined = [...targetTracks, ...filteredTracks];
+        this.addLog(`🔍 Filter: Popularity Check (${combined.length} / ${candidates.length} kept)`);
+        this.logTrackSamples(combined);
+        return combined;
     }
 
     private logTrackSamples(tracks: Track[]) {
