@@ -32,7 +32,7 @@ interface PlayerContextType {
     error: string | null;
     clearError: () => void;
     startBackgroundKeepAlive: () => void;
-    syncUIState: () => Promise<SpotifyApi.CurrentPlaybackResponse | null>;
+    syncUIState: (options?: { forceAll?: boolean }) => Promise<SpotifyApi.CurrentPlaybackResponse | null>;
 }
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
@@ -42,12 +42,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [djCore, setDjCore] = useState<DJCore | null>(null);
     const [status, setStatus] = useState('Initializing...');
 
-    const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
+    const [currentTrack, setCurrentTrack] = useState<Track | null>(() => {
+        if (typeof window !== 'undefined') {
+            return getStoredJSON<Track | null>(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, null);
+        }
+        return null;
+    });
     const [isPlaying, setIsPlaying] = useState(false);
     const [deviceName, setDeviceName] = useState('');
     const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
     const [currentQuery, setCurrentQuery] = useState<string | null>(null);
-    const [currentThought, setCurrentThought] = useState<string | null>(null);
+    const [currentThought, setCurrentThought] = useState<string | null>(() => {
+        if (typeof window !== 'undefined') {
+            const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
+            if (savedSchedule.length > 0) {
+                return savedSchedule[0]?.thought || null;
+            }
+        }
+        return null;
+    });
     const [needsOnboarding, setNeedsOnboarding] = useState(false);
     const [queue, setQueue] = useState<Track[]>([]);
     const [devices, setDevices] = useState<SpotifyApi.UserDevice[]>([]);
@@ -59,45 +72,77 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const djTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
+    const lastTrackUriRef = useRef<string | null>(null);
+    const lastDevicesFetchRef = useRef<number>(0);
 
     // Helper to sync UI with DJ Core state
-    const syncUIState = React.useCallback(async () => {
+    const syncUIState = React.useCallback(async (options?: { forceAll?: boolean }) => {
         if (!djRef.current) return null;
+        const forceAll = options?.forceAll ?? false;
 
         try {
-            // 1. Fetch playback state first to determine the exact currently playing track
+            // 1. Fetch playback state first to determine the exact currently playing track & progress
             const playbackState = await djRef.current.getPlaybackState();
             const currentTrackItem = (playbackState && playbackState.item && playbackState.item.type === 'track')
                 ? (playbackState.item as Track)
                 : null;
 
-            // 2. Fetch Queue (passing current track to advance Up Next dynamically) and Devices concurrently
-            const [currentQ, currentDevices] = await Promise.all([
-                djRef.current.getQueue(currentTrackItem),
-                djRef.current.getDevices()
-            ]);
+            const currentTrackUri = currentTrackItem?.uri || null;
+            const trackChanged = currentTrackUri !== lastTrackUriRef.current;
+            if (trackChanged) {
+                lastTrackUriRef.current = currentTrackUri;
+            }
 
-            // Sync Devices & Queue
-            setDevices(currentDevices);
-            setQueue(currentQ.slice(0, 20));
+            // 2. Conditionally fetch Queue:
+            // Only fetch when the track changed, on forceAll (e.g. user action, wakeup),
+            // or when queue is currently empty. This avoids pounding /v1/me/player/queue on every tick!
+            const shouldFetchQueue = forceAll || trackChanged || queue.length === 0;
+            let queuePromise: Promise<Track[]> | null = null;
+            if (shouldFetchQueue) {
+                queuePromise = djRef.current.getQueue(currentTrackItem);
+            }
+
+            // 3. Conditionally fetch Devices:
+            // Only fetch when forced, on initial fetch, or after DEVICE_REFRESH_INTERVAL_MS (30s)
+            const now = Date.now();
+            const shouldFetchDevices = forceAll || devices.length === 0 ||
+                (now - lastDevicesFetchRef.current > PLAYBACK_CONSTANTS.DEVICE_REFRESH_INTERVAL_MS);
+            let devicesPromise: Promise<SpotifyApi.UserDevice[]> | null = null;
+            if (shouldFetchDevices) {
+                devicesPromise = djRef.current.getDevices();
+                lastDevicesFetchRef.current = now;
+            }
+
+            // Resolve promises
+            if (queuePromise) {
+                const currentQ = await queuePromise;
+                setQueue(currentQ.slice(0, 20));
+            }
+            if (devicesPromise) {
+                const currentDevices = await devicesPromise;
+                setDevices(currentDevices);
+            }
 
             // Determine Device Name
             // Priority: 1. Playback State Device, 2. Active Device in List, 3. Empty
             let activeDeviceName = '';
             if (playbackState && playbackState.device) {
                 activeDeviceName = playbackState.device.name;
-            } else {
-                const activeD = currentDevices.find(d => d.is_active);
+            } else if (devices.length > 0) {
+                const activeD = devices.find(d => d.is_active);
                 if (activeD) activeDeviceName = activeD.name;
             }
-            setDeviceName(activeDeviceName);
+            if (activeDeviceName) {
+                setDeviceName(activeDeviceName);
+            }
 
             // Sync Track Info
             if (currentTrackItem) {
-                setCurrentTrack(currentTrackItem);
+                const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
+                setCurrentTrack(finalTrack);
+                setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, finalTrack);
                 setIsPlaying(playbackState!.is_playing);
             } else {
-                setCurrentTrack(null);
                 setIsPlaying(false);
             }
 
@@ -116,7 +161,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             console.error("Error in syncUIState:", syncErr);
             return null;
         }
-    }, []);
+    }, [queue.length, devices]);
 
     // Initialize
     useEffect(() => {
@@ -195,11 +240,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     dj.setStatusCallback(setStatus);
                     dj.setOnTracksPlayedCallback((tracks) => {
                         if (tracks.length > 0) {
-                            setCurrentTrack(tracks[0]);
+                            const first = tracks[0];
+                            setCurrentTrack(first);
+                            setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, first);
                             setQueue(tracks.slice(1, 21));
                             setIsPlaying(true);
                             // Schedule a synced refresh after Spotify digest time (1.5s)
-                            setTimeout(syncUIState, 1500);
+                            setTimeout(() => syncUIState({ forceAll: true }), 1500);
                         }
                     });
 
@@ -208,6 +255,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     if (savedSchedule.length > 0) {
                         setSchedule(savedSchedule);
                         dj.setSchedule(savedSchedule);
+                        const djStatus = dj.getDJStatus();
+                        if (djStatus.currentThought) {
+                            setCurrentThought(djStatus.currentThought);
+                        }
                     }
                 }
 
@@ -217,9 +268,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (timerRef.current) clearTimeout(timerRef.current);
                 if (djTimerRef.current) clearTimeout(djTimerRef.current);
 
-                // --- UI Loop (High Priority, Non-Blocking) ---
+                // Helper: Check and refresh token proactively if expiring soon
+                const checkAndRefreshToken = async () => {
+                    if (!authorizedRef.current || !djRef.current) return;
+                    const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
+                    if (expiresAtStr) {
+                        const expiresAt = parseInt(expiresAtStr);
+                        if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
+                            const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+                            if (clientId) {
+                                try {
+                                    const token = await SpotifyAuth.refreshToken(clientId);
+                                    if (token && djRef.current && !isCancelled) {
+                                        djRef.current.updateAccessToken(token);
+                                        console.log("🔑 Proactive token refresh succeeded");
+                                    }
+                                } catch (e) {
+                                    console.error("Token Refresh Failed:", e);
+                                }
+                            }
+                        }
+                    }
+                };
+
+                // --- UI Loop (High Priority, Suspended when Backgrounded) ---
                 const runUILoop = async () => {
                     if (isCancelled) return;
+
+                    // Suspend UI polling completely while hidden/backgrounded to prevent overheating & save battery
+                    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+                        timerRef.current = null;
+                        return;
+                    }
+
                     let nextDelay: number = PLAYBACK_CONSTANTS.UI_POLL_INTERVAL_MS;
 
                     try {
@@ -241,31 +322,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     if (isCancelled) return;
 
-                    // Auto-refresh token if expiring soon (Keep this in UI loop as it's lightweight logic)
-                    if (authorizedRef.current && djRef.current) {
-                        const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
-                        if (expiresAtStr) {
-                            const expiresAt = parseInt(expiresAtStr);
-                            if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
-                                const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-                                if (clientId) {
-                                    SpotifyAuth.refreshToken(clientId).then(token => {
-                                        if (token && djRef.current && !isCancelled) djRef.current.updateAccessToken(token);
-                                    }).catch(e => console.error("Token Refresh Failed:", e));
-                                }
-                            }
-                        }
-                    }
+                    // Proactively refresh token
+                    await checkAndRefreshToken();
 
-                    if (!isCancelled) {
+                    if (!isCancelled && typeof document !== 'undefined' && document.visibilityState !== 'hidden') {
                         timerRef.current = setTimeout(runUILoop, nextDelay);
+                    } else {
+                        timerRef.current = null;
                     }
                 };
 
-                // --- DJ Logic Loop (AI, Heavy Process) ---
+                // --- DJ Logic Loop (AI, Heavy Process, Throttled in Background) ---
                 const runDJLoop = async () => {
                     if (isCancelled) return;
-                    let nextDelay = PLAYBACK_CONSTANTS.DJ_LOOP_INTERVAL_MS;
+
+                    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+                    const nextDelay: number = isHidden
+                        ? PLAYBACK_CONSTANTS.DJ_LOOP_BACKGROUND_INTERVAL_MS
+                        : PLAYBACK_CONSTANTS.DJ_LOOP_INTERVAL_MS;
 
                     try {
                         if (djRef.current) {
@@ -275,13 +349,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                                 aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
                             });
 
-                            // Check Schedule (AI Logic) - This may block for seconds during AI request
+                            // Check Schedule & Auto-Refill (AI Logic)
                             await djRef.current.processDJLoop();
                         }
                     } catch (error: unknown) {
                         console.error("Error in DJ Loop:", error);
                         const msg = error instanceof Error ? error.message : "Unknown background error";
                         setError(prev => prev === msg ? prev : msg);
+                    }
+
+                    if (isCancelled) return;
+
+                    // Also verify token during DJ loop if running in background
+                    if (isHidden) {
+                        await checkAndRefreshToken();
                     }
 
                     if (!isCancelled) {
@@ -293,45 +374,52 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 runUILoop();
                 runDJLoop();
 
-                // Visibility/Focus Restoration (Triggered when user returns to PWA/browser)
-                const handleWakeUp = () => {
-                    if (document.visibilityState === 'visible' && authorizedRef.current && djRef.current) {
-                        console.log("📱 App regained focus / visibility: syncing UI & resuming loops");
+                // Visibility/Focus Handling
+                const handleVisibilityChange = () => {
+                    if (isCancelled || !authorizedRef.current || !djRef.current) return;
 
-                        // 1. Proactively refresh token if expired while in background
-                        const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
-                        if (expiresAtStr) {
-                            const expiresAt = parseInt(expiresAtStr);
-                            if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
-                                const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-                                if (clientId) {
-                                    SpotifyAuth.refreshToken(clientId).then(token => {
-                                        if (token && djRef.current && !isCancelled) {
-                                            djRef.current.updateAccessToken(token);
-                                            syncUIState();
-                                        }
-                                    }).catch(e => console.error("Wake-up Token Refresh Failed:", e));
-                                }
-                            }
-                        }
+                    if (document.visibilityState === 'visible') {
+                        console.log("📱 App visible: immediately syncing UI and resuming loops");
 
-                        // 2. Immediate sync to update currently playing track and Up Next
-                        syncUIState();
+                        // 1. Proactively refresh token
+                        checkAndRefreshToken();
 
-                        // 3. Restart loops if they were frozen by mobile OS
+                        // 2. Immediate full sync (refresh currently playing, queue, and devices)
+                        syncUIState({ forceAll: true });
+
+                        // 3. Restart loops in active mode
                         if (timerRef.current) clearTimeout(timerRef.current);
                         if (djTimerRef.current) clearTimeout(djTimerRef.current);
                         runUILoop();
                         runDJLoop();
+                    } else {
+                        console.log("💤 App backgrounded: suspending UI polling, throttling DJ loop to save battery");
+                        // Immediately stop UI loop
+                        if (timerRef.current) {
+                            clearTimeout(timerRef.current);
+                            timerRef.current = null;
+                        }
+                        // Reschedule DJ loop with low frequency (30s)
+                        if (djTimerRef.current) {
+                            clearTimeout(djTimerRef.current);
+                            djTimerRef.current = setTimeout(runDJLoop, PLAYBACK_CONSTANTS.DJ_LOOP_BACKGROUND_INTERVAL_MS);
+                        }
                     }
                 };
 
-                document.addEventListener('visibilitychange', handleWakeUp);
-                window.addEventListener('focus', handleWakeUp);
+                const handleFocus = () => {
+                    // Only resume if visible and UI loop was stopped
+                    if (document.visibilityState === 'visible' && !timerRef.current && authorizedRef.current && djRef.current) {
+                        handleVisibilityChange();
+                    }
+                };
+
+                document.addEventListener('visibilitychange', handleVisibilityChange);
+                window.addEventListener('focus', handleFocus);
 
                 cleanupListeners = () => {
-                    document.removeEventListener('visibilitychange', handleWakeUp);
-                    window.removeEventListener('focus', handleWakeUp);
+                    document.removeEventListener('visibilitychange', handleVisibilityChange);
+                    window.removeEventListener('focus', handleFocus);
                 };
             } catch (initError: unknown) {
                 if (isCancelled) return;
@@ -360,20 +448,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (queue.length > 0) {
                 const nextTrack = queue[0];
                 setCurrentTrack(nextTrack);
+                setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, nextTrack);
                 setQueue(queue.slice(1));
             }
             await djRef.current.next();
             // Staggered sync to absorb Spotify API latency
-            setTimeout(syncUIState, 500);
-            setTimeout(syncUIState, 1500);
+            setTimeout(() => syncUIState({ forceAll: true }), 500);
+            setTimeout(() => syncUIState({ forceAll: true }), 1500);
         }
     };
     const handlePrev = async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
             await djRef.current.previous();
-            setTimeout(syncUIState, 500);
-            setTimeout(syncUIState, 1500);
+            setTimeout(() => syncUIState({ forceAll: true }), 500);
+            setTimeout(() => syncUIState({ forceAll: true }), 1500);
         }
     };
     const handleTogglePlay = async () => {
@@ -382,7 +471,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (isPlaying) await djRef.current.pause();
             else await djRef.current.resume();
             setIsPlaying(!isPlaying); // Optimistic update
-            setTimeout(syncUIState, 500);
+            setTimeout(() => syncUIState(), 500);
         }
     };
 
@@ -407,8 +496,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const setDevice = async (deviceId: string) => {
         if (djRef.current) {
             await djRef.current.setActiveDevice(deviceId);
-            // Optional: Refresh state immediately to reflect 'active' status on new device
-            setTimeout(syncUIState, 500);
+            // Refresh state immediately to reflect 'active' status on new device
+            setTimeout(() => syncUIState({ forceAll: true }), 500);
         }
     };
 

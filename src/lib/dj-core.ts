@@ -93,6 +93,26 @@ export class DJCore {
             if (cached.stage && !track.stage) track.stage = cached.stage;
             if (cached.contextName && !track.contextName) track.contextName = cached.contextName;
         }
+
+        // Fallback: If selectionReason or vibeTag is still missing, search in currentSessionTracks
+        // using fuzzy title, normalized artist, and trackKey matching.
+        if ((!track.selectionReason || !track.vibeTag) && this.currentSessionTracks.length > 0) {
+            const sessionIdx = this.findTrackIndexInSession(track);
+            if (sessionIdx >= 0) {
+                const sessionTrack = this.currentSessionTracks[sessionIdx];
+                if (sessionTrack.selectionReason && !track.selectionReason) track.selectionReason = sessionTrack.selectionReason;
+                if (sessionTrack.vibeTag && !track.vibeTag) track.vibeTag = sessionTrack.vibeTag;
+                if (sessionTrack.score !== undefined && track.score === undefined) track.score = sessionTrack.score;
+                if (sessionTrack.estimatedBpm !== undefined && track.estimatedBpm === undefined) track.estimatedBpm = sessionTrack.estimatedBpm;
+                if (sessionTrack.energy !== undefined && track.energy === undefined) track.energy = sessionTrack.energy;
+                if (sessionTrack.stage && !track.stage) track.stage = sessionTrack.stage;
+                if (sessionTrack.contextName && !track.contextName) track.contextName = sessionTrack.contextName;
+
+                // Auto-heal cache for this track's actual Spotify instance
+                this.cacheTrackMetadata([track]);
+            }
+        }
+
         return track;
     }
 
@@ -1130,6 +1150,7 @@ export class DJCore {
             const state = await this.spotify.getMyCurrentPlaybackState();
             if (state && state.item && state.item.type === 'track') {
                 const enriched = this.enrichTrackWithCachedMetadata(state.item as Track);
+                state.item = enriched as any;
                 this.lastPlayingTrack = enriched;
                 return state;
             }

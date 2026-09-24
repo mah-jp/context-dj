@@ -28,6 +28,7 @@ export const STORAGE_KEYS = {
     AI_FILTERING_ENABLED: 'ai_filtering_enabled',
     TRACK_METADATA_CACHE: 'dj_track_metadata_cache',
     DJ_CURRENT_SESSION_TRACKS: 'dj_current_session_tracks',
+    DJ_CURRENT_PLAYING_TRACK: 'dj_current_playing_track',
     SHOW_NOTES: 'dj_show_notes',
 } as const;
 
@@ -52,9 +53,12 @@ export const PLAYBACK_CONSTANTS = {
     UI_POLL_INTERVAL_MS: 3000,
     UI_POLL_FAST_INTERVAL_MS: 1000,
     DJ_LOOP_INTERVAL_MS: 5000,
+    DJ_LOOP_BACKGROUND_INTERVAL_MS: 30000, // 30s when app is hidden/backgrounded to prevent overheating & save battery
+    DEVICE_REFRESH_INTERVAL_MS: 30000, // 30s interval for background device discovery unless forced
     TOKEN_REFRESH_BUFFER_MS: 300000, // 5 minutes
     TRACK_REMAINING_THRESHOLD_MS: 10000,
     MIN_QUEUE_SIZE_FOR_REFILL: 3,
     TRACK_SEARCH_LIMIT: 40,
     MIN_TRACK_POPULARITY: 45,
 } as const;
+

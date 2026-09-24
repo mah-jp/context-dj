@@ -214,6 +214,42 @@ describe('DJCore', () => {
             assert.strictEqual(queue[1].name, 'Track Q2');
             assert.strictEqual(queue[1].selectionReason, 'Reason for Q2');
         });
+
+        it('restores selectionReason via currentSessionTracks and fuzzy title match on reload when cache is missing', async () => {
+            // Simulate page reload where track metadata cache was cleared or track was relinked,
+            // but session tracks exist in localStorage.
+            const sessionTracks = [
+                {
+                    id: 'original_id',
+                    uri: 'spotify:track:orig_uri',
+                    name: 'Sunset Cruise',
+                    artists: [{ name: 'City Pop Band' }],
+                    selectionReason: '夕暮れの爽快なムードにぴったりの名曲。',
+                    vibeTag: '#夕暮れドライブ',
+                    stage: 'build'
+                }
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+            // Notice: track_metadata_cache is intentionally empty in localStorage!
+
+            const dj = new DJCore('fake_token');
+
+            // Spotify returns a relinked track with different ID/URI and minor title variance (e.g. remastered tag)
+            const rawSpotifyTrack = {
+                id: 'relinked_different_id',
+                uri: 'spotify:track:relinked_different_uri',
+                name: 'Sunset Cruise - 2026 Remaster',
+                artists: [{ name: 'City Pop Band' }],
+                type: 'track'
+            };
+
+            const enriched = dj.enrichTrackWithCachedMetadata(rawSpotifyTrack as any);
+
+            // Should be successfully enriched from currentSessionTracks via fuzzy match
+            assert.strictEqual(enriched.selectionReason, '夕暮れの爽快なムードにぴったりの名曲。');
+            assert.strictEqual(enriched.vibeTag, '#夕暮れドライブ');
+            assert.strictEqual(enriched.stage, 'build');
+        });
     });
 });
 

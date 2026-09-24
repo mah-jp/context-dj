@@ -155,9 +155,9 @@ export default function Home() {
         // Trigger immediate check & play
         await djCore.processDJLoop(false);
         // Explicitly sync UI immediately and after device buffer
-        await syncUIState();
-        setTimeout(syncUIState, 1500);
-        setTimeout(syncUIState, 3500);
+        await syncUIState({ forceAll: true });
+        setTimeout(() => syncUIState({ forceAll: true }), 1500);
+        setTimeout(() => syncUIState({ forceAll: true }), 3500);
       }
 
     } catch (e: any) {
