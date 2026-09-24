@@ -27,6 +27,8 @@ export const STORAGE_KEYS = {
     SHOW_AI_THOUGHT: 'show_ai_thought',
     AI_FILTERING_ENABLED: 'ai_filtering_enabled',
     TRACK_METADATA_CACHE: 'dj_track_metadata_cache',
+    DJ_CURRENT_SESSION_TRACKS: 'dj_current_session_tracks',
+    SHOW_NOTES: 'dj_show_notes',
 } as const;
 
 export const DEFAULT_MODELS = {

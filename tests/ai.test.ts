@@ -135,18 +135,31 @@ describe('AIService', () => {
                 { name: 'Another Song', artist: 'Good Artist', id: 'spotify:track:3' },
             ];
 
-            // AI selects indices 0 and 2
+            // AI selects indices 0 and 2 with structured evaluation
             globalThis.fetch = async () => ({
                 ok: true,
                 status: 200,
+                text: async () => '',
                 json: async () => ({
-                    candidates: [{ content: { parts: [{ text: '[0, 2]' }] } }]
+                    candidates: [{
+                        content: {
+                            parts: [{
+                                text: JSON.stringify([
+                                    { index: 0, score: 90, vibeTag: '#Chill', selectionReason: 'Fits relaxed mood' },
+                                    { index: 2, score: 85, vibeTag: '#Acoustic', selectionReason: 'Great acoustic sound' }
+                                ])
+                            }]
+                        }
+                    }]
                 })
             } as any);
 
             const service = new AIService('gemini', 'test_key');
-            const keptUris = await service.filterTracksWithAI('chill songs', tracks);
-            assert.deepStrictEqual(keptUris, ['spotify:track:1', 'spotify:track:3']);
+            const evaluations = await service.filterTracksWithAI('chill songs', tracks);
+            assert.strictEqual(evaluations.length, 2);
+            assert.deepStrictEqual(evaluations.map(e => e.id), ['spotify:track:1', 'spotify:track:3']);
+            assert.strictEqual(evaluations[0].vibeTag, '#Chill');
+            assert.strictEqual(evaluations[0].selectionReason, 'Fits relaxed mood');
         });
 
         it('falls back to all tracks if AI filtering fails', async () => {
@@ -157,12 +170,13 @@ describe('AIService', () => {
 
             globalThis.fetch = async () => ({
                 ok: false,
-                status: 500
+                status: 500,
+                text: async () => 'Internal Server Error'
             } as any);
 
             const service = new AIService('gemini', 'test_key');
             const result = await service.filterTracksWithAI('some prompt', tracks);
-            assert.deepStrictEqual(result, ['spotify:track:a', 'spotify:track:b']);
+            assert.deepStrictEqual(result.map(r => r.id), ['spotify:track:a', 'spotify:track:b']);
         });
     });
 

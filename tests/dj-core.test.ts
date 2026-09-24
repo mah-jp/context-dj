@@ -86,4 +86,134 @@ describe('DJCore', () => {
             assert.deepStrictEqual(dj.getProcessLog(), []);
         });
     });
+
+    describe('Up Next & Metadata caching', () => {
+        it('restores selectionReason via URI, ID, or trackKey', () => {
+            // Pre-seed track metadata cache in localStorage
+            store['dj_track_metadata_cache'] = JSON.stringify({
+                'spotify:track:uri1': { selectionReason: 'Reason by URI', stage: 'intro' },
+                'id2': { selectionReason: 'Reason by ID', stage: 'build' },
+                'key:ocean walk|artist3': { selectionReason: 'Reason by TrackKey', stage: 'peak' },
+            });
+
+            const dj = new DJCore('fake_token');
+
+            // 1. Match by URI
+            const t1 = dj.enrichTrackWithCachedMetadata({
+                id: 'other_id',
+                name: 'Some Name',
+                uri: 'spotify:track:uri1',
+                artists: [{ name: 'Artist1' } as any],
+                album: {} as any
+            } as any);
+            assert.strictEqual(t1.selectionReason, 'Reason by URI');
+            assert.strictEqual(t1.stage, 'intro');
+
+            // 2. Match by ID
+            const t2 = dj.enrichTrackWithCachedMetadata({
+                id: 'id2',
+                name: 'Another Name',
+                uri: 'spotify:track:different_uri',
+                artists: [{ name: 'Artist2' } as any],
+                album: {} as any
+            } as any);
+            assert.strictEqual(t2.selectionReason, 'Reason by ID');
+            assert.strictEqual(t2.stage, 'build');
+
+            // 3. Match by TrackKey (Title + Artist) when URI and ID differ (relinked track)
+            const t3 = dj.enrichTrackWithCachedMetadata({
+                id: 'relinked_id',
+                name: 'Ocean Walk (Remastered 2026)',
+                uri: 'spotify:track:relinked_uri',
+                artists: [{ name: 'Artist3' } as any],
+                album: {} as any
+            } as any);
+            assert.strictEqual(t3.selectionReason, 'Reason by TrackKey');
+            assert.strictEqual(t3.stage, 'peak');
+        });
+
+        it('advances Up Next dynamically as currently playing track changes', async () => {
+            // Seed session tracks in localStorage
+            const sessionTracks = [
+                { id: 't1', uri: 'spotify:track:1', name: 'Song 1', artists: [{ name: 'Art 1' }], selectionReason: 'Reason 1' },
+                { id: 't2', uri: 'spotify:track:2', name: 'Song 2', artists: [{ name: 'Art 2' }], selectionReason: 'Reason 2' },
+                { id: 't3', uri: 'spotify:track:3', name: 'Song 3', artists: [{ name: 'Art 3' }], selectionReason: 'Reason 3' },
+                { id: 't4', uri: 'spotify:track:4', name: 'Song 4', artists: [{ name: 'Art 4' }], selectionReason: 'Reason 4' },
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            // Mock spotify.getGeneric to return empty queue (simulating mobile Spotify Connect)
+            (dj as any).spotify.getGeneric = async () => ({ queue: [] });
+
+            // Case 1: Currently playing Song 1 (index 0) -> Up Next should be [Song 2, Song 3, Song 4]
+            const queueAtSong1 = await dj.getQueue(sessionTracks[0] as any);
+            assert.strictEqual(queueAtSong1.length, 3);
+            assert.strictEqual(queueAtSong1[0].name, 'Song 2');
+            assert.strictEqual(queueAtSong1[0].selectionReason, 'Reason 2');
+            assert.strictEqual(queueAtSong1[1].name, 'Song 3');
+
+            // Case 2: Track advances to Song 2 (index 1) -> Up Next should dynamically advance to [Song 3, Song 4]
+            const queueAtSong2 = await dj.getQueue(sessionTracks[1] as any);
+            assert.strictEqual(queueAtSong2.length, 2);
+            assert.strictEqual(queueAtSong2[0].name, 'Song 3');
+            assert.strictEqual(queueAtSong2[0].selectionReason, 'Reason 3');
+            assert.strictEqual(queueAtSong2[1].name, 'Song 4');
+
+            // Case 3: Track advances to Song 3 (index 2) -> Up Next should dynamically advance to [Song 4]
+            const queueAtSong3 = await dj.getQueue(sessionTracks[2] as any);
+            assert.strictEqual(queueAtSong3.length, 1);
+            assert.strictEqual(queueAtSong3[0].name, 'Song 4');
+            assert.strictEqual(queueAtSong3[0].selectionReason, 'Reason 4');
+        });
+
+        it('advances Up Next accurately even when Spotify API returns a lagging/stale queue', async () => {
+            const sessionTracks = [
+                { id: 's1', uri: 'spotify:track:s1', name: 'Song 1', artists: [{ name: 'Artist 1' }], selectionReason: 'Reason 1' },
+                { id: 's2', uri: 'spotify:track:s2', name: 'Song 2', artists: [{ name: 'Artist 2' }], selectionReason: 'Reason 2' },
+                { id: 's3', uri: 'spotify:track:s3', name: 'Song 3', artists: [{ name: 'Artist 3' }], selectionReason: 'Reason 3' },
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            // Mock spotify.getGeneric to return a lagging queue that still includes Song 2 at index 0
+            (dj as any).spotify.getGeneric = async () => ({
+                currently_playing: sessionTracks[1],
+                queue: [
+                    { id: 's2', uri: 'spotify:track:s2', name: 'Song 2', type: 'track' },
+                    { id: 's3', uri: 'spotify:track:s3', name: 'Song 3', type: 'track' }
+                ]
+            });
+
+            // Currently playing Song 2 -> Up Next MUST advance to Song 3, NOT show Song 2 at index 0!
+            const upcoming = await dj.getQueue(sessionTracks[1] as any);
+            assert.strictEqual(upcoming.length, 1);
+            assert.strictEqual(upcoming[0].name, 'Song 3');
+            assert.strictEqual(upcoming[0].selectionReason, 'Reason 3');
+        });
+
+        it('uses Spotify live queue when available from API and enriches with metadata', async () => {
+            // Seed metadata cache in localStorage
+            store['dj_track_metadata_cache'] = JSON.stringify({
+                'spotify:track:q1': { selectionReason: 'Reason for Q1', vibeTag: '#Chill' },
+                'spotify:track:q2': { selectionReason: 'Reason for Q2', vibeTag: '#Energy' }
+            });
+
+            const dj = new DJCore('fake_token');
+            const realSpotifyQueue = [
+                { id: 'q1', uri: 'spotify:track:q1', name: 'Track Q1', artists: [{ name: 'Artist 1' }], type: 'track' },
+                { id: 'q2', uri: 'spotify:track:q2', name: 'Track Q2', artists: [{ name: 'Artist 2' }], type: 'track' },
+            ];
+            (dj as any).spotify.getGeneric = async () => ({ queue: realSpotifyQueue });
+
+            const queue = await dj.getQueue();
+            assert.strictEqual(queue.length, 2);
+            assert.strictEqual(queue[0].name, 'Track Q1');
+            assert.strictEqual(queue[0].selectionReason, 'Reason for Q1');
+            assert.strictEqual(queue[0].vibeTag, '#Chill');
+            assert.strictEqual(queue[1].name, 'Track Q2');
+            assert.strictEqual(queue[1].selectionReason, 'Reason for Q2');
+        });
+    });
 });
+

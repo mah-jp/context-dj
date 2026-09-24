@@ -19,7 +19,7 @@ export function normalizeTrackName(name: string): string {
  */
 export function generateTrackKey(track: Track | SpotifyApi.TrackObjectFull): string {
     const cleanName = normalizeTrackName(track.name);
-    const artist = track.artists[0]?.name.toLowerCase().trim() || '';
+    const artist = track.artists?.[0]?.name?.toLowerCase()?.trim() || '';
     return `${cleanName}|${artist}`;
 }
 

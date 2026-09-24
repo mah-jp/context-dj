@@ -64,64 +64,59 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const syncUIState = React.useCallback(async () => {
         if (!djRef.current) return null;
 
-        // Fetch Data concurrently for better performance and consistency
-        const [playbackState, currentQ, currentDevices] = await Promise.all([
-            djRef.current.getPlaybackState(),
-            djRef.current.getQueue(),
-            djRef.current.getDevices()
-        ]);
+        try {
+            // 1. Fetch playback state first to determine the exact currently playing track
+            const playbackState = await djRef.current.getPlaybackState();
+            const currentTrackItem = (playbackState && playbackState.item && playbackState.item.type === 'track')
+                ? (playbackState.item as Track)
+                : null;
 
-        // Sync Devices & Queue
-        setDevices(currentDevices);
-        setQueue(currentQ.slice(0, 20));
+            // 2. Fetch Queue (passing current track to advance Up Next dynamically) and Devices concurrently
+            const [currentQ, currentDevices] = await Promise.all([
+                djRef.current.getQueue(currentTrackItem),
+                djRef.current.getDevices()
+            ]);
 
-        // Determine Device Name
-        // Priority: 1. Playback State Device, 2. Active Device in List, 3. Empty
-        let activeDeviceName = '';
-        if (playbackState && playbackState.device) {
-            activeDeviceName = playbackState.device.name;
-        } else {
-            const activeD = currentDevices.find(d => d.is_active);
-            if (activeD) activeDeviceName = activeD.name;
-        }
-        setDeviceName(activeDeviceName);
+            // Sync Devices & Queue
+            setDevices(currentDevices);
+            setQueue(currentQ.slice(0, 20));
 
-        // Sync Track Info
-        if (playbackState && playbackState.item && playbackState.item.type === 'track') {
-            setCurrentTrack(playbackState.item as Track);
-            setIsPlaying(playbackState.is_playing);
-        } else {
-            setCurrentTrack(null);
-            setIsPlaying(false);
-        }
-
-        // Update Status
-        const djStatus = djRef.current.getDJStatus();
-        setCurrentQuery(djStatus.currentQuery);
-        setCurrentThought(djStatus.currentThought);
-
-        // Sync Logs
-        if (typeof djRef.current.getProcessLog === 'function') {
-            setDjLogs([...djRef.current.getProcessLog()]);
-        }
-
-        return playbackState;
-    }, []);
-
-    // Auto-refresh when tab/browser becomes visible again (e.g. returning from Spotify app on mobile)
-    useEffect(() => {
-        const handleVisibilityChange = () => {
-            if (document.visibilityState === 'visible') {
-                syncUIState();
+            // Determine Device Name
+            // Priority: 1. Playback State Device, 2. Active Device in List, 3. Empty
+            let activeDeviceName = '';
+            if (playbackState && playbackState.device) {
+                activeDeviceName = playbackState.device.name;
+            } else {
+                const activeD = currentDevices.find(d => d.is_active);
+                if (activeD) activeDeviceName = activeD.name;
             }
-        };
-        window.addEventListener('visibilitychange', handleVisibilityChange);
-        window.addEventListener('focus', handleVisibilityChange);
-        return () => {
-            window.removeEventListener('visibilitychange', handleVisibilityChange);
-            window.removeEventListener('focus', handleVisibilityChange);
-        };
-    }, [syncUIState]);
+            setDeviceName(activeDeviceName);
+
+            // Sync Track Info
+            if (currentTrackItem) {
+                setCurrentTrack(currentTrackItem);
+                setIsPlaying(playbackState!.is_playing);
+            } else {
+                setCurrentTrack(null);
+                setIsPlaying(false);
+            }
+
+            // Update Status
+            const djStatus = djRef.current.getDJStatus();
+            setCurrentQuery(djStatus.currentQuery);
+            setCurrentThought(djStatus.currentThought);
+
+            // Sync Logs
+            if (typeof djRef.current.getProcessLog === 'function') {
+                setDjLogs([...djRef.current.getProcessLog()]);
+            }
+
+            return playbackState;
+        } catch (syncErr) {
+            console.error("Error in syncUIState:", syncErr);
+            return null;
+        }
+    }, []);
 
     // Initialize
     useEffect(() => {
@@ -298,24 +293,45 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 runUILoop();
                 runDJLoop();
 
-                // Visibility/Focus Restoration
-                const handleVisible = () => {
-                    if (document.visibilityState === 'visible') {
+                // Visibility/Focus Restoration (Triggered when user returns to PWA/browser)
+                const handleWakeUp = () => {
+                    if (document.visibilityState === 'visible' && authorizedRef.current && djRef.current) {
+                        console.log("📱 App regained focus / visibility: syncing UI & resuming loops");
+
+                        // 1. Proactively refresh token if expired while in background
+                        const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
+                        if (expiresAtStr) {
+                            const expiresAt = parseInt(expiresAtStr);
+                            if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
+                                const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+                                if (clientId) {
+                                    SpotifyAuth.refreshToken(clientId).then(token => {
+                                        if (token && djRef.current && !isCancelled) {
+                                            djRef.current.updateAccessToken(token);
+                                            syncUIState();
+                                        }
+                                    }).catch(e => console.error("Wake-up Token Refresh Failed:", e));
+                                }
+                            }
+                        }
+
+                        // 2. Immediate sync to update currently playing track and Up Next
+                        syncUIState();
+
+                        // 3. Restart loops if they were frozen by mobile OS
                         if (timerRef.current) clearTimeout(timerRef.current);
+                        if (djTimerRef.current) clearTimeout(djTimerRef.current);
                         runUILoop();
+                        runDJLoop();
                     }
                 };
-                const handleFocus = () => {
-                    if (timerRef.current) clearTimeout(timerRef.current);
-                    runUILoop();
-                };
 
-                document.addEventListener('visibilitychange', handleVisible);
-                window.addEventListener('focus', handleFocus);
+                document.addEventListener('visibilitychange', handleWakeUp);
+                window.addEventListener('focus', handleWakeUp);
 
                 cleanupListeners = () => {
-                    document.removeEventListener('visibilitychange', handleVisible);
-                    window.removeEventListener('focus', handleFocus);
+                    document.removeEventListener('visibilitychange', handleWakeUp);
+                    window.removeEventListener('focus', handleWakeUp);
                 };
             } catch (initError: unknown) {
                 if (isCancelled) return;
@@ -340,8 +356,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const handleNext = async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
+            // Optimistic update: advance current track and Up Next queue immediately
+            if (queue.length > 0) {
+                const nextTrack = queue[0];
+                setCurrentTrack(nextTrack);
+                setQueue(queue.slice(1));
+            }
             await djRef.current.next();
-            setTimeout(syncUIState, 500); // Trigger immediate refresh after small delay
+            // Staggered sync to absorb Spotify API latency
+            setTimeout(syncUIState, 500);
+            setTimeout(syncUIState, 1500);
         }
     };
     const handlePrev = async () => {
@@ -349,6 +373,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (djRef.current) {
             await djRef.current.previous();
             setTimeout(syncUIState, 500);
+            setTimeout(syncUIState, 1500);
         }
     };
     const handleTogglePlay = async () => {

@@ -13,7 +13,7 @@ import QueueList from '../components/QueueList';
 import DynamicBackground from '../components/DynamicBackground';
 import { STORAGE_KEYS, DEFAULTS } from '../lib/constants';
 import { ScheduleItem, AIProvider } from '../lib/types';
-import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+import { getStorageItem, setStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import { useVisionInput } from '../hooks/useVisionInput';
 
@@ -100,6 +100,7 @@ export default function Home() {
     }
     setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
     setShowAiThought(getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
+    setShowNotes(getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
   }, [needsOnboarding]);
 
   const handleLogin = () => {
@@ -365,7 +366,11 @@ export default function Home() {
         <div className={styles.headerRight}>
           <button
             className={styles.iconBtn}
-            onClick={() => setShowNotes(!showNotes)}
+            onClick={() => {
+              const next = !showNotes;
+              setShowNotes(next);
+              setStorageItem(STORAGE_KEYS.SHOW_NOTES, String(next));
+            }}
             style={{ color: showNotes ? '#ffec3d' : 'var(--primary)' }}
             title={showNotes ? "Hide DJ Notes / 選曲理由を隠す" : "Show DJ Notes / 選曲理由を表示"}
           >

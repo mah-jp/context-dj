@@ -23,6 +23,7 @@ export class DJCore {
         aiFiltering: true
     };
     private onStatusUpdate?: (status: string) => void;
+    private lastPlayingTrack: Track | null = null;
     private trackMetadataCache = new Map<string, {
         score?: number;
         vibeTag?: string;
@@ -36,10 +37,8 @@ export class DJCore {
     private cacheTrackMetadata(tracks: Track[]) {
         let changed = false;
         for (const t of tracks) {
-            if (!t.uri) continue;
-            const existing = this.trackMetadataCache.get(t.uri) || {};
-            this.trackMetadataCache.set(t.uri, {
-                ...existing,
+            if (!t) continue;
+            const meta = {
                 ...(t.score !== undefined ? { score: t.score } : {}),
                 ...(t.vibeTag ? { vibeTag: t.vibeTag } : {}),
                 ...(t.selectionReason ? { selectionReason: t.selectionReason } : {}),
@@ -47,23 +46,44 @@ export class DJCore {
                 ...(t.energy !== undefined ? { energy: t.energy } : {}),
                 ...(t.stage ? { stage: t.stage } : {}),
                 ...(t.contextName ? { contextName: t.contextName } : {}),
-            });
+            };
+
+            // Register by URI
+            if (t.uri) {
+                const existing = this.trackMetadataCache.get(t.uri) || {};
+                this.trackMetadataCache.set(t.uri, { ...existing, ...meta });
+            }
+            // Register by ID
+            if (t.id) {
+                const existing = this.trackMetadataCache.get(t.id) || {};
+                this.trackMetadataCache.set(t.id, { ...existing, ...meta });
+            }
+            // Register by normalized trackKey (title + artist) for robust matching across relinked tracks
+            const key = generateTrackKey(t);
+            if (key && key !== '|') {
+                const existing = this.trackMetadataCache.get(`key:${key}`) || {};
+                this.trackMetadataCache.set(`key:${key}`, { ...existing, ...meta });
+            }
             changed = true;
         }
 
         if (changed) {
-            // Persist to localStorage (limit to latest 200 items to avoid quota issues)
+            // Persist to localStorage (limit to latest 300 items to avoid quota issues)
             const obj: Record<string, any> = {};
             const entries = Array.from(this.trackMetadataCache.entries());
-            const sliced = entries.slice(-200);
+            const sliced = entries.slice(-300);
             sliced.forEach(([k, v]) => { obj[k] = v; });
             setStoredJSON(STORAGE_KEYS.TRACK_METADATA_CACHE, obj);
         }
     }
 
-    private enrichTrackWithCachedMetadata(track: Track): Track {
-        if (!track.uri) return track;
-        const cached = this.trackMetadataCache.get(track.uri);
+    enrichTrackWithCachedMetadata(track: Track): Track {
+        if (!track) return track;
+        const key = generateTrackKey(track);
+        const cached = (track.uri ? this.trackMetadataCache.get(track.uri) : undefined)
+            || (track.id ? this.trackMetadataCache.get(track.id) : undefined)
+            || (key ? this.trackMetadataCache.get(`key:${key}`) : undefined);
+
         if (cached) {
             if (cached.score !== undefined && track.score === undefined) track.score = cached.score;
             if (cached.vibeTag && !track.vibeTag) track.vibeTag = cached.vibeTag;
@@ -87,9 +107,54 @@ export class DJCore {
 
         // Restore track metadata cache from localStorage
         const savedCache = getStoredJSON<Record<string, any>>(STORAGE_KEYS.TRACK_METADATA_CACHE, {});
-        Object.entries(savedCache).forEach(([uri, meta]) => {
-            this.trackMetadataCache.set(uri, meta);
+        Object.entries(savedCache).forEach(([key, meta]) => {
+            this.trackMetadataCache.set(key, meta);
         });
+
+        // Restore current session tracks from localStorage
+        const savedSessionTracks = getStoredJSON<Track[]>(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, []);
+        if (savedSessionTracks.length > 0) {
+            this.currentSessionTracks = savedSessionTracks;
+        }
+    }
+
+    /**
+     * Resolves the index of a track within the current session using URI, ID, TrackKey, and fuzzy title match.
+     */
+    findTrackIndexInSession(track: Track | SpotifyApi.TrackObjectFull): number {
+        if (!track || this.currentSessionTracks.length === 0) return -1;
+
+        const uri = track.uri;
+        const id = track.id;
+        const trackKey = generateTrackKey(track);
+        const normName = normalizeTrackName(track.name);
+
+        // 1. Exact URI or ID match
+        let idx = this.currentSessionTracks.findIndex(t => 
+            (uri && t.uri === uri) || (id && t.id === id)
+        );
+        if (idx >= 0) return idx;
+
+        // 2. TrackKey match (Title + Main Artist)
+        if (trackKey && trackKey !== '|') {
+            idx = this.currentSessionTracks.findIndex(t => generateTrackKey(t) === trackKey);
+            if (idx >= 0) return idx;
+        }
+
+        // 3. Substring/fuzzy match for titles with special tags or minor artist differences
+        const artist = track.artists?.[0]?.name?.toLowerCase()?.trim() || '';
+        if (normName && artist) {
+            idx = this.currentSessionTracks.findIndex(t => {
+                const tNorm = normalizeTrackName(t.name);
+                const tArtist = t.artists?.[0]?.name?.toLowerCase()?.trim() || '';
+                const nameMatch = tNorm === normName || (tNorm.length > 3 && normName.length > 3 && (tNorm.includes(normName) || normName.includes(tNorm)));
+                const artistMatch = tArtist === artist || (tArtist.length > 2 && artist.length > 2 && (tArtist.includes(artist) || artist.includes(tArtist)));
+                return nameMatch && artistMatch;
+            });
+            if (idx >= 0) return idx;
+        }
+
+        return -1;
     }
 
     updateConfig(config: Partial<DJConfig>) {
@@ -707,6 +772,10 @@ export class DJCore {
                 console.log('▶️ Playback started successfully (Fetch)');
                 this.currentSessionTracks = tracks;
                 this.lastPlayTime = Date.now();
+                setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, tracks);
+                if (this.onTracksPlayed) {
+                    this.onTracksPlayed(tracks);
+                }
             } catch (e: any) {
                 console.error("Spotify Play Error (Fetch):", e);
                 throw e;
@@ -957,6 +1026,8 @@ export class DJCore {
                         // Brief delay to help Spotify digest order
                         await new Promise(r => setTimeout(r, 200));
                     }
+                    this.currentSessionTracks.push(...toAdd);
+                    setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, this.currentSessionTracks);
                     this.addLog(`✅ Refill complete.`);
                 } else {
                     this.addLog(`⚠️ Refill found no new unique tracks.`);
@@ -978,62 +1049,105 @@ export class DJCore {
 
     // --- Queue Management ---
 
-    async getQueue(): Promise<Track[]> {
+    async getQueue(currentTrackOverride?: Track | null): Promise<Track[]> {
+        const activeTrack = currentTrackOverride || this.lastPlayingTrack;
+
+        // 1. If we have active session tracks (ContextDJ is managing playback),
+        // determine upcoming tracks directly from the currently playing track.
+        // This guarantees Up Next advances in 100% lockstep with currentTrack (and the background blur image).
+        if (this.currentSessionTracks.length > 0) {
+            let foundIndex = -1;
+            if (activeTrack) {
+                foundIndex = this.findTrackIndexInSession(activeTrack);
+            }
+
+            if (foundIndex >= 0) {
+                return this.currentSessionTracks
+                    .slice(foundIndex + 1)
+                    .map(t => this.enrichTrackWithCachedMetadata(t));
+            }
+        }
+
+        // 2. Fallback: Query Spotify live queue API (e.g. outside session, or playing external track)
         try {
-            const response = await this.spotify.getGeneric('https://api.spotify.com/v1/me/player/queue');
-            const queueItems = (response as { queue?: Track[] })?.queue || [];
+            const response = await this.spotify.getGeneric('https://api.spotify.com/v1/me/player/queue') as {
+                currently_playing?: Track;
+                queue?: Track[];
+            } | null;
+
+            const queueItems = response?.queue || [];
             // Filter out non-track items (episodes) to prevent UI crashes
             const tracks = queueItems.filter((item: { type?: string }) => item.type === 'track') as Track[];
-            const enriched = tracks.map(t => this.enrichTrackWithCachedMetadata(t));
+            let enriched = tracks.map(t => this.enrichTrackWithCachedMetadata(t));
 
-            const now = Date.now();
-            const isRecentPlay = now - this.lastPlayTime < 25000; // 25s window for Spotify sync
-
-            if (enriched.length > 0) {
-                // If we recently played tracks, verify Spotify's queue actually contains tracks from our current session
-                if (isRecentPlay && this.currentSessionTracks.length > 1) {
-                    const sessionUris = new Set(this.currentSessionTracks.map(t => t.uri));
-                    const hasSessionTrack = enriched.some(t => sessionUris.has(t.uri));
-                    if (!hasSessionTrack) {
-                        // Spotify queue is still lagging / showing old playlist; fallback to fresh session tracks
-                        console.log("⏳ Spotify queue lagging; showing fresh session tracks");
-                        return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+            // Clean up: If Spotify's lagging queue still starts with the activeTrack, remove it
+            if (activeTrack && enriched.length > 0) {
+                const activeKey = generateTrackKey(activeTrack);
+                const activeUri = activeTrack.uri;
+                while (enriched.length > 0) {
+                    const first = enriched[0];
+                    if (first.uri === activeUri || (activeKey && generateTrackKey(first) === activeKey)) {
+                        enriched = enriched.slice(1);
+                    } else {
+                        break;
                     }
                 }
+            }
+
+            if (enriched.length > 0) {
                 return enriched;
             }
 
-            // Fallback: If Spotify returned empty queue (very common on mobile Connect right after play)
-            if (this.currentSessionTracks.length > 1) {
-                return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+            // 3. Fallback: If Spotify returned empty queue (very common on mobile Connect right after play)
+            if (this.currentSessionTracks.length > 0) {
+                return this.getSessionTracksFromCurrent(activeTrack);
             }
 
             return [];
         } catch (e) {
             console.warn('Failed to fetch queue:', e);
-            if (this.currentSessionTracks.length > 1) {
-                return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+            if (this.currentSessionTracks.length > 0) {
+                return this.getSessionTracksFromCurrent(activeTrack);
             }
             return [];
         }
+    }
+
+    private getSessionTracksFromCurrent(activeTrack?: Track | null): Track[] {
+        if (this.currentSessionTracks.length === 0) return [];
+        let startIndex = 1;
+        if (activeTrack) {
+            const foundIndex = this.findTrackIndexInSession(activeTrack);
+            if (foundIndex >= 0) {
+                startIndex = foundIndex + 1;
+            }
+        }
+        return this.currentSessionTracks.slice(startIndex).map(t => this.enrichTrackWithCachedMetadata(t));
     }
 
     async getPlaybackState(): Promise<SpotifyApi.CurrentPlaybackResponse | null> {
         try {
             const state = await this.spotify.getMyCurrentPlaybackState();
             if (state && state.item && state.item.type === 'track') {
-                this.enrichTrackWithCachedMetadata(state.item as Track);
+                const enriched = this.enrichTrackWithCachedMetadata(state.item as Track);
+                this.lastPlayingTrack = enriched;
                 return state;
             }
 
             // If Spotify has not reported playback yet right after starting play (< 6s)
             const now = Date.now();
             if ((!state || !state.item) && this.lastPlayTime && now - this.lastPlayTime < 6000 && this.currentSessionTracks.length > 0) {
+                const firstTrack = this.enrichTrackWithCachedMetadata(this.currentSessionTracks[0]);
+                this.lastPlayingTrack = firstTrack;
                 return {
                     is_playing: true,
-                    item: this.enrichTrackWithCachedMetadata(this.currentSessionTracks[0]),
+                    item: firstTrack,
                     device: { id: this.activeDeviceId || 'unknown', name: 'Connecting...', is_active: true } as any
                 } as any;
+            }
+
+            if (!state || !state.item) {
+                this.lastPlayingTrack = null;
             }
 
             return state;
