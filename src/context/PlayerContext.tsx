@@ -38,6 +38,7 @@ const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
     const [authorized, setAuthorized] = useState(false);
+    const [djCore, setDjCore] = useState<DJCore | null>(null);
     const [status, setStatus] = useState('Initializing...');
 
     const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
@@ -53,8 +54,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [error, setError] = useState<string | null>(null);
 
     const djRef = useRef<DJCore | null>(null);
-    const timerRef = useRef<NodeJS.Timeout | null>(null);
-    const djTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const authorizedRef = useRef(false);
+    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const djTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
 
     // Helper to sync UI with DJ Core state
@@ -108,6 +110,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // Initialize
     useEffect(() => {
         let cleanupListeners: (() => void) | null = null;
+        let isCancelled = false;
 
         const init = async () => {
             try {
@@ -133,9 +136,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     window.history.replaceState({}, document.title, window.location.pathname);
                 }
 
+                if (isCancelled) return;
+
                 if (!token || !SpotifyAuth.isAuthenticated()) {
                     // Try refreshing token
                     const newToken = await SpotifyAuth.refreshToken(storedClientId);
+                    if (isCancelled) return;
                     if (newToken) {
                         token = newToken;
                         console.log("Token refreshed successfully");
@@ -145,8 +151,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     }
                 }
 
+                if (isCancelled) return;
+
                 // 2. Initialize DJ Core
                 setAuthorized(true);
+                authorizedRef.current = true;
                 setStatus('Ready');
 
                 // Prevent re-creating DJCore if it exists (though useEffect run once implies it shouldn't exist)
@@ -171,6 +180,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     }
 
                     djRef.current = dj;
+                    setDjCore(dj);
                     dj.setStatusCallback(setStatus);
 
                     // Restore Schedule
@@ -189,6 +199,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                 // --- UI Loop (High Priority, Non-Blocking) ---
                 const runUILoop = async () => {
+                    if (isCancelled) return;
                     let nextDelay: number = PLAYBACK_CONSTANTS.UI_POLL_INTERVAL_MS;
 
                     try {
@@ -208,8 +219,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                         console.error("Error in UI Loop:", error);
                     }
 
+                    if (isCancelled) return;
+
                     // Auto-refresh token if expiring soon (Keep this in UI loop as it's lightweight logic)
-                    if (authorized) {
+                    if (authorizedRef.current && djRef.current) {
                         const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
                         if (expiresAtStr) {
                             const expiresAt = parseInt(expiresAtStr);
@@ -217,18 +230,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                                 const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
                                 if (clientId) {
                                     SpotifyAuth.refreshToken(clientId).then(token => {
-                                        if (token && djRef.current) djRef.current.updateAccessToken(token);
+                                        if (token && djRef.current && !isCancelled) djRef.current.updateAccessToken(token);
                                     }).catch(e => console.error("Token Refresh Failed:", e));
                                 }
                             }
                         }
                     }
 
-                    timerRef.current = setTimeout(runUILoop, nextDelay);
+                    if (!isCancelled) {
+                        timerRef.current = setTimeout(runUILoop, nextDelay);
+                    }
                 };
 
                 // --- DJ Logic Loop (AI, Heavy Process) ---
                 const runDJLoop = async () => {
+                    if (isCancelled) return;
                     let nextDelay = PLAYBACK_CONSTANTS.DJ_LOOP_INTERVAL_MS;
 
                     try {
@@ -242,13 +258,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             // Check Schedule (AI Logic) - This may block for seconds during AI request
                             await djRef.current.processDJLoop();
                         }
-                    } catch (error: any) {
+                    } catch (error: unknown) {
                         console.error("Error in DJ Loop:", error);
-                        const msg = error.message || "Unknown background error";
+                        const msg = error instanceof Error ? error.message : "Unknown background error";
                         setError(prev => prev === msg ? prev : msg);
                     }
 
-                    djTimerRef.current = setTimeout(runDJLoop, nextDelay);
+                    if (!isCancelled) {
+                        djTimerRef.current = setTimeout(runDJLoop, nextDelay);
+                    }
                 };
 
                 // Start both loops
@@ -274,9 +292,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     document.removeEventListener('visibilitychange', handleVisible);
                     window.removeEventListener('focus', handleFocus);
                 };
-            } catch (initError: any) {
+            } catch (initError: unknown) {
+                if (isCancelled) return;
                 console.error("Fatal initialization error:", initError);
-                setStatus(`Init Error: ${initError.message || initError}`);
+                const msg = initError instanceof Error ? initError.message : String(initError);
+                setStatus(`Init Error: ${msg}`);
             }
         };
 
@@ -284,6 +304,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         init();
 
         return () => {
+            isCancelled = true;
             if (timerRef.current) clearTimeout(timerRef.current);
             if (djTimerRef.current) clearTimeout(djTimerRef.current);
             if (cleanupListeners) cleanupListeners();
@@ -362,7 +383,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     return (
         <PlayerContext.Provider value={{
-            djCore: djRef.current,
+            djCore,
             authorized,
             status,
             setStatus,

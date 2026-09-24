@@ -255,11 +255,11 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                             <div style={{ padding: '8px 16px', fontSize: '0.8rem', color: '#888', borderBottom: '1px solid #333', marginBottom: '4px' }}>
                                 Select Device
                             </div>
-                            {devices.length > 0 ? devices.map((device: any) => (
+                            {devices.length > 0 ? devices.map((device) => (
                                 <div
-                                    key={device.id}
+                                    key={device.id || device.name}
                                     onClick={() => {
-                                        setDevice(device.id);
+                                        if (device.id) setDevice(device.id);
                                         setShowDevices(false);
                                     }}
                                     style={{

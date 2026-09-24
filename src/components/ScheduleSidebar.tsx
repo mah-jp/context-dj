@@ -1,7 +1,7 @@
-import { useRef, useEffect } from 'react';
 import styles from '../app/page.module.css';
-import { Clock, Trash2 } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import { ScheduleItem } from '../lib/types';
+import { isScheduleItemPast, getScheduleItemSignature } from '../lib/dj-utils';
 
 interface ScheduleSidebarProps {
     schedule: ScheduleItem[];
@@ -11,27 +11,15 @@ interface ScheduleSidebarProps {
 }
 
 export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
-    const isPast = (endTime: string) => {
-        try {
-            const [hours, minutes] = endTime.split(':').map(Number);
-            const now = new Date();
-            const end = new Date();
-            end.setHours(hours, minutes, 0, 0);
-            return now > end;
-        } catch (e) {
-            return false;
-        }
-    };
-
     return (
         <div className={styles.sidebar}>
             {schedule.length > 0 ? schedule.map((item, i) => {
-                const past = isPast(item.end);
-                const isActive = !past && currentQuery === ((item.queries ? item.queries.join('|') : (item.query || '')) + (item.priorityTrack ? '|' + item.priorityTrack : ''));
+                const past = isScheduleItemPast(item);
+                const isActive = !past && currentQuery === getScheduleItemSignature(item);
 
                 return (
                     <div
-                        key={i}
+                        key={`${item.start}-${item.end}-${i}`}
                         className={`${styles.scheduleItem} ${past ? styles.pastItem : ''}`}
                         onClick={() => past && onRecallItem(item)}
                         style={{

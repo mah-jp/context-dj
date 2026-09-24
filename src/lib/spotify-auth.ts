@@ -9,8 +9,8 @@ interface TokenResponse {
     access_token: string;
     token_type: string;
     expires_in: number;
-    refresh_token: string;
-    scope: string;
+    refresh_token?: string;
+    scope?: string;
 }
 
 export class SpotifyAuth {
@@ -106,6 +106,12 @@ export class SpotifyAuth {
                 }),
             });
 
+            if (!response.ok) {
+                const errText = await response.text().catch(() => '');
+                console.error(`Error fetching token (${response.status}):`, errText);
+                return null;
+            }
+
             const data: TokenResponse = await response.json();
 
             if (data.access_token) {
@@ -136,7 +142,13 @@ export class SpotifyAuth {
                 }),
             });
 
-            const data = await response.json();
+            if (!response.ok) {
+                const errText = await response.text().catch(() => '');
+                console.error(`Error refreshing token (${response.status}):`, errText);
+                return null;
+            }
+
+            const data: TokenResponse = await response.json();
             if (data.access_token) {
                 this.setSession(data);
                 return data.access_token;
@@ -147,7 +159,7 @@ export class SpotifyAuth {
         return null;
     }
 
-    private static setSession(data: any) {
+    private static setSession(data: TokenResponse) {
         const expiresAt = Date.now() + data.expires_in * 1000;
         setStorageItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN, data.access_token);
         setStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT, expiresAt.toString());

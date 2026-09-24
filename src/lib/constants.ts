@@ -30,7 +30,7 @@ export const STORAGE_KEYS = {
 
 export const DEFAULT_MODELS = {
     OPENAI: 'gpt-5.4-mini',
-    GEMINI: 'gemini-3.7-flash',
+    GEMINI: 'gemini-flash-latest',
 } as const;
 
 export const DEFAULTS = {

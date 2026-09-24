@@ -1,4 +1,3 @@
-import { useRef, useEffect } from 'react';
 import styles from '../app/page.module.css';
 import { X, Terminal } from 'lucide-react';
 
@@ -8,7 +7,6 @@ interface ProcessLogViewerProps {
 }
 
 export default function ProcessLogViewer({ logs, onClose }: ProcessLogViewerProps) {
-    const endRef = useRef<HTMLDivElement>(null);
 
     // Auto scroll to latest check if it's annoying or helpful. 
     // Usually helpful for logs.
@@ -74,7 +72,7 @@ export default function ProcessLogViewer({ logs, onClose }: ProcessLogViewerProp
                     gap: '4px'
                 }}>
                     {logs.length > 0 ? logs.map((log, i) => (
-                        <div key={i} style={{
+                        <div key={`${log}-${i}`} style={{
                             borderBottom: '1px solid #2a2a2a',
                             paddingBottom: '4px',
                             color: log.includes('❌') || log.includes('⚠️') ? '#cf6679' :

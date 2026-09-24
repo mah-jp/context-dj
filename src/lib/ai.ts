@@ -1,5 +1,4 @@
 import OpenAI from 'openai';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { DEFAULT_MODELS } from './constants';
 import { AIProvider, ScheduleItem } from './types';
 
@@ -162,9 +161,10 @@ export class AIService {
             // Normalize
             if (Array.isArray(schedule)) {
                 return schedule.map(item => ({ ...item, userRequest }));
-            } else if (typeof schedule === 'object') {
-                const list = schedule.schedule || schedule.items || schedule.list || [];
-                return list.map((item: any) => ({ ...item, userRequest }));
+            } else if (typeof schedule === 'object' && schedule !== null) {
+                const scheduleObj = schedule as { schedule?: ScheduleItem[]; items?: ScheduleItem[]; list?: ScheduleItem[] };
+                const list = scheduleObj.schedule || scheduleObj.items || scheduleObj.list || [];
+                return list.map(item => ({ ...item, userRequest }));
             }
             return [];
 
@@ -264,7 +264,7 @@ Instructions:
             if (this.backend === 'openai' && this.openai) {
                 // OpenAI Vision
                 const response = await this.openai.chat.completions.create({
-                    model: (this.modelName.includes('gpt-4') || this.modelName.includes('gpt-5')) ? this.modelName : DEFAULT_MODELS.OPENAI,
+                    model: this.modelName || DEFAULT_MODELS.OPENAI,
                     messages: [
                         {
                             role: "user",

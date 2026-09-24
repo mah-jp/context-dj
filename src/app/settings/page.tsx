@@ -340,7 +340,7 @@ export default function Settings() {
                         }}>
                             {prefHistory.map((h, i) => (
                                 <div
-                                    key={i}
+                                    key={`${h}-${i}`}
                                     onClick={() => {
                                         setPersonalPref(h);
                                         setShowPrefHistory(false);

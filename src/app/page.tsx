@@ -4,7 +4,6 @@ import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
-import { DJCore } from '../lib/dj-core';
 import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info, Camera } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import PlayerBar from '../components/PlayerBar';
@@ -315,7 +314,7 @@ export default function Home() {
               }}>
                 {history.map((item, i) => (
                   <div
-                    key={i}
+                    key={`${item}-${i}`}
                     onClick={() => handleHistorySelect(item)}
                     style={{
                       padding: '8px 16px',

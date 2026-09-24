@@ -67,7 +67,7 @@ export default function QueueList({
                             <div>
                                 {/* Tags */}
                                 {currentQuery.split('|').map((tag, i) => (
-                                    <span key={i} className={styles.aiTag}>{tag.trim()}</span>
+                                    <span key={`${tag}-${i}`} className={styles.aiTag}>{tag.trim()}</span>
                                 ))}
                             </div>
                         </div>
@@ -78,7 +78,7 @@ export default function QueueList({
                     <div className={styles.queueList}>
                         {queue.length > 0 ? queue.map((track, i) => (
                             <div
-                                key={i}
+                                key={track.uri || track.id || `queue-${i}`}
                                 className={styles.queueItem}
                                 onClick={() => {
                                     const tracksToPlay = queue.slice(i);

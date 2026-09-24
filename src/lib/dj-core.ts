@@ -3,7 +3,7 @@ import { AIService } from './ai';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
 import { AIProvider, ScheduleItem, Track, DJConfig } from './types';
 import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
-import { normalizeTrackName, generateTrackKey } from './dj-utils';
+import { normalizeTrackName, generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries } from './dj-utils';
 
 export type { Track };
 
@@ -71,12 +71,6 @@ export class DJCore {
         }
     }
 
-    // --- Utilities ---
-
-    private normalizeTrackName(name: string): string {
-        return normalizeTrackName(name);
-    }
-
     // --- Search & Filtering ---
 
     async searchTracks(queriesInput: string | string[], priorityQuery?: string, context?: { userRequest?: string, thought?: string }): Promise<Track[]> {
@@ -90,7 +84,7 @@ export class DJCore {
         if (targetArtists.length > 0) this.addLog(`🎯 Target Artists: ${targetArtists.join(', ')}`);
 
         // 2. Execute Parallel Search
-        let allRawTracks = await this.executeParallelSearch(queries);
+        const allRawTracks = await this.executeParallelSearch(queries);
 
         if (allRawTracks.length === 0 && priorityTracks.length === 0) {
             this.addLog("❌ No tracks found from Spotify Search");
@@ -105,7 +99,7 @@ export class DJCore {
         const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
 
         // 5. AI Filtering (Smart Selection)
-        let candidates = await this.performAIFiltering(filteredTracks, context);
+        const candidates = await this.performAIFiltering(filteredTracks, context);
 
         // 6. Select Final Set (Shuffle & Pick)
         let finalTracks = this.selectTopTracks(candidates, targetArtists);
@@ -193,7 +187,7 @@ export class DJCore {
     }
 
     private async executeParallelSearch(queries: string[]): Promise<Track[]> {
-        let allRawTracks: Track[] = [];
+        const allRawTracks: Track[] = [];
 
         await Promise.all(queries.map(async (query) => {
             const cleanQuery = query.replace(/"/g, '').replace(/'/g, '');
@@ -247,9 +241,7 @@ export class DJCore {
         const uniqueTracks: Track[] = [];
 
         for (const track of tracks) {
-            const cleanName = this.normalizeTrackName(track.name);
-            const cleanArtist = track.artists[0]?.name.toLowerCase().trim() || '';
-            const key = `${cleanName}|${cleanArtist}`;
+            const key = generateTrackKey(track);
 
             if (!seenKeys.has(key)) {
                 seenKeys.add(key);
@@ -259,8 +251,8 @@ export class DJCore {
         return uniqueTracks;
     }
 
-    private applyTrackFilters(tracks: Track[], targetArtists: string[]): Track[] {
-        let candidates = tracks;
+    private applyTrackFilters(tracks: Track[], _targetArtists?: string[]): Track[] {
+        const candidates = tracks;
 
         // Popularity Filtering (Adaptive)
         const PREFERRED_POPULARITY = 15;
@@ -491,19 +483,9 @@ export class DJCore {
     }
 
     getItemForDate(date: Date): ScheduleItem | null {
-        // Use 'en-US' with hour12: false for HH:mm comparisons
-        const currentTime = date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-
         for (const item of this.schedule) {
-            // Handle simple HH:MM comparisons
-            if (item.start <= currentTime && currentTime < item.end) {
+            if (isScheduleItemActive(item, date)) {
                 return item;
-            }
-            // Handle date crossing (23:00 - 01:00)
-            if (item.start > item.end) {
-                if (currentTime >= item.start || currentTime < item.end) {
-                    return item;
-                }
             }
         }
 
@@ -536,9 +518,8 @@ export class DJCore {
 
             // If we found a next item, and it is DIFFERENT from what we are playing now/last played
             if (nextItem) {
-                const queries = nextItem.queries?.length ? nextItem.queries : (nextItem.query ? [nextItem.query] : []);
-                const priorityPart = nextItem.priorityTrack || '';
-                const nextSignature = queries.join('|') + (priorityPart ? '|' + priorityPart : '');
+                const nextSignature = getScheduleItemSignature(nextItem);
+                const queries = getScheduleItemQueries(nextItem);
 
                 // If next signature differs from current ACTIVE signature AND we haven't preloaded it yet
                 if (nextSignature && nextSignature !== this.lastQuery &&
@@ -571,17 +552,11 @@ export class DJCore {
         if (!currentItem) return;
 
         // Resolve query
-        let queriesToUse: string[] = [];
-        if (currentItem.queries && currentItem.queries.length > 0) {
-            queriesToUse = currentItem.queries;
-        } else if (currentItem.query) {
-            queriesToUse = [currentItem.query];
-        }
-
+        const queriesToUse = getScheduleItemQueries(currentItem);
         if (queriesToUse.length === 0) return;
 
         // Signature for change detection
-        const querySignature = queriesToUse.join('|') + (currentItem.priorityTrack ? `|${currentItem.priorityTrack}` : '');
+        const querySignature = getScheduleItemSignature(currentItem);
 
         // Check if we need to change music
         if (querySignature !== this.lastQuery) {
@@ -589,9 +564,8 @@ export class DJCore {
             this.lastQuery = querySignature;
             setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
 
-            // New Session: Clear Log & History
-            this.processLog = [];
-            this.addLog("▶️ New DJ Request Started");
+            // New Session: Add Separator & reset session-played tracks
+            this.addLog("──────── New Session Started ────────");
             this.sessionPlayedUris.clear();
             this.sessionPlayedKeys.clear();
 
@@ -627,8 +601,7 @@ export class DJCore {
                 // Register initial tracks to history
                 tracks.forEach(t => {
                     this.sessionPlayedUris.add(t.uri);
-                    const key = `${this.normalizeTrackName(t.name)}|${t.artists[0]?.name.toLowerCase().trim() || ''}`;
-                    this.sessionPlayedKeys.add(key);
+                    this.sessionPlayedKeys.add(generateTrackKey(t));
                 });
 
                 await this.playTracks(tracks);
@@ -681,13 +654,10 @@ export class DJCore {
                 }); // No priority track needed for refill usually
 
                 // 4. Filter duplicates (Played in this session OR currently in queue)
-                const queueKeys = new Set(queue.map(item => {
-                    const t = item as Track;
-                    return `${this.normalizeTrackName(t.name)}|${t.artists[0]?.name.toLowerCase().trim() || ''}`;
-                }));
+                const queueKeys = new Set(queue.map(item => generateTrackKey(item as Track)));
 
                 const candidates = newTracks.filter(t => {
-                    const key = `${this.normalizeTrackName(t.name)}|${t.artists[0]?.name.toLowerCase().trim() || ''}`;
+                    const key = generateTrackKey(t);
                     return !this.sessionPlayedUris.has(t.uri) &&
                         !this.sessionPlayedKeys.has(key) &&
                         !queueKeys.has(key);
@@ -704,8 +674,7 @@ export class DJCore {
                     for (const track of toAdd) {
                         await this.addToQueue(track.uri);
                         this.sessionPlayedUris.add(track.uri);
-                        const key = `${this.normalizeTrackName(track.name)}|${track.artists[0]?.name.toLowerCase().trim() || ''}`;
-                        this.sessionPlayedKeys.add(key);
+                        this.sessionPlayedKeys.add(generateTrackKey(track));
                         // Brief delay to help Spotify digest order
                         await new Promise(r => setTimeout(r, 200));
                     }
@@ -732,13 +701,10 @@ export class DJCore {
 
     async getQueue(): Promise<Track[]> {
         try {
-            // Use generic request if method is missing in types
-            // @ts-ignore
             const response = await this.spotify.getGeneric('https://api.spotify.com/v1/me/player/queue');
-            // @ts-ignore
-            const queueItems = response.queue || [];
+            const queueItems = (response as { queue?: Track[] })?.queue || [];
             // Filter out non-track items (episodes) to prevent UI crashes
-            return queueItems.filter((item: any) => item.type === 'track') as Track[];
+            return queueItems.filter((item: { type?: string }) => item.type === 'track') as Track[];
         } catch (e) {
             console.warn('Failed to fetch queue:', e);
             return [];
@@ -767,7 +733,7 @@ export class DJCore {
 
     // --- Controls ---
     // Replaced library calls with direct fetch to avoid JSON parse errors on 204 responses
-    private async safeControlRequest(endpoint: string, method: 'POST' | 'PUT', body?: any) {
+    private async safeControlRequest(endpoint: string, method: 'POST' | 'PUT', body?: unknown) {
         const token = this.spotify.getAccessToken();
         if (!token) return;
         try {

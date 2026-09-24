@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { PlayerProvider } from '../context/PlayerContext';
+import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -46,9 +48,6 @@ export const viewport: Viewport = {
   maximumScale: 5,
   userScalable: true,
 };
-
-import { PlayerProvider } from '../context/PlayerContext';
-import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
 
 export default function RootLayout({
   children,
