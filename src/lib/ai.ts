@@ -217,6 +217,8 @@ For each acceptable track (score >= 50):
 - vibeTag: A short Japanese hashtag describing the vibe (e.g. "#夕暮れチル", "#都会派グルーヴ", "#爽快アコースティック", "#深夜の静寂").
 - selectionReason: A concise one-sentence reason in Japanese explaining why this song fits the context and how its sound/instrumentation aligns with the mood.
 - estimatedBpm: Estimated tempo in BPM (integer, e.g. 84, 120).
+- energy: An integer from 1 to 10 representing musical energy/intensity (1: very calm/ambient, 5: moderate groove, 10: high octane/peak energy).
+- stage: The role of this track in a DJ set. Exactly one of: "intro" (opening mood), "build" (rising rhythm/energy), "peak" (climax/anthem), "outro" (smooth cooldown/closing).
 
 # Input
 - User Request: "${userRequest.replace(/"/g, "'")}"
@@ -230,7 +232,7 @@ ${trackListStr}
             if (this.backend === 'openai' && this.openai) {
                 const completion = await this.openai.chat.completions.create({
                     messages: [
-                        { role: "system", content: "You evaluate music candidates and output JSON containing an array of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm." },
+                        { role: "system", content: "You evaluate music candidates and output JSON containing an array of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage." },
                         { role: "user", content: prompt }
                     ],
                     model: this.modelName,
@@ -258,7 +260,9 @@ ${trackListStr}
                                         score: { type: "integer" },
                                         vibeTag: { type: "string" },
                                         selectionReason: { type: "string" },
-                                        estimatedBpm: { type: "integer" }
+                                        estimatedBpm: { type: "integer" },
+                                        energy: { type: "integer", description: "1 to 10 intensity" },
+                                        stage: { type: "string", enum: ["intro", "build", "peak", "outro"] }
                                     },
                                     required: ["index", "score", "vibeTag", "selectionReason"]
                                 }
@@ -298,7 +302,9 @@ ${trackListStr}
                     score: typeof item.score === 'number' ? item.score : 70,
                     vibeTag: item.vibeTag && item.vibeTag.startsWith('#') ? item.vibeTag : (item.vibeTag ? `#${item.vibeTag}` : '#注目トラック'),
                     selectionReason: item.selectionReason || 'ムードに合わせた選曲です。',
-                    estimatedBpm: item.estimatedBpm
+                    estimatedBpm: typeof item.estimatedBpm === 'number' ? item.estimatedBpm : undefined,
+                    energy: typeof item.energy === 'number' ? Math.max(1, Math.min(10, item.energy)) : 5,
+                    stage: ['intro', 'build', 'peak', 'outro'].includes(item.stage) ? item.stage : undefined
                 }));
 
             return evaluations;

@@ -28,6 +28,8 @@ export class DJCore {
         vibeTag?: string;
         selectionReason?: string;
         estimatedBpm?: number;
+        energy?: number;
+        stage?: 'intro' | 'build' | 'peak' | 'outro';
         contextName?: string;
     }>();
 
@@ -42,6 +44,8 @@ export class DJCore {
                 ...(t.vibeTag ? { vibeTag: t.vibeTag } : {}),
                 ...(t.selectionReason ? { selectionReason: t.selectionReason } : {}),
                 ...(t.estimatedBpm !== undefined ? { estimatedBpm: t.estimatedBpm } : {}),
+                ...(t.energy !== undefined ? { energy: t.energy } : {}),
+                ...(t.stage ? { stage: t.stage } : {}),
                 ...(t.contextName ? { contextName: t.contextName } : {}),
             });
             changed = true;
@@ -65,6 +69,8 @@ export class DJCore {
             if (cached.vibeTag && !track.vibeTag) track.vibeTag = cached.vibeTag;
             if (cached.selectionReason && !track.selectionReason) track.selectionReason = cached.selectionReason;
             if (cached.estimatedBpm !== undefined && track.estimatedBpm === undefined) track.estimatedBpm = cached.estimatedBpm;
+            if (cached.energy !== undefined && track.energy === undefined) track.energy = cached.energy;
+            if (cached.stage && !track.stage) track.stage = cached.stage;
             if (cached.contextName && !track.contextName) track.contextName = cached.contextName;
         }
         return track;
@@ -165,8 +171,8 @@ export class DJCore {
         // 6. AI Filtering & Multi-axis Scoring
         const candidates = await this.performAIFiltering(filteredTracks, context);
 
-        // 7. Select Final Set (Shuffle & Pick with Score Weight)
-        let finalTracks = this.selectTopTracks(candidates, targetArtists);
+        // 7. Smart Sequencing (起承転結: Intro -> Build -> Peak -> Outro)
+        let finalTracks = this.sequenceTracks(candidates, targetArtists);
 
         // 8. Merge Priority Track
         if (priorityTracks.length > 0) {
@@ -178,14 +184,18 @@ export class DJCore {
                 p.vibeTag = evaluated.vibeTag;
                 p.selectionReason = evaluated.selectionReason;
                 p.estimatedBpm = evaluated.estimatedBpm;
+                p.energy = evaluated.energy;
+                p.stage = evaluated.stage || 'intro';
             } else {
                 p.score = p.score || 100;
                 p.vibeTag = p.vibeTag || '#オープニング';
                 p.selectionReason = p.selectionReason || (context?.thought ? `セッションの幕開けを飾るキートラックとして選曲。` : 'オープニングを飾るキートラックです。');
+                p.energy = 5;
+                p.stage = 'intro';
             }
             finalTracks = finalTracks.filter(t => t.uri !== pUri);
             finalTracks = [p, ...finalTracks];
-            this.addLog(`📌 Priority track applied at the top: ${p.name} [${p.vibeTag}]`);
+            this.addLog(`📌 Priority track applied at the top: ${p.name} [${p.vibeTag}] (Stage: Intro)`);
         }
 
         // Cache all metadata so it persists when Spotify queue is polled
@@ -287,6 +297,8 @@ export class DJCore {
                     t.vibeTag = ev.vibeTag;
                     t.selectionReason = ev.selectionReason;
                     t.estimatedBpm = ev.estimatedBpm;
+                    t.energy = ev.energy;
+                    t.stage = ev.stage;
                 }
             });
 
@@ -479,34 +491,102 @@ export class DJCore {
         return arr;
     }
 
-    private selectTopTracks(tracks: Track[], targetArtists: string[] = []): Track[] {
-        const MAX_TOP_TRACKS = 40;
+    private sequenceTracks(tracks: Track[], targetArtists: string[] = []): Track[] {
+        const MAX_FINAL_TRACKS = 40;
+        if (tracks.length <= 2) {
+            return tracks.slice(0, MAX_FINAL_TRACKS);
+        }
 
-        // Sort to prioritize Target Artists, then AI Score, then Playlists
-        const sorted = this.shuffle(tracks).sort((a, b) => {
-            const aName = (a.artists[0]?.name || '').toLowerCase();
-            const bName = (b.artists[0]?.name || '').toLowerCase();
+        // Helper to check if a track matches requested target artists
+        const isTarget = (t: Track): boolean => {
+            if (targetArtists.length === 0) return false;
+            const aName = (t.artists[0]?.name || '').toLowerCase();
+            return targetArtists.some(ta => aName.includes(ta) || ta.includes(aName));
+        };
 
-            const aIsTarget = targetArtists.some(ta => aName.includes(ta)) ? 1 : 0;
-            const bIsTarget = targetArtists.some(ta => bName.includes(ta)) ? 1 : 0;
-
-            if (aIsTarget !== bIsTarget) return bIsTarget - aIsTarget;
-
-            // Secondary priority: AI Score if present
-            if (a.score !== undefined || b.score !== undefined) {
-                return (b.score || 0) - (a.score || 0);
+        // Ensure every track has an energy and stage assigned
+        const prepared = tracks.map(t => {
+            const energy = typeof t.energy === 'number' ? t.energy : 5;
+            let stage = t.stage;
+            if (!stage) {
+                if (energy <= 4) stage = 'intro';
+                else if (energy <= 7) stage = 'build';
+                else stage = 'peak';
             }
-
-            // Tertiary priority: Playlist tracks (but only if artist doesn't match)
-            const aIsPl = a.contextName?.startsWith('Playlist:') ? 1 : 0;
-            const bIsPl = b.contextName?.startsWith('Playlist:') ? 1 : 0;
-            if (aIsPl !== bIsPl) return bIsPl - aIsPl;
-
-            return 0; // Keep shuffle order
+            return { ...t, energy, stage };
         });
 
-        const sliceCount = Math.min(MAX_TOP_TRACKS, sorted.length);
-        return sorted.slice(0, sliceCount);
+        // Group into the 4 storytelling buckets
+        let intro = prepared.filter(t => t.stage === 'intro');
+        let build = prepared.filter(t => t.stage === 'build');
+        let peak = prepared.filter(t => t.stage === 'peak');
+        let outro = prepared.filter(t => t.stage === 'outro');
+
+        // Check if AI distribution is too unbalanced (e.g. all in one stage, or missing critical stages with >= 4 tracks)
+        const total = prepared.length;
+        const needsRebalancing = total >= 4 && (intro.length === 0 || peak.length === 0 || (build.length === 0 && outro.length === 0));
+
+        if (needsRebalancing) {
+            // Sort by energy (ascending), then by score (descending)
+            const sortedByEnergy = [...prepared].sort((a, b) => {
+                const diff = (a.energy ?? 5) - (b.energy ?? 5);
+                if (diff !== 0) return diff;
+                return (b.score ?? 0) - (a.score ?? 0);
+            });
+
+            // Distribute across Intro (15%), Build (35%), Peak (35%), Outro (15%)
+            const introCount = Math.max(1, Math.round(total * 0.15));
+            const outroCount = Math.max(1, Math.round(total * 0.15));
+            const remainingCount = total - introCount - outroCount;
+            const buildCount = Math.max(1, Math.floor(remainingCount / 2));
+
+            intro = sortedByEnergy.slice(0, introCount).map(t => ({ ...t, stage: 'intro' as const }));
+            build = sortedByEnergy.slice(introCount, introCount + buildCount).map(t => ({ ...t, stage: 'build' as const }));
+            peak = sortedByEnergy.slice(introCount + buildCount, total - outroCount).map(t => ({ ...t, stage: 'peak' as const }));
+            outro = sortedByEnergy.slice(total - outroCount).map(t => ({ ...t, stage: 'outro' as const }));
+        }
+
+        // Sort within each stage to build the narrative curve:
+        // 1. Intro (起): Target artists first -> High AI score -> Smooth moderate energy
+        intro.sort((a, b) => {
+            const aT = isTarget(a) ? 1 : 0;
+            const bT = isTarget(b) ? 1 : 0;
+            if (aT !== bT) return bT - aT;
+            if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0);
+            return (a.energy ?? 5) - (b.energy ?? 5);
+        });
+
+        // 2. Build (承): Energy rising (low to high) -> BPM rising
+        build.sort((a, b) => {
+            const aT = isTarget(a) ? 1 : 0;
+            const bT = isTarget(b) ? 1 : 0;
+            if (aT !== bT) return bT - aT;
+            const eDiff = (a.energy ?? 5) - (b.energy ?? 5);
+            if (eDiff !== 0) return eDiff;
+            return (a.estimatedBpm ?? 100) - (b.estimatedBpm ?? 100);
+        });
+
+        // 3. Peak (転): Target artists first -> Highest AI score -> Peak energy
+        peak.sort((a, b) => {
+            const aT = isTarget(a) ? 1 : 0;
+            const bT = isTarget(b) ? 1 : 0;
+            if (aT !== bT) return bT - aT;
+            if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0);
+            return (b.energy ?? 5) - (a.energy ?? 5);
+        });
+
+        // 4. Outro (結): Gradual cooldown (energy descending)
+        outro.sort((a, b) => {
+            const aT = isTarget(a) ? 1 : 0;
+            const bT = isTarget(b) ? 1 : 0;
+            if (aT !== bT) return bT - aT;
+            return (b.energy ?? 5) - (a.energy ?? 5);
+        });
+
+        const sequenced = [...intro, ...build, ...peak, ...outro];
+        this.addLog(`🎼 Smart Sequencing (起承転結): Intro (${intro.length}) → Build (${build.length}) → Peak (${peak.length}) → Outro (${outro.length})`);
+
+        return sequenced.slice(0, MAX_FINAL_TRACKS);
     }
 
     // --- Device Management ---

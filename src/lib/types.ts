@@ -6,6 +6,8 @@ export interface TrackEvaluation {
     vibeTag: string;         // e.g. "#夕暮れチル"
     selectionReason: string; // DJ's short rationale
     estimatedBpm?: number;   // Estimated BPM
+    energy?: number;         // 1-10 intensity
+    stage?: 'intro' | 'build' | 'peak' | 'outro'; // Sequencing stage
 }
 
 export interface ScheduleItem {
@@ -25,6 +27,8 @@ export interface Track extends SpotifyApi.TrackObjectFull {
     vibeTag?: string;
     selectionReason?: string;
     estimatedBpm?: number;
+    energy?: number;
+    stage?: 'intro' | 'build' | 'peak' | 'outro';
 }
 
 export interface DJConfig {

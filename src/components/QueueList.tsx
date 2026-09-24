@@ -102,6 +102,24 @@ export default function QueueList({
                                                 {track.vibeTag}
                                             </span>
                                         )}
+                                        {/* Stage badge: visible when showNotes is ON */}
+                                        {showNotes && track.stage && (
+                                            <span
+                                                className={`${styles.stageBadge} ${
+                                                    track.stage === 'peak' ? styles.stageBadgePeak :
+                                                    track.stage === 'build' ? styles.stageBadgeBuild :
+                                                    track.stage === 'outro' ? styles.stageBadgeOutro :
+                                                    styles.stageBadgeIntro
+                                                }`}
+                                                title={`【起承転結: ${
+                                                    track.stage === 'intro' ? 'Intro (導入)' :
+                                                    track.stage === 'build' ? 'Build (展開)' :
+                                                    track.stage === 'peak' ? 'Peak (絶頂)' : 'Outro (余韻)'
+                                                }】Energy: ${track.energy ?? 5}/10${track.estimatedBpm ? ` | BPM: ~${track.estimatedBpm}` : ''}`}
+                                            >
+                                                {track.stage}
+                                            </span>
+                                        )}
                                         {/* Anchor badge: only visible when showNotes (quote icon) is ON */}
                                         {showNotes && track.contextName?.startsWith('Anchor:') && (
                                             <span className={styles.anchorBadge} title="ムードを決定づけるアンカー曲（象徴曲）">
@@ -117,7 +135,7 @@ export default function QueueList({
                                         )}
                                     </div>
                                     <div className={styles.queueArtist}>{track.artists[0]?.name}</div>
-                                    {showNotes && (track.selectionReason || track.contextName?.startsWith('Anchor:')) && (
+                                    {showNotes && (track.selectionReason || track.contextName?.startsWith('Anchor:') || track.stage) && (
                                         <div
                                             className={styles.queueReason}
                                             title={track.selectionReason}
@@ -125,6 +143,15 @@ export default function QueueList({
                                             {track.contextName?.startsWith('Anchor:') && (
                                                 <span style={{ color: '#38bdf8', fontWeight: 600, marginRight: '6px' }}>
                                                     [⚓ 象徴曲]
+                                                </span>
+                                            )}
+                                            {track.stage && (
+                                                <span style={{
+                                                    color: track.stage === 'peak' ? '#f43f5e' : track.stage === 'build' ? '#fbbf24' : track.stage === 'outro' ? '#a78bfa' : '#34d399',
+                                                    fontWeight: 600,
+                                                    marginRight: '6px'
+                                                }}>
+                                                    [{track.stage.toUpperCase()}{track.energy ? ` ⚡${track.energy}` : ''}]
                                                 </span>
                                             )}
                                             {track.selectionReason}
