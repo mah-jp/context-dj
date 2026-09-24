@@ -1,16 +1,15 @@
 import { useState, useEffect } from 'react';
 import { usePlayer } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
-import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Flame, Share2, Sparkles } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor } from 'lucide-react';
 import { STORAGE_KEYS } from '../lib/constants';
 import { getStorageItem, setStorageItem } from '../lib/storage';
 
 interface PlayerBarProps {
-    showPopularity: boolean;
     onLogin: () => void;
 }
 
-export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
+export default function PlayerBar({ onLogin }: PlayerBarProps) {
     const [showAiThought, setShowAiThought] = useState(true);
 
     useEffect(() => {
@@ -108,14 +107,34 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                 </div>
             )}
             {/* DJ Insight Pop-up */}
-            {showAiThought && currentThought && (
+            {showAiThought && (currentThought || currentTrack?.selectionReason) && (
                 <div className={styles.djInsight} onClick={() => toggleAiThought()} title="Click to hide insight">
                     <div className={styles.djInsightIcon}>
                         <Sparkles size={20} />
                     </div>
                     <div className={styles.djInsightContent}>
-                        <div className={styles.djInsightHeader}>DJ Insight</div>
-                        <div className={styles.djInsightText}>{currentThought}</div>
+                        <div className={styles.djInsightHeader}>
+                            <span>DJ Insight</span>
+                            {currentTrack?.vibeTag && (
+                                <span className={styles.vibeBadge} style={{ marginLeft: '8px', fontSize: '0.65rem' }}>
+                                    {currentTrack.vibeTag}
+                                </span>
+                            )}
+                        </div>
+                        {currentThought && <div className={styles.djInsightText}>{currentThought}</div>}
+                        {currentTrack?.selectionReason && (
+                            <div style={{ marginTop: currentThought ? '6px' : '0', fontSize: '0.8rem', color: '#94a3b8', borderTop: currentThought ? '1px solid rgba(255,255,255,0.1)' : 'none', paddingTop: currentThought ? '6px' : '0', fontStyle: 'italic' }}>
+                                <span style={{ color: 'var(--primary)', fontStyle: 'normal', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                    {currentTrack.contextName?.startsWith('Anchor:') && <Anchor size={12} style={{ color: '#38bdf8' }} />}
+                                    Now Playing
+                                    {currentTrack.contextName?.startsWith('Anchor:') && (
+                                        <span style={{ fontSize: '0.65rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', fontWeight: 500 }}>
+                                            象徴曲
+                                        </span>
+                                    )}:
+                                </span> {currentTrack.selectionReason}
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
@@ -136,6 +155,7 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                             />
                         </div>
                         <div className={styles.nowPlayingText}>
+                            {/* Line 1: Track Name + Equalizer */}
                             <div className={styles.nowPlayingTitle}>
                                 <a href={currentTrack.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }} className={styles.hoverUnderline}>
                                     {currentTrack.name}
@@ -148,22 +168,22 @@ export default function PlayerBar({ showPopularity, onLogin }: PlayerBarProps) {
                                     </div>
                                 )}
                             </div>
-                            <div className={styles.nowPlayingArtist}>
-                                <a href={currentTrack.artists?.[0]?.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} className={styles.hoverUnderline}>
+
+                            {/* Line 2: Artist + Vibe Badge */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'nowrap', marginTop: '2px', fontSize: '0.85rem', overflow: 'hidden' }}>
+                                <a href={currentTrack.artists?.[0]?.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: '#aaa', textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 1, minWidth: 0 }} className={styles.hoverUnderline}>
                                     {(currentTrack.artists || []).map(a => a.name).join(', ')}
                                 </a>
+                                {currentTrack.vibeTag && (
+                                    <span
+                                        className={styles.vibeBadge}
+                                        title={currentTrack.selectionReason ? `【選曲理由】${currentTrack.selectionReason}` : currentTrack.vibeTag}
+                                        style={{ fontSize: '0.65rem', margin: 0, padding: '1px 6px', flexShrink: 0 }}
+                                    >
+                                        {currentTrack.vibeTag}
+                                    </span>
+                                )}
                             </div>
-                            {currentTrack.contextName && (
-                                <div style={{ fontSize: '0.65rem', color: 'var(--primary)', marginTop: '2px', opacity: 0.8 }}>
-                                    {currentTrack.contextName}
-                                </div>
-                            )}
-                            {showPopularity && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px', fontSize: '0.7em', color: '#ffec3d' }}>
-                                    <Flame size={10} fill="#ffec3d" />
-                                    <span>{currentTrack.popularity}</span>
-                                </div>
-                            )}
                         </div>
                     </>
                 ) : (

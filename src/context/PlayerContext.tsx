@@ -32,6 +32,7 @@ interface PlayerContextType {
     error: string | null;
     clearError: () => void;
     startBackgroundKeepAlive: () => void;
+    syncUIState: () => Promise<SpotifyApi.CurrentPlaybackResponse | null>;
 }
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
@@ -106,6 +107,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         return playbackState;
     }, []);
+
+    // Auto-refresh when tab/browser becomes visible again (e.g. returning from Spotify app on mobile)
+    useEffect(() => {
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                syncUIState();
+            }
+        };
+        window.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('focus', handleVisibilityChange);
+        return () => {
+            window.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('focus', handleVisibilityChange);
+        };
+    }, [syncUIState]);
 
     // Initialize
     useEffect(() => {
@@ -182,6 +198,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     djRef.current = dj;
                     setDjCore(dj);
                     dj.setStatusCallback(setStatus);
+                    dj.setOnTracksPlayedCallback((tracks) => {
+                        if (tracks.length > 0) {
+                            setCurrentTrack(tracks[0]);
+                            setQueue(tracks.slice(1, 21));
+                            setIsPlaying(true);
+                            // Schedule a synced refresh after Spotify digest time (1.5s)
+                            setTimeout(syncUIState, 1500);
+                        }
+                    });
 
                     // Restore Schedule
                     const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
@@ -406,7 +431,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             logs: djLogs,
             error,
             clearError: () => setError(null),
-            startBackgroundKeepAlive
+            startBackgroundKeepAlive,
+            syncUIState
         }}>
             {children}
         </PlayerContext.Provider>

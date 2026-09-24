@@ -1,6 +1,6 @@
 import styles from '../app/page.module.css';
 import { DJCore } from '../lib/dj-core';
-import { Bot, Flame, AlertTriangle } from 'lucide-react';
+import { Bot, AlertTriangle, Anchor } from 'lucide-react';
 import Onboarding from './Onboarding';
 import { Track, ScheduleItem } from '../lib/types';
 
@@ -14,7 +14,7 @@ interface QueueListProps {
     showLogs: () => void;
     schedule: ScheduleItem[];
     queue: Track[];
-    showPopularity: boolean;
+    showNotes: boolean;
     djCore: DJCore | null;
 }
 
@@ -28,7 +28,7 @@ export default function QueueList({
     showLogs,
     schedule,
     queue,
-    showPopularity,
+    showNotes,
     djCore
 }: QueueListProps) {
     return (
@@ -93,17 +93,44 @@ export default function QueueList({
                                 />
                                 <div className={styles.queueMeta}>
                                     <div className={styles.queueTitle}>
-                                        {track.name}
-                                        {track.contextName && <span style={{ fontSize: '0.7em', color: 'var(--primary)', marginLeft: '6px', border: '1px solid var(--primary)', padding: '0 4px', borderRadius: '4px' }}>{track.contextName}</span>}
+                                        <span>{track.name}</span>
+                                        {track.vibeTag && (
+                                            <span
+                                                className={styles.vibeBadge}
+                                                title={track.selectionReason ? `【選曲理由】${track.selectionReason}` : track.vibeTag}
+                                            >
+                                                {track.vibeTag}
+                                            </span>
+                                        )}
+                                        {/* Anchor badge: only visible when showNotes (quote icon) is ON */}
+                                        {showNotes && track.contextName?.startsWith('Anchor:') && (
+                                            <span className={styles.anchorBadge} title="ムードを決定づけるアンカー曲（象徴曲）">
+                                                <Anchor size={10} />
+                                                象徴曲
+                                            </span>
+                                        )}
+                                        {/* Other contexts like Playlist: only visible when showNotes is ON */}
+                                        {showNotes && track.contextName && !track.contextName.startsWith('Anchor:') && (
+                                            <span className={styles.contextBadge} style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {track.contextName}
+                                            </span>
+                                        )}
                                     </div>
                                     <div className={styles.queueArtist}>{track.artists[0]?.name}</div>
+                                    {showNotes && (track.selectionReason || track.contextName?.startsWith('Anchor:')) && (
+                                        <div
+                                            className={styles.queueReason}
+                                            title={track.selectionReason}
+                                        >
+                                            {track.contextName?.startsWith('Anchor:') && (
+                                                <span style={{ color: '#38bdf8', fontWeight: 600, marginRight: '6px' }}>
+                                                    [⚓ 象徴曲]
+                                                </span>
+                                            )}
+                                            {track.selectionReason}
+                                        </div>
+                                    )}
                                 </div>
-                                {showPopularity && (
-                                    <div className={styles.queuePop} title={`Popularity: ${track.popularity}`} style={{ color: '#ffec3d' }}>
-                                        <Flame size={12} fill="#ffec3d" />
-                                        <span>{track.popularity}</span>
-                                    </div>
-                                )}
                             </div>
                         )) : (
                             <div style={{ color: '#555', padding: '2rem', textAlign: 'center' }}>Queue is empty.</div>

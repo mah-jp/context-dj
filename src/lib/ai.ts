@@ -1,8 +1,8 @@
 import OpenAI from 'openai';
 import { DEFAULT_MODELS } from './constants';
-import { AIProvider, ScheduleItem } from './types';
+import { AIProvider, ScheduleItem, TrackEvaluation } from './types';
 
-export type { ScheduleItem };
+export type { ScheduleItem, TrackEvaluation };
 
 // Memo: (Deprecated)
 // Web API Reference: References / Tracks / Get Recommendations | Spotify for Developers https://developer.spotify.com/documentation/web-api/reference/get-recommendations
@@ -22,6 +22,8 @@ You are ContextDJ, an expert radio DJ and music curator. Your mission is to anal
   - **Specific Artists/Songs**: Use their exact native spelling (e.g., artist:"宇多田ヒカル", artist:"Tatsuro Yamashita").
   - **Broad Genres/Moods/Vibes**: ALWAYS use English keywords, as Spotify's search performs best with them (e.g., genre:jazz, genre:rnb, vibe:chill).
   - **Mix**: Provide a mix of specific and broad queries to give the player a diverse candidate pool.
+- **Anchor Tracks (Representative Seeds)**:
+  - For each block, provide 2 to 3 iconic, well-known songs or artists that epitomize the desired mood and texture in the anchorTracks field (e.g., ["Plastic Love - Mariya Takeuchi", "Sparkle - Tatsuro Yamashita"]).
 - **Query Density & Variety**: Provide 3 to 5 distinct, non-repetitive search queries per block. Do not repeat the same keywords within a block.
 - **Priority Track**: If the user explicitly requests a specific song or artist, or if a block has an iconic starting track (e.g., "Crab" -> "渚にまつわるエトセトラ"), specify it in the priorityTrack field with a precise query (e.g., track:"Plastic Love" artist:"Mariya Takeuchi").
 
@@ -123,6 +125,11 @@ export class AIService {
                                             type: "array",
                                             items: { type: "string" }
                                         },
+                                        anchorTracks: {
+                                            type: "array",
+                                            description: "2-3 iconic songs or artists that represent the vibe of this block.",
+                                            items: { type: "string" }
+                                        },
                                         priorityTrack: { type: "string" },
                                         thought: { type: "string" }
                                     },
@@ -174,31 +181,41 @@ export class AIService {
         }
     }
 
-    async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, id: string }[], thought?: string): Promise<string[]> {
+    async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, id: string }[], thought?: string): Promise<TrackEvaluation[]> {
         if (tracks.length === 0) return [];
 
-        const trackListStr = tracks.map((t, i) => `${i}: ${t.name} - ${t.artist}`).join('\n');
+        // Limit candidates to 25 to prevent token exhaustion and ensure fast, robust response
+        const candidatesToEval = tracks.slice(0, 25);
+        const trackListStr = candidatesToEval.map((t, i) => `${i}: ${t.name} - ${t.artist}`).join('\n');
         const prompt = `
 # Role
-You are a music critic and expert DJ assistant.
+You are an expert music critic and radio DJ assistant.
 
 # Task
 Evaluate if the following candidate tracks from Spotify match the User's Request and the DJ's Intent.
-Since the official Spotify Audio Features API is unavailable, you must use your internal knowledge of the songs to judge each track.
+Since the official Spotify Audio Features API is unavailable, you must use your internal musical knowledge to judge each track.
 
-# Criteria for "GOOD FIT"
+# Criteria for Evaluation
 1. **Negative Filtering (CRITICAL)**:
    - Exclude "music box" (オルゴール), "karaoke" (カラオケ), "instrumental cover" (カバー) of popular songs (unless explicitly requested). We want the original artist's track.
    - Exclude low-quality live recordings or audiobooks/podcasts that slipped into search results.
 2. **Artist Match (STRICT)**:
-   - If the user explicitly mentions an artist, prioritize or strictly require them. Keep their tracks (80-100% of selection) and exclude cover versions by other artists.
-3. **Estimated Audio Profile Alignment**:
-   - Estimate the BPM, Energy (intensity), Valence (mood/brightness), and instrumentation of the tracks based on your internal knowledge.
+   - If the user explicitly mentions an artist, prioritize or strictly require them. Give their original tracks 90-100 score and exclude cover versions by other artists.
+3. **Estimated Audio Profile & Vibe Alignment**:
+   - Estimate the BPM, Energy, and Mood of the track.
    - Ensure the track matches the tempo and vibe described in the DJ Intent (e.g., do not keep high-energy electronic music if the vibe is "calm piano jazz").
 
+# Output Requirements
+For each acceptable track (score >= 50):
+- index: Track index from the list (integer).
+- score: Integer between 0 and 100 representing fit (90-100: perfect iconic fit, 70-89: great fit, 50-69: acceptable vibe). Exclude tracks scoring below 50.
+- vibeTag: A short Japanese hashtag describing the vibe (e.g. "#夕暮れチル", "#都会派グルーヴ", "#爽快アコースティック", "#深夜の静寂").
+- selectionReason: A concise one-sentence reason in Japanese explaining why this song fits the context and how its sound/instrumentation aligns with the mood.
+- estimatedBpm: Estimated tempo in BPM (integer, e.g. 84, 120).
+
 # Input
-- User Request: "${userRequest}"
-${thought ? `- DJ Intent: "${thought}"` : ''}
+- User Request: "${userRequest.replace(/"/g, "'")}"
+${thought ? `- DJ Intent: "${thought.replace(/"/g, "'")}"` : ''}
 - Found Tracks:
 ${trackListStr}
 `;
@@ -207,7 +224,10 @@ ${trackListStr}
             let responseText = '';
             if (this.backend === 'openai' && this.openai) {
                 const completion = await this.openai.chat.completions.create({
-                    messages: [{ role: "user", content: prompt }],
+                    messages: [
+                        { role: "system", content: "You evaluate music candidates and output JSON containing an array of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm." },
+                        { role: "user", content: prompt }
+                    ],
                     model: this.modelName,
                     response_format: { type: "json_object" }
                 });
@@ -222,31 +242,74 @@ ${trackListStr}
                         contents: [{ parts: [{ text: prompt }] }],
                         generationConfig: {
                             responseMimeType: "application/json",
+                            maxOutputTokens: 8192,
                             responseSchema: {
                                 type: "array",
-                                description: "Array of indices representing tracks that match the criteria.",
-                                items: { type: "integer" }
+                                description: "Array of evaluated tracks matching the criteria.",
+                                items: {
+                                    type: "object",
+                                    properties: {
+                                        index: { type: "integer" },
+                                        score: { type: "integer" },
+                                        vibeTag: { type: "string" },
+                                        selectionReason: { type: "string" },
+                                        estimatedBpm: { type: "integer" }
+                                    },
+                                    required: ["index", "score", "vibeTag", "selectionReason"]
+                                }
                             }
                         }
                     })
                 });
-                if (!response.ok) throw new Error(`Gemini API Error: ${response.status}`);
+                if (!response.ok) {
+                    const errDetail = await response.text().catch(() => '');
+                    console.error(`Gemini API Error: ${response.status}`, errDetail);
+                    throw new Error(`Gemini API Error: ${response.status} ${errDetail}`);
+                }
                 const data = await response.json();
                 responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
             }
 
             const cleanJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-            const indices = JSON.parse(cleanJson);
-
-            if (Array.isArray(indices)) {
-                return indices
-                    .filter(i => typeof i === 'number' && i >= 0 && i < tracks.length)
-                    .map(i => tracks[i].id);
+            let parsed: any;
+            try {
+                parsed = JSON.parse(cleanJson);
+            } catch (pe) {
+                console.error('Failed to parse AI evaluation JSON:', pe, cleanJson);
+                parsed = [];
             }
-            return tracks.map(t => t.id); // Fallback to all if failed
+
+            let rawItems: any[] = [];
+            if (Array.isArray(parsed)) {
+                rawItems = parsed;
+            } else if (parsed && typeof parsed === 'object') {
+                rawItems = parsed.evaluations || parsed.tracks || parsed.matches || parsed.items || [];
+            }
+
+            const evaluations: TrackEvaluation[] = rawItems
+                .filter(item => typeof item.index === 'number' && item.index >= 0 && item.index < candidatesToEval.length)
+                .map(item => ({
+                    id: candidatesToEval[item.index].id,
+                    score: typeof item.score === 'number' ? item.score : 70,
+                    vibeTag: item.vibeTag && item.vibeTag.startsWith('#') ? item.vibeTag : (item.vibeTag ? `#${item.vibeTag}` : '#注目トラック'),
+                    selectionReason: item.selectionReason || 'ムードに合わせた選曲です。',
+                    estimatedBpm: item.estimatedBpm
+                }));
+
+            return evaluations;
         } catch (error) {
             console.error('AI Filtering Error:', error);
-            return tracks.map(t => t.id); // Fallback
+            // Intelligent fallback when API fails
+            const cleanReq = userRequest.replace(/[^\w\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g, '').slice(0, 10);
+            const fallbackTag = cleanReq ? `#${cleanReq}` : '#名曲セレクト';
+            const fallbackReason = thought ? `${thought}` : `${userRequest} の雰囲気に合わせたセレクトです。`;
+
+            return tracks.map(t => ({
+                id: t.id,
+                score: 70,
+                vibeTag: fallbackTag,
+                selectionReason: fallbackReason
+            }));
         }
     }
 

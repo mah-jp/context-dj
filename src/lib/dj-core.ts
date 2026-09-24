@@ -1,8 +1,8 @@
 import SpotifyWebApi from 'spotify-web-api-js';
 import { AIService } from './ai';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
-import { AIProvider, ScheduleItem, Track, DJConfig } from './types';
-import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
+import { AIProvider, ScheduleItem, Track, DJConfig, TrackEvaluation } from './types';
+import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
 import { normalizeTrackName, generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries } from './dj-utils';
 
 export type { Track };
@@ -14,6 +14,8 @@ export class DJCore {
     private processLog: string[] = [];
     private lastQuery: string | null = null;
     private activeDeviceId: string | null = null;
+    private currentSessionTracks: Track[] = [];
+    private lastPlayTime: number = 0;
     private config: DJConfig = {
         minPopularity: PLAYBACK_CONSTANTS.MIN_TRACK_POPULARITY,
         trackSearchLimit: PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT,
@@ -21,6 +23,52 @@ export class DJCore {
         aiFiltering: true
     };
     private onStatusUpdate?: (status: string) => void;
+    private trackMetadataCache = new Map<string, {
+        score?: number;
+        vibeTag?: string;
+        selectionReason?: string;
+        estimatedBpm?: number;
+        contextName?: string;
+    }>();
+
+    private cacheTrackMetadata(tracks: Track[]) {
+        let changed = false;
+        for (const t of tracks) {
+            if (!t.uri) continue;
+            const existing = this.trackMetadataCache.get(t.uri) || {};
+            this.trackMetadataCache.set(t.uri, {
+                ...existing,
+                ...(t.score !== undefined ? { score: t.score } : {}),
+                ...(t.vibeTag ? { vibeTag: t.vibeTag } : {}),
+                ...(t.selectionReason ? { selectionReason: t.selectionReason } : {}),
+                ...(t.estimatedBpm !== undefined ? { estimatedBpm: t.estimatedBpm } : {}),
+                ...(t.contextName ? { contextName: t.contextName } : {}),
+            });
+            changed = true;
+        }
+
+        if (changed) {
+            // Persist to localStorage (limit to latest 200 items to avoid quota issues)
+            const obj: Record<string, any> = {};
+            const entries = Array.from(this.trackMetadataCache.entries());
+            const sliced = entries.slice(-200);
+            sliced.forEach(([k, v]) => { obj[k] = v; });
+            setStoredJSON(STORAGE_KEYS.TRACK_METADATA_CACHE, obj);
+        }
+    }
+
+    private enrichTrackWithCachedMetadata(track: Track): Track {
+        if (!track.uri) return track;
+        const cached = this.trackMetadataCache.get(track.uri);
+        if (cached) {
+            if (cached.score !== undefined && track.score === undefined) track.score = cached.score;
+            if (cached.vibeTag && !track.vibeTag) track.vibeTag = cached.vibeTag;
+            if (cached.selectionReason && !track.selectionReason) track.selectionReason = cached.selectionReason;
+            if (cached.estimatedBpm !== undefined && track.estimatedBpm === undefined) track.estimatedBpm = cached.estimatedBpm;
+            if (cached.contextName && !track.contextName) track.contextName = cached.contextName;
+        }
+        return track;
+    }
 
     constructor(accessToken: string) {
         this.spotify = new SpotifyWebApi();
@@ -30,6 +78,12 @@ export class DJCore {
         this.lastQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, null as any);
         const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
         this.config.aiFiltering = savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
+
+        // Restore track metadata cache from localStorage
+        const savedCache = getStoredJSON<Record<string, any>>(STORAGE_KEYS.TRACK_METADATA_CACHE, {});
+        Object.entries(savedCache).forEach(([uri, meta]) => {
+            this.trackMetadataCache.set(uri, meta);
+        });
     }
 
     updateConfig(config: Partial<DJConfig>) {
@@ -65,6 +119,12 @@ export class DJCore {
         this.onStatusUpdate = cb;
     }
 
+    private onTracksPlayed?: (tracks: Track[]) => void;
+
+    setOnTracksPlayedCallback(cb: (tracks: Track[]) => void) {
+        this.onTracksPlayed = cb;
+    }
+
     private updateStatus(status: string) {
         if (this.onStatusUpdate) {
             this.onStatusUpdate(status);
@@ -73,44 +133,63 @@ export class DJCore {
 
     // --- Search & Filtering ---
 
-    async searchTracks(queriesInput: string | string[], priorityQuery?: string, context?: { userRequest?: string, thought?: string }): Promise<Track[]> {
+    async searchTracks(queriesInput: string | string[], priorityQuery?: string, context?: { userRequest?: string, thought?: string, anchorTracks?: string[] }): Promise<Track[]> {
         const queries = Array.isArray(queriesInput) ? queriesInput : [queriesInput];
 
         // 0. Resolve Priority Track
         const priorityTracks = await this.findPriorityTrack(priorityQuery);
 
-        // 1. Parse target artists for strict filtering
+        // 1. Resolve Anchor Tracks (Iconic seeds)
+        const anchorTracks = await this.findAnchorTracks(context?.anchorTracks);
+
+        // 2. Parse target artists for strict filtering
         const targetArtists = this.extractTargetArtists(queries);
         if (targetArtists.length > 0) this.addLog(`🎯 Target Artists: ${targetArtists.join(', ')}`);
 
-        // 2. Execute Parallel Search
-        const allRawTracks = await this.executeParallelSearch(queries);
+        // 3. Execute Parallel Search
+        const searchTracks = await this.executeParallelSearch(queries);
+        const allRawTracks = [...anchorTracks, ...searchTracks];
 
         if (allRawTracks.length === 0 && priorityTracks.length === 0) {
             this.addLog("❌ No tracks found from Spotify Search");
             return [];
         }
 
-        // 3. Deduplicate
+        // 4. Deduplicate
         const uniqueTracks = this.deduplicateTracks(allRawTracks);
         this.addLog(`📊 Found ${allRawTracks.length} raw hits -> ${uniqueTracks.length} unique tracks`);
 
-        // 4. Apply Filters (Strict Artist -> Popularity)
+        // 5. Apply Filters (Strict Artist -> Popularity)
         const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
 
-        // 5. AI Filtering (Smart Selection)
+        // 6. AI Filtering & Multi-axis Scoring
         const candidates = await this.performAIFiltering(filteredTracks, context);
 
-        // 6. Select Final Set (Shuffle & Pick)
+        // 7. Select Final Set (Shuffle & Pick with Score Weight)
         let finalTracks = this.selectTopTracks(candidates, targetArtists);
 
-        // 7. Merge Priority Track
+        // 8. Merge Priority Track
         if (priorityTracks.length > 0) {
-            const pUri = priorityTracks[0].uri;
+            const p = priorityTracks[0];
+            const pUri = p.uri;
+            const evaluated = candidates.find(c => c.uri === pUri);
+            if (evaluated) {
+                p.score = evaluated.score;
+                p.vibeTag = evaluated.vibeTag;
+                p.selectionReason = evaluated.selectionReason;
+                p.estimatedBpm = evaluated.estimatedBpm;
+            } else {
+                p.score = p.score || 100;
+                p.vibeTag = p.vibeTag || '#オープニング';
+                p.selectionReason = p.selectionReason || (context?.thought ? `セッションの幕開けを飾るキートラックとして選曲。` : 'オープニングを飾るキートラックです。');
+            }
             finalTracks = finalTracks.filter(t => t.uri !== pUri);
-            finalTracks = [...priorityTracks, ...finalTracks];
-            this.addLog(`📌 Priority track applied at the top.`);
+            finalTracks = [p, ...finalTracks];
+            this.addLog(`📌 Priority track applied at the top: ${p.name} [${p.vibeTag}]`);
         }
+
+        // Cache all metadata so it persists when Spotify queue is polled
+        this.cacheTrackMetadata(finalTracks);
 
         return finalTracks;
     }
@@ -136,6 +215,35 @@ export class DJCore {
         }
     }
 
+    private async findAnchorTracks(anchorTracks?: string[]): Promise<Track[]> {
+        if (!anchorTracks || anchorTracks.length === 0) return [];
+
+        this.addLog(`⚓ Searching Anchor Tracks: ${anchorTracks.join(', ')}`);
+        const found: Track[] = [];
+
+        await Promise.all(anchorTracks.map(async (anchor) => {
+            try {
+                const cleanAnchor = anchor.replace(/["']/g, '');
+                const res = await this.spotify.searchTracks(cleanAnchor, { limit: 2 });
+                if (res.tracks && res.tracks.items.length > 0) {
+                    res.tracks.items.forEach(t => {
+                        const track = t as Track;
+                        const shortName = anchor.split('-')[0].trim();
+                        track.contextName = `Anchor: ${shortName}`;
+                        found.push(track);
+                    });
+                }
+            } catch (e) {
+                console.warn(`Anchor search failed for ${anchor}:`, e);
+            }
+        }));
+
+        if (found.length > 0) {
+            this.addLog(`⚓ Found ${found.length} anchor tracks.`);
+        }
+        return found;
+    }
+
     private async performAIFiltering(candidates: Track[], context?: { userRequest?: string, thought?: string }): Promise<Track[]> {
         if (!this.config.aiFiltering || !this.ai || !context || (!context.userRequest && !context.thought)) {
             return candidates;
@@ -145,17 +253,56 @@ export class DJCore {
         this.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
 
         try {
-            const trackData = candidates.map(t => ({ name: t.name, artist: t.artists[0]?.name || 'Unknown', id: t.uri }));
+            const topCandidates = candidates.slice(0, 25);
+            const trackData = topCandidates.map(t => ({ name: t.name, artist: t.artists[0]?.name || 'Unknown', id: t.uri }));
             const request = context.userRequest || 'Follow the DJ mood';
-            const goodIds = await this.ai.filterTracksWithAI(request, trackData, context.thought);
+            const evaluations = await this.ai.filterTracksWithAI(request, trackData, context.thought);
 
-            const filtered = candidates.filter(t => goodIds.includes(t.uri));
-            this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${filtered.length} tracks kept.`);
+            const evalMap = new Map<string, TrackEvaluation>();
+            evaluations.forEach(ev => evalMap.set(ev.id, ev));
 
+            // Merge evaluation data onto candidate tracks
+            candidates.forEach(t => {
+                const ev = evalMap.get(t.uri);
+                if (ev) {
+                    t.score = ev.score;
+                    t.vibeTag = ev.vibeTag;
+                    t.selectionReason = ev.selectionReason;
+                    t.estimatedBpm = ev.estimatedBpm;
+                }
+            });
+
+            this.cacheTrackMetadata(candidates);
+
+            // Minimum track guarantee to prevent short playlist loops (aim for at least 10 tracks)
+            const MIN_GUARANTEE = 10;
+            const SCORE_THRESHOLD = 60;
+
+            // 1. Primary qualified tracks (score >= 60)
+            let qualified = candidates.filter(t => (t.score ?? 0) >= SCORE_THRESHOLD);
+
+            // 2. Relax to score >= 50 if below guarantee
+            if (qualified.length < MIN_GUARANTEE && candidates.some(t => t.score !== undefined)) {
+                qualified = candidates.filter(t => (t.score ?? 0) >= 50);
+            }
+
+            // 3. Guarantee at least MIN_GUARANTEE tracks by topping up with next-best candidates
+            if (qualified.length < MIN_GUARANTEE && candidates.length > qualified.length) {
+                const remaining = candidates.filter(t => !qualified.some(q => q.uri === t.uri));
+                remaining.sort((a, b) => (b.score ?? b.popularity ?? 0) - (a.score ?? a.popularity ?? 0));
+                const needed = Math.min(MIN_GUARANTEE - qualified.length, remaining.length);
+                const filler = remaining.slice(0, needed);
+                qualified = [...qualified, ...filler];
+                this.addLog(`🛡️ Min track guarantee: Added ${filler.length} next-best tracks to reach ${qualified.length} songs.`);
+            }
+
+            this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
             this.updateStatus('Ready');
 
-            if (filtered.length > 0) {
-                return filtered;
+            if (qualified.length > 0) {
+                // Sort primarily by AI score (descending) so top-rated tracks play first
+                qualified.sort((a, b) => (b.score || 0) - (a.score || 0));
+                return qualified;
             } else {
                 this.addLog(`⚠️ AI Filtering removed ALL tracks. Reverting to original set.`);
                 return candidates;
@@ -297,7 +444,7 @@ export class DJCore {
     private selectTopTracks(tracks: Track[], targetArtists: string[] = []): Track[] {
         const MAX_TOP_TRACKS = 40;
 
-        // Sort to prioritize Target Artists, then Playlists, then others
+        // Sort to prioritize Target Artists, then AI Score, then Playlists
         const sorted = this.shuffle(tracks).sort((a, b) => {
             const aName = (a.artists[0]?.name || '').toLowerCase();
             const bName = (b.artists[0]?.name || '').toLowerCase();
@@ -307,7 +454,12 @@ export class DJCore {
 
             if (aIsTarget !== bIsTarget) return bIsTarget - aIsTarget;
 
-            // Secondary priority: Playlist tracks (but only if artist doesn't match)
+            // Secondary priority: AI Score if present
+            if (a.score !== undefined || b.score !== undefined) {
+                return (b.score || 0) - (a.score || 0);
+            }
+
+            // Tertiary priority: Playlist tracks (but only if artist doesn't match)
             const aIsPl = a.contextName?.startsWith('Playlist:') ? 1 : 0;
             const bIsPl = b.contextName?.startsWith('Playlist:') ? 1 : 0;
             if (aIsPl !== bIsPl) return bIsPl - aIsPl;
@@ -435,6 +587,8 @@ export class DJCore {
                     throw new Error(`Spotify Play Failed: ${res.statusText}`);
                 }
                 console.log('▶️ Playback started successfully (Fetch)');
+                this.currentSessionTracks = tracks;
+                this.lastPlayTime = Date.now();
             } catch (e: any) {
                 console.error("Spotify Play Error (Fetch):", e);
                 throw e;
@@ -532,7 +686,8 @@ export class DJCore {
                         // Perform search in background (async)
                         this.searchTracks(queries, nextItem.priorityTrack, {
                             userRequest: nextItem.userRequest,
-                            thought: nextItem.thought
+                            thought: nextItem.thought,
+                            anchorTracks: nextItem.anchorTracks
                         }).then(tracks => {
                             console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
                             this.preloadedResult = {
@@ -593,7 +748,8 @@ export class DJCore {
                 console.log(`🔎 Performing immediate search for ${querySignature}`);
                 tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack, {
                     userRequest: currentItem.userRequest,
-                    thought: currentItem.thought
+                    thought: currentItem.thought,
+                    anchorTracks: currentItem.anchorTracks
                 });
             }
 
@@ -605,6 +761,10 @@ export class DJCore {
                 });
 
                 await this.playTracks(tracks);
+
+                if (this.onTracksPlayed) {
+                    this.onTracksPlayed(tracks);
+                }
             } catch (e) {
                 console.error("Playback failed, reverting DJ state to allow retry on next tick:", e);
                 // Revert state so the next loop tick will see this as a 'new' request and try again
@@ -650,7 +810,8 @@ export class DJCore {
                 // 3. Search Again
                 const newTracks = await this.searchTracks(queries, undefined, {
                     userRequest: currentItem.userRequest,
-                    thought: currentItem.thought
+                    thought: currentItem.thought,
+                    anchorTracks: currentItem.anchorTracks
                 }); // No priority track needed for refill usually
 
                 // 4. Filter duplicates (Played in this session OR currently in queue)
@@ -704,16 +865,60 @@ export class DJCore {
             const response = await this.spotify.getGeneric('https://api.spotify.com/v1/me/player/queue');
             const queueItems = (response as { queue?: Track[] })?.queue || [];
             // Filter out non-track items (episodes) to prevent UI crashes
-            return queueItems.filter((item: { type?: string }) => item.type === 'track') as Track[];
+            const tracks = queueItems.filter((item: { type?: string }) => item.type === 'track') as Track[];
+            const enriched = tracks.map(t => this.enrichTrackWithCachedMetadata(t));
+
+            const now = Date.now();
+            const isRecentPlay = now - this.lastPlayTime < 25000; // 25s window for Spotify sync
+
+            if (enriched.length > 0) {
+                // If we recently played tracks, verify Spotify's queue actually contains tracks from our current session
+                if (isRecentPlay && this.currentSessionTracks.length > 1) {
+                    const sessionUris = new Set(this.currentSessionTracks.map(t => t.uri));
+                    const hasSessionTrack = enriched.some(t => sessionUris.has(t.uri));
+                    if (!hasSessionTrack) {
+                        // Spotify queue is still lagging / showing old playlist; fallback to fresh session tracks
+                        console.log("⏳ Spotify queue lagging; showing fresh session tracks");
+                        return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+                    }
+                }
+                return enriched;
+            }
+
+            // Fallback: If Spotify returned empty queue (very common on mobile Connect right after play)
+            if (this.currentSessionTracks.length > 1) {
+                return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+            }
+
+            return [];
         } catch (e) {
             console.warn('Failed to fetch queue:', e);
+            if (this.currentSessionTracks.length > 1) {
+                return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+            }
             return [];
         }
     }
 
     async getPlaybackState(): Promise<SpotifyApi.CurrentPlaybackResponse | null> {
         try {
-            return await this.spotify.getMyCurrentPlaybackState();
+            const state = await this.spotify.getMyCurrentPlaybackState();
+            if (state && state.item && state.item.type === 'track') {
+                this.enrichTrackWithCachedMetadata(state.item as Track);
+                return state;
+            }
+
+            // If Spotify has not reported playback yet right after starting play (< 6s)
+            const now = Date.now();
+            if ((!state || !state.item) && this.lastPlayTime && now - this.lastPlayTime < 6000 && this.currentSessionTracks.length > 0) {
+                return {
+                    is_playing: true,
+                    item: this.enrichTrackWithCachedMetadata(this.currentSessionTracks[0]),
+                    device: { id: this.activeDeviceId || 'unknown', name: 'Connecting...', is_active: true } as any
+                } as any;
+            }
+
+            return state;
         } catch (e) {
             console.warn('Failed to fetch playback state:', e);
             return null;

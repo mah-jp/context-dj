@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
-import { Send, History, Loader, Settings, Mic, MicOff, Flame, XCircle, CheckCircle, Info, Camera } from 'lucide-react';
+import { Send, History, Loader, Settings, Mic, MicOff, Quote, XCircle, CheckCircle, Info, Camera } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import PlayerBar from '../components/PlayerBar';
 import ProcessLogViewer from '../components/ProcessLogViewer';
@@ -35,6 +35,7 @@ export default function Home() {
     error,
     clearError,
     startBackgroundKeepAlive,
+    syncUIState,
   } = usePlayer();
 
   const [inputText, setInputText] = useState('');
@@ -42,7 +43,7 @@ export default function Home() {
   const [setupStatus, setSetupStatus] = useState({ hasClientId: false, hasAiKey: false });
 
   const [showHistory, setShowHistory] = useState(false);
-  const [showPopularity, setShowPopularity] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [toast, setToast] = useState<{ msg: string, type: 'info' | 'error' | 'success' } | null>(null);
 
@@ -150,8 +151,12 @@ export default function Home() {
         setStatus('Ready');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
 
-        // Trigger immediate check
+        // Trigger immediate check & play
         await djCore.processDJLoop(false);
+        // Explicitly sync UI immediately and after device buffer
+        await syncUIState();
+        setTimeout(syncUIState, 1500);
+        setTimeout(syncUIState, 3500);
       }
 
     } catch (e: any) {
@@ -350,11 +355,11 @@ export default function Home() {
         <div className={styles.headerRight}>
           <button
             className={styles.iconBtn}
-            onClick={() => setShowPopularity(!showPopularity)}
-            style={{ color: showPopularity ? '#ffec3d' : 'var(--primary)' }}
-            title={showPopularity ? "Hide Popularity" : "Show Popularity"}
+            onClick={() => setShowNotes(!showNotes)}
+            style={{ color: showNotes ? '#ffec3d' : 'var(--primary)' }}
+            title={showNotes ? "Hide DJ Notes / 選曲理由を隠す" : "Show DJ Notes / 選曲理由を表示"}
           >
-            <Flame size={20} fill={showPopularity ? "#ffec3d" : "none"} />
+            <Quote size={20} fill={showNotes ? "#ffec3d" : "none"} />
           </button>
           <Link href="/settings" className={styles.settingsLink} aria-label="Settings">
             <Settings size={20} />
@@ -383,7 +388,7 @@ export default function Home() {
           showLogs={() => setShowLogs(true)}
           schedule={schedule}
           queue={queue}
-          showPopularity={showPopularity}
+          showNotes={showNotes}
           djCore={djCore}
         />
       </div>
@@ -405,7 +410,6 @@ export default function Home() {
 
       {/* 3. Bottom Player Bar */}
       <PlayerBar
-        showPopularity={showPopularity}
         onLogin={handleLogin}
       />
     </main>

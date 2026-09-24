@@ -1,10 +1,19 @@
 export type AIProvider = 'openai' | 'gemini';
 
+export interface TrackEvaluation {
+    id: string;              // Spotify URI
+    score: number;           // 0-100 (Relevance to context)
+    vibeTag: string;         // e.g. "#夕暮れチル"
+    selectionReason: string; // DJ's short rationale
+    estimatedBpm?: number;   // Estimated BPM
+}
+
 export interface ScheduleItem {
     start: string;
     end: string;
     query: string;
     queries?: string[]; // Support multiple search queries
+    anchorTracks?: string[]; // Iconic tracks or artists representing this block
     priorityTrack?: string; // Query for a specific song to play first
     thought?: string; // DJ's reasoning/comment
     userRequest?: string; // Original user instruction for context
@@ -12,6 +21,10 @@ export interface ScheduleItem {
 
 export interface Track extends SpotifyApi.TrackObjectFull {
     contextName?: string;
+    score?: number;
+    vibeTag?: string;
+    selectionReason?: string;
+    estimatedBpm?: number;
 }
 
 export interface DJConfig {

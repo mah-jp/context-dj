@@ -275,6 +275,70 @@
 
 .queueArtist {
   font-size: 0.85rem;
+  color: var(--text-sub);
+}
+
+.queueReason {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.vibeBadge {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--primary);
+  background: rgba(3, 218, 198, 0.12);
+  border: 1px solid rgba(3, 218, 198, 0.35);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: middle;
+  transition: all 0.2s ease;
+}
+
+.vibeBadge:hover {
+  background: rgba(3, 218, 198, 0.2);
+  border-color: var(--primary);
+}
+
+.vibeScore {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #ffec3d;
+  opacity: 0.95;
+}
+
+.contextBadge {
+  font-size: 0.7rem;
+  color: var(--primary);
+  border: 1px solid var(--primary);
+  padding: 0 4px;
+  border-radius: 4px;
+  margin-left: 6px;
+}
+
+.anchorBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .queuePop {
