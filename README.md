@@ -37,9 +37,12 @@ Unlike standard shuffle or playlists, ContextDJ builds a **context-aware schedul
 To use ContextDJ (even the hosted version), you need:
 
 1.  **Spotify Premium Account**: Required for the Web API playback controls.
-2.  **Spotify Client ID**: You need to create a simple app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/applications).
-    - Redirect URIs: `https://contextdj.remoteroom.jp/` (or `http://127.0.0.1:3000/` for local dev)
-    - APIs used: `Web API`
+2.  **Spotify Client ID**: Create an application in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/applications).
+    - **APIs used**: **Make sure to check and enable `Web API`** (⚠️ Omitting this will cause track search and playback to fail with `QUOTA_EXCEEDED` or authorization errors).
+    - **Redirect URIs**: Add the appropriate URI(s) based on your usage (you can register multiple URIs and share a single Client ID between Web and CLI):
+        - Web Hosted: `https://contextdj.remoteroom.jp/`
+        - CLI / Terminal: `http://127.0.0.1:8888/callback`
+        - Local Web Dev: `http://127.0.0.1:3000/`
 3.  **AI API Key**: key from either [OpenAI](https://platform.openai.com) or [Google AI Studio](https://aistudio.google.com/).
 
 ### Setup Guide
@@ -100,7 +103,11 @@ npm run cli -- setup
 2. Open the URL in your local browser and approve the request.
 3. Copy the redirected URL (`http://127.0.0.1:8888/callback?code=...`) from your browser's address bar and paste it into the terminal.
 4. The obtained `refresh_token` is saved in `~/.config/context-dj/config.json` and refreshed silently in the background.
-*(Note: Add `http://127.0.0.1:8888/callback` to the Redirect URIs in your Spotify Developer Dashboard).*
+
+> [!IMPORTANT]
+> **Spotify Client ID Tips**:
+> - Ensure **`Web API` is enabled** when creating your Spotify App (omitting it prevents track searches and playback controls from working).
+> - You can reuse your existing Web Client ID by simply adding `http://127.0.0.1:8888/callback` to the Redirect URIs under your app's Settings.
 
 ### CUI Controls
 

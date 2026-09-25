@@ -37,9 +37,12 @@
 ContextDJを利用するには、以下の準備が必要です (公開版・ローカル版共通):
 
 1.  **Spotify Premium アカウント**: Web APIによる再生制御に必要です。
-2.  **Spotify Client ID**: [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/applications) で簡単なアプリを作成して取得します。
-    - Redirect URIs: `https://contextdj.remoteroom.jp/` (ローカル開発の場合は `http://127.0.0.1:3000/`)
-    - APIs used: `Web API`
+2.  **Spotify Client ID**: [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/applications) でアプリを作成して取得します。
+    - **APIs used**: **必ず `Web API` にチェックを入れて有効化してください** (⚠️ チェックが漏れると楽曲検索や再生制御が `QUOTA_EXCEEDED` や認可エラーで失敗します)。
+    - **Redirect URIs**: ご利用の形態に合わせて以下を追加してください (複数登録可能・1つの Client ID で Web 版と CLI 版を兼用できます):
+        - Web 公開版: `https://contextdj.remoteroom.jp/`
+        - CLI / ターミナル版: `http://127.0.0.1:8888/callback`
+        - ローカル Web 開発: `http://127.0.0.1:3000/`
 3.  **AI APIキー**: [OpenAI](https://platform.openai.com) または [Google AI Studio](https://aistudio.google.com/) のキー。
 
 ### セットアップ手順
@@ -100,7 +103,11 @@ npm run cli -- setup
 2. ブラウザでその URL を開き、「承認」します。
 3. リダイレクトされた URL (`http://127.0.0.1:8888/callback?code=...`) をアドレスバーからコピーし、ターミナルに貼り付けます。
 4. 取得された `refresh_token` は `~/.config/context-dj/config.json` に安全に保存され、以降は完全自動でサイレント更新されます。
-*(※ Spotify Developer Dashboard の Redirect URIs に `http://127.0.0.1:8888/callback` を追加してください)*
+
+> [!IMPORTANT]
+> **Spotify Client ID の注意点**:
+> - アプリ作成時に **`Web API` が有効化されていること** を必ず確認してください (チェックが入っていないと曲の検索に失敗します)。
+> - Web版で作成済みの Client ID がある場合、新しく作成しなくても既存アプリの「Settings」から Redirect URIs に `http://127.0.0.1:8888/callback` を追加するだけで共通利用できます。
 
 ### CUI 操作方法
 
