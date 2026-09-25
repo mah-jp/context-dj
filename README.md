@@ -82,6 +82,9 @@ A terminal-native CUI (TUI) dashboard is built into ContextDJ, allowing you to c
 ### Launching
 
 ```bash
+# Install dependencies (first time only)
+npm install
+
 # Launch interactive TUI dashboard
 npm run cli
 
