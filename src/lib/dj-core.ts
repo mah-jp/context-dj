@@ -375,7 +375,12 @@ export class DJCore {
 
         try {
             const topCandidates = candidates.slice(0, 25);
-            const trackData = topCandidates.map(t => ({ name: t.name, artist: t.artists[0]?.name || 'Unknown', id: t.uri }));
+            const trackData = topCandidates.map(t => ({
+                name: t.name,
+                artist: t.artists.map(a => a.name).join(', ') || t.artists[0]?.name || 'Unknown',
+                album: t.album?.name || '',
+                id: t.uri
+            }));
             const request = context.userRequest || 'Follow the DJ mood';
             const evaluations = await this.ai.filterTracksWithAI(request, trackData, context.thought);
 
@@ -397,28 +402,17 @@ export class DJCore {
 
             this.cacheTrackMetadata(candidates);
 
-            // Minimum track guarantee to prevent short playlist loops (aim for at least 10 tracks)
-            const MIN_GUARANTEE = 10;
-            const SCORE_THRESHOLD = 60;
-
+            // Respect AI's intelligent curation:
             // 1. Primary qualified tracks (score >= 60)
-            let qualified = candidates.filter(t => (t.score ?? 0) >= SCORE_THRESHOLD);
+            let qualified = candidates.filter(t => (t.score ?? 0) >= 60);
 
-            // 2. Relax to score >= 50 if below guarantee
-            if (qualified.length < MIN_GUARANTEE && candidates.some(t => t.score !== undefined)) {
+            // 2. If fewer than 5 tracks, accept tracks evaluated as acceptable (score >= 50)
+            if (qualified.length < 5 && candidates.some(t => t.score !== undefined)) {
                 qualified = candidates.filter(t => (t.score ?? 0) >= 50);
             }
 
-            // 3. Guarantee at least MIN_GUARANTEE tracks by topping up with next-best candidates
-            if (qualified.length < MIN_GUARANTEE && candidates.length > qualified.length) {
-                const remaining = candidates.filter(t => !qualified.some(q => q.uri === t.uri));
-                remaining.sort((a, b) => (b.score ?? b.popularity ?? 0) - (a.score ?? a.popularity ?? 0));
-                const needed = Math.min(MIN_GUARANTEE - qualified.length, remaining.length);
-                const filler = remaining.slice(0, needed);
-                qualified = [...qualified, ...filler];
-                this.addLog(`🛡️ Min track guarantee: Added ${filler.length} next-best tracks to reach ${qualified.length} songs.`);
-            }
-
+            // Trust the AI's judgment: do NOT revive tracks scored < 50 by the AI.
+            // If qualified tracks are few, play the high-quality ones and let Auto-Refill find more later.
             this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
             this.updateStatus('Ready');
 

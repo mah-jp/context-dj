@@ -207,35 +207,36 @@ export class AIService {
         }
     }
 
-    async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, id: string }[], thought?: string): Promise<TrackEvaluation[]> {
+    async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, album?: string, id: string }[], thought?: string): Promise<TrackEvaluation[]> {
         if (tracks.length === 0) return [];
 
         // Limit candidates to 25 to prevent token exhaustion and ensure fast, robust response
         const candidatesToEval = tracks.slice(0, 25);
-        const trackListStr = candidatesToEval.map((t, i) => `${i}: ${t.name} - ${t.artist}`).join('\n');
+        const trackListStr = candidatesToEval.map((t, i) => `${i}: "${t.name}" by ${t.artist}${t.album ? ` (Album: "${t.album}")` : ''}`).join('\n');
         const prompt = `
 # Role
-You are an expert music critic and radio DJ assistant.
+You are an expert music curator, critic, and radio DJ assistant.
 
 # Task
 Evaluate if the following candidate tracks from Spotify match the User's Request and the DJ's Intent.
-Since the official Spotify Audio Features API is unavailable, you must use your internal musical knowledge to judge each track.
+Use your internal musical knowledge and the provided track, artist, and **album names** to make an intelligent, discerning judgment for each track.
 
 # Criteria for Evaluation
-1. **Negative Filtering (CRITICAL)**:
-   - Exclude "music box" (オルゴール), "karaoke" (カラオケ), "instrumental cover" (カバー) of popular songs (unless explicitly requested). We want the original artist's track.
-   - Exclude low-quality live recordings or audiobooks/podcasts that slipped into search results.
+1. **Intelligent Quality & Context Verification (CRITICAL)**:
+   - Carefully inspect the **track title, artist name, and album title**.
+   - Discern between authentic artist releases vs generic production music, advertising/commercial BGM (e.g. "動画広告用音楽", "Music for advertising"), relaxation/sleep loops, sound effect tracks, or practice jam/backing tracks. Exclude or heavily penalize generic non-artist content unless explicitly requested.
+   - Exclude "music box" (オルゴール), "karaoke" (カラオケ), and amateur instrumental cover versions of popular songs. We want the original artist's track.
+   - Exclude low-quality live bootlegs, audiobooks, or podcasts.
 2. **Artist Match (STRICT)**:
-   - If the user explicitly mentions an artist, prioritize or strictly require them. Give their original tracks 90-100 score and exclude cover versions by other artists.
-3. **Estimated Audio Profile & Vibe Alignment**:
-   - Estimate the BPM, Energy, and Mood of the track.
-   - Ensure the track matches the tempo and vibe described in the DJ Intent (e.g., do not keep high-energy electronic music if the vibe is "calm piano jazz").
+   - If the user explicitly mentions an artist, prioritize or strictly require them. Give their original tracks a 90-100 score and exclude cover versions by other artists.
+3. **Musical Vibe, Style & Energy Alignment**:
+   - Consider the genre, tempo, instrumentation, and emotional intensity. Ensure the track matches the mood described in the User Request and DJ Intent.
 
 # Output Requirements
 For each acceptable track (score >= 50):
 - index: Track index from the list (integer).
 - score: Integer between 0 and 100 representing fit (90-100: perfect iconic fit, 70-89: great fit, 50-69: acceptable vibe). Exclude tracks scoring below 50.
-- vibeTag: A short Japanese hashtag describing the vibe (e.g. "#夕暮れチル", "#都会派グルーヴ", "#爽快アコースティック", "#深夜の静寂").
+- vibeTag: A short Japanese hashtag describing the vibe (e.g. "#夕暮れチル", "#都会派グルーヴ", "#激情ロックバラード", "#深夜の静寂").
 - selectionReason: A concise one-sentence reason in Japanese explaining why this song fits the context and how its sound/instrumentation aligns with the mood.
 - estimatedBpm: Estimated tempo in BPM (integer, e.g. 84, 120).
 - energy: An integer from 1 to 10 representing musical energy/intensity (1: very calm/ambient, 5: moderate groove, 10: high octane/peak energy).
