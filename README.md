@@ -75,6 +75,41 @@ If you want to run ContextDJ locally or contribute:
 
 4.  Open [http://127.0.0.1:3000](http://127.0.0.1:3000) with your browser.
 
+## 🖥️ CUI Version (Terminal / tmux)
+
+A terminal-native CUI (TUI) dashboard is built into ContextDJ, optimized for persistent execution in `tmux` or on headless servers. It provides real-time ASCII visualization of the playback schedule, currently playing track, DJ thoughts, and an interactive prompt.
+
+### Launching
+
+```bash
+# Launch interactive TUI dashboard (ideal for tmux)
+npm run cli
+
+# Launch and submit an initial music request directly
+npm run cli -- "Chill beats for late night coding"
+
+# Run interactive setup wizard
+npm run cli -- setup
+```
+
+### Headless Initial Authentication (Copy-Paste Method)
+1. On first run, `npm run cli` displays an authorization URL in your terminal.
+2. Open the URL in your local browser and approve the request.
+3. Copy the redirected URL (`http://127.0.0.1:8888/callback?code=...`) from your browser's address bar and paste it into the terminal.
+4. The obtained `refresh_token` is saved in `~/.config/context-dj/config.json` and refreshed silently in the background.
+*(Note: Add `http://127.0.0.1:8888/callback` to the Redirect URIs in your Spotify Developer Dashboard).*
+
+### CUI Controls
+
+* **Request Input**:
+  * `Enter`: Submit music request to trigger AI schedule curation and playback.
+  * `↑` / `↓`: **Navigate request history**. Automatically restores unsaved draft inputs when returning to the bottom (persisted to `~/.config/context-dj/history.json`).
+* **Quick Playback Controls (when input prompt is empty)**:
+  * `Space`: Play / Pause toggle
+  * `n`: Skip to next track
+  * `p`: Go to previous track
+  * `q` or `Ctrl+C`: Quit
+
 ## 📦 Tech Stack
 
 - **Framework**: [Next.js](https://nextjs.org/) (App Router)

@@ -3,7 +3,7 @@
  */
 
 export function getStorageItem(key: string, fallback: string = ''): string {
-    if (typeof window === 'undefined') return fallback;
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return fallback;
     try {
         const value = localStorage.getItem(key);
         return value !== null ? value : fallback;
@@ -14,7 +14,7 @@ export function getStorageItem(key: string, fallback: string = ''): string {
 }
 
 export function setStorageItem(key: string, value: string): void {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
     try {
         localStorage.setItem(key, value);
     } catch (e) {
@@ -23,7 +23,7 @@ export function setStorageItem(key: string, value: string): void {
 }
 
 export function removeStorageItem(key: string): void {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
     try {
         localStorage.removeItem(key);
     } catch (e) {
@@ -32,7 +32,7 @@ export function removeStorageItem(key: string): void {
 }
 
 export function getStoredJSON<T>(key: string, fallback: T): T {
-    if (typeof window === 'undefined') return fallback;
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return fallback;
     try {
         const item = localStorage.getItem(key);
         if (item === null) return fallback;
@@ -44,7 +44,7 @@ export function getStoredJSON<T>(key: string, fallback: T): T {
 }
 
 export function setStoredJSON<T>(key: string, value: T): void {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
     try {
         localStorage.setItem(key, JSON.stringify(value));
     } catch (e) {

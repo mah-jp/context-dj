@@ -1,8 +1,8 @@
 import test, { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { SpotifyAuth } from '../src/lib/spotify-auth.ts';
-import { STORAGE_KEYS } from '../src/lib/constants.ts';
-import { setStorageItem, getStorageItem } from '../src/lib/storage.ts';
+import { SpotifyAuth } from '../src/lib/spotify-auth';
+import { STORAGE_KEYS } from '../src/lib/constants';
+import { setStorageItem, getStorageItem } from '../src/lib/storage';
 
 describe('SpotifyAuth', () => {
     let originalWindow: any;

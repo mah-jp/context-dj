@@ -9,8 +9,8 @@ import {
     getScheduleItemQueries,
     parseTimeToMinutes,
     normalizeTimeString,
-} from '../src/lib/dj-utils.ts';
-import { ScheduleItem, Track } from '../src/lib/types.ts';
+} from '../src/lib/dj-utils';
+import { ScheduleItem, Track } from '../src/lib/types';
 
 describe('dj-utils', () => {
     describe('parseTimeToMinutes & normalizeTimeString', () => {

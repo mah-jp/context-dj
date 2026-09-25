@@ -6,7 +6,7 @@ import {
     removeStorageItem,
     getStoredJSON,
     setStoredJSON,
-} from '../src/lib/storage.ts';
+} from '../src/lib/storage';
 
 describe('storage', () => {
     // Mock localStorage for Node.js environment

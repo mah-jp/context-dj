@@ -1,8 +1,8 @@
 import test, { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { AIService } from '../src/lib/ai.ts';
-import { DEFAULT_MODELS } from '../src/lib/constants.ts';
-import { ScheduleItem } from '../src/lib/types.ts';
+import { AIService } from '../src/lib/ai';
+import { DEFAULT_MODELS } from '../src/lib/constants';
+import { ScheduleItem } from '../src/lib/types';
 
 describe('AIService', () => {
     let originalFetch: any;

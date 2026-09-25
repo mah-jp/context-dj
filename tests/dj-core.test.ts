@@ -1,7 +1,7 @@
 import test, { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { DJCore } from '../src/lib/dj-core.ts';
-import { ScheduleItem } from '../src/lib/types.ts';
+import { DJCore } from '../src/lib/dj-core';
+import { ScheduleItem, Track } from '../src/lib/types';
 
 describe('DJCore', () => {
     let store: Record<string, string> = {};

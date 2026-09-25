@@ -158,7 +158,7 @@ export class DJCore {
         const normName = normalizeTrackName(track.name);
 
         // 1. Exact URI or ID match
-        let idx = this.currentSessionTracks.findIndex(t => 
+        let idx = this.currentSessionTracks.findIndex(t =>
             (uri && t.uri === uri) || (id && t.id === id)
         );
         if (idx >= 0) return idx;
@@ -466,38 +466,17 @@ export class DJCore {
             const searchQuery = this.config.onlyOfficial ? `owner:spotify ${query}` : query;
 
             try {
-                const [trackRes, playlistRes] = await Promise.all([
-                    this.spotify.searchTracks(searchQuery, { limit: 30 }), // Increased for more direct artist hits
-                    this.spotify.searchPlaylists(searchQuery, { limit: 8 }) // Increased for more curated variety
+                // Fetch up to 20 tracks per query via pagination (respecting Spotify's maximum limit: 10)
+                const [trackResPage1, trackResPage2] = await Promise.all([
+                    this.spotify.searchTracks(searchQuery, { limit: 10, offset: 0 }),
+                    this.spotify.searchTracks(searchQuery, { limit: 10, offset: 10 }).catch(() => null)
                 ]);
 
-                if (trackRes.tracks && trackRes.tracks.items) {
-                    allRawTracks.push(...trackRes.tracks.items);
+                if (trackResPage1?.tracks?.items) {
+                    allRawTracks.push(...trackResPage1.tracks.items);
                 }
-
-                if (playlistRes.playlists && playlistRes.playlists.items.length > 0) {
-                    // Process top playlists (up to 3) to get curated diversity
-                    const targetPlaylists = playlistRes.playlists.items.slice(0, 3);
-
-                    for (const pl of targetPlaylists) {
-                        try {
-                            const plTracksRes = await this.spotify.getPlaylistTracks(pl.id, { limit: 25 });
-                            const extractedTracks = plTracksRes.items
-                                .map(item => {
-                                    const t = item.track as Track;
-                                    if (!t || t.type !== 'track' || !t.id) return null;
-                                    t.contextName = `Playlist: ${pl.name}`;
-                                    return t;
-                                })
-                                .filter((t): t is Track => t !== null);
-
-                            this.addLog(`📜 Scanned Playlist: "${pl.name}" (${extractedTracks.length} tracks)`);
-                            this.logTrackSamples(extractedTracks);
-                            allRawTracks.push(...extractedTracks);
-                        } catch (plErr) {
-                            console.warn(`⚠️ Failed to load tracks from playlist ${pl.name}:`, plErr);
-                        }
-                    }
+                if (trackResPage2?.tracks?.items) {
+                    allRawTracks.push(...trackResPage2.tracks.items);
                 }
             } catch (error) {
                 console.warn(`⚠️ Partial search failed for "${query}":`, error);
@@ -830,6 +809,7 @@ export class DJCore {
     private sessionPlayedUris = new Set<string>();
     private sessionPlayedKeys = new Set<string>();
     private isRefilling = false;
+    private lastRefillAttemptTime = 0;
 
     async createSchedule(instruction: string, personalContext?: string) {
         if (!this.ai) throw new Error("AI not initialized (AIが初期化されていません)");
@@ -1050,6 +1030,13 @@ export class DJCore {
     private async checkAndRefillQueue(queries: string[], currentItem: ScheduleItem) {
         if (this.isRefilling) return;
 
+        // Cooldown check: prevent rapid tight loops when queue stays small
+        const now = Date.now();
+        const REFILL_COOLDOWN_MS = 60 * 1000; // at least 60 seconds between refill attempts
+        if (now - this.lastRefillAttemptTime < REFILL_COOLDOWN_MS) {
+            return;
+        }
+
         // 0. Check Playback Status (Don't refill if not playing/active)
         const playback = await this.getPlaybackState();
         if (!playback || !playback.device || !playback.device.is_active) {
@@ -1059,19 +1046,9 @@ export class DJCore {
         try {
             // 1. Check Queue Depth
             const queue = await this.getQueue();
-            // Threshold: If 2 or fewer tracks remaining (Current + Next 1)
-            // Note: getQueue usually returns [Next1, Next2...]. It doesn't include currently playing? 
-            // It depends on endpoint behavior. Let's assume queue.length is the 'upcoming' tracks.
-            // If length is small, we need more.
             if (queue.length < PLAYBACK_CONSTANTS.MIN_QUEUE_SIZE_FOR_REFILL) {
-
-                // 2. Check Time Remaining (Simplified)
-                // Very simple check: If current time is NOT close to end (naive: > 5 mins?)
-                // Or simply: If we are still in the valid block, just refill. 
-                // The loop handles switching when block ends. So if we are in block, we want music.
-                // Refilling near end (e.g. 1 min left) might be wasteful but safe.
-
                 this.isRefilling = true;
+                this.lastRefillAttemptTime = Date.now();
                 this.addLog("🥣 Queue running low. Auto-Refill (Okawari) started...");
 
                 // 3. Search Again
@@ -1079,7 +1056,7 @@ export class DJCore {
                     userRequest: currentItem.userRequest,
                     thought: currentItem.thought,
                     anchorTracks: currentItem.anchorTracks
-                }); // No priority track needed for refill usually
+                });
 
                 // 4. Filter duplicates (Played in this session OR currently in queue)
                 const queueKeys = new Set(queue.map(item => generateTrackKey(item as Track)));
@@ -1111,8 +1088,8 @@ export class DJCore {
                     this.addLog(`✅ Refill complete.`);
                 } else {
                     this.addLog(`⚠️ Refill found no new unique tracks.`);
-                    // Optional: If really out of tracks, maybe clear history to allow repeats?
-                    // For now, let it be.
+                    // If no new tracks were found, extend cooldown to 3 minutes to avoid repetitive AI calls
+                    this.lastRefillAttemptTime = Date.now() + 120 * 1000;
                 }
 
                 this.isRefilling = false;
