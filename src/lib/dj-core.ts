@@ -3,7 +3,7 @@ import { AIService } from './ai';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
 import { AIProvider, ScheduleItem, Track, DJConfig, TrackEvaluation } from './types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
-import { normalizeTrackName, generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries } from './dj-utils';
+import { normalizeTrackName, generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries, parseTimeToMinutes, normalizeTimeString } from './dj-utils';
 
 export type { Track };
 
@@ -80,9 +80,17 @@ export class DJCore {
     enrichTrackWithCachedMetadata(track: Track): Track {
         if (!track) return track;
         const key = generateTrackKey(track);
-        const cached = (track.uri ? this.trackMetadataCache.get(track.uri) : undefined)
+        let cached = (track.uri ? this.trackMetadataCache.get(track.uri) : undefined)
             || (track.id ? this.trackMetadataCache.get(track.id) : undefined)
             || (key ? this.trackMetadataCache.get(`key:${key}`) : undefined);
+
+        // Fallback: Check currentSessionTracks using robust index finder
+        if (!cached && this.currentSessionTracks.length > 0) {
+            const idx = this.findTrackIndexInSession(track);
+            if (idx >= 0) {
+                cached = this.currentSessionTracks[idx];
+            }
+        }
 
         if (cached) {
             if (cached.score !== undefined && track.score === undefined) track.score = cached.score;
@@ -827,6 +835,20 @@ export class DJCore {
         if (!this.ai) throw new Error("AI not initialized (AIが初期化されていません)");
 
         const schedule = await this.ai.generateSchedule(instruction, this.schedule, personalContext);
+
+        // Ensure time format is normalized and if first item starts slightly in future, pull to now
+        if (schedule.length > 0) {
+            const now = new Date();
+            const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            const firstStartMins = parseTimeToMinutes(schedule[0].start);
+            const nowMins = now.getHours() * 60 + now.getMinutes();
+
+            // If the first block starts in the near future (within 3 hours), align with now so playback starts immediately
+            if (firstStartMins > nowMins && (firstStartMins - nowMins <= 180)) {
+                schedule[0].start = nowStr;
+            }
+        }
+
         this.schedule = schedule;
         return schedule;
     }
@@ -858,6 +880,39 @@ export class DJCore {
         return null;
     }
 
+    /**
+     * Resolves the effective schedule item to play right now.
+     * Unlike getItemForDate which strictly tests if a slot is active,
+     * this guarantees the DJ will not stall silently if a schedule exists.
+     */
+    getEffectiveItemForPlayback(date: Date = new Date()): ScheduleItem | null {
+        if (!this.schedule || this.schedule.length === 0) return null;
+
+        // 1. Exact active item check
+        const activeItem = this.getItemForDate(date);
+        if (activeItem) return activeItem;
+
+        // 2. Fallback when current time falls into a gap or before all slots
+        const currentMins = date.getHours() * 60 + date.getMinutes();
+        const firstItem = this.schedule[0];
+        const firstStartMins = parseTimeToMinutes(firstItem.start);
+
+        // If before the first item's scheduled start, start with the first item
+        if (currentMins < firstStartMins) {
+            return firstItem;
+        }
+
+        // Otherwise find the most recent item whose start time has arrived
+        let bestItem: ScheduleItem = this.schedule[0];
+        for (const item of this.schedule) {
+            const startMins = parseTimeToMinutes(item.start);
+            if (startMins <= currentMins) {
+                bestItem = item;
+            }
+        }
+        return bestItem;
+    }
+
     getCurrentItem(): ScheduleItem | null {
         return this.getItemForDate(new Date());
     }
@@ -866,9 +921,9 @@ export class DJCore {
     private preloadedResult: { signature: string, tracks: Track[] } | null = null;
     private isPreloading = false;
 
-    async processDJLoop(silentWait: boolean = true) {
+    async processDJLoop(silentWait: boolean = true, force: boolean = false) {
         const now = new Date();
-        const currentItem = this.getItemForDate(now);
+        const currentItem = this.getEffectiveItemForPlayback(now);
 
         // 1. Check if we need to PRELOAD for the future (e.g. 60 seconds ahead)
         // Only if we have a schedule with multiple items or time-based logic
@@ -921,8 +976,8 @@ export class DJCore {
         const querySignature = getScheduleItemSignature(currentItem);
 
         // Check if we need to change music
-        if (querySignature !== this.lastQuery) {
-            console.log(`🎧 DJ Change: ${querySignature} `);
+        if (force || querySignature !== this.lastQuery) {
+            console.log(`🎧 DJ Change${force ? ' (Forced)' : ''}: ${querySignature} `);
             this.lastQuery = querySignature;
             setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
 
@@ -937,10 +992,12 @@ export class DJCore {
             // This prevents "AI Filtering" (and cost) if the user isn't ready to listen.
             const devices = await this.getDevices();
             if (devices.length === 0) {
-                const msg = "⚠️ DJ Search skipped: No available Spotify devices. Please open Spotify.";
-                console.log(msg);
+                const msg = "No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)";
+                console.log(`⚠️ DJ Search skipped: ${msg}`);
+                this.updateStatus('⚠️ Please open Spotify (Spotifyを開いてください)');
+                this.addLog(`⚠️ ${msg}`);
                 if (!silentWait) {
-                    throw new Error("No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)");
+                    throw new Error(msg);
                 }
                 return;
             }
@@ -952,6 +1009,7 @@ export class DJCore {
                 this.preloadedResult = null; // Consume
             } else {
                 // Normal search
+                this.updateStatus(`🔎 Searching: ${queriesToUse[0]}... (選曲中...)`);
                 console.log(`🔎 Performing immediate search for ${querySignature}`);
                 tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack, {
                     userRequest: currentItem.userRequest,
@@ -967,7 +1025,9 @@ export class DJCore {
                     this.sessionPlayedKeys.add(generateTrackKey(t));
                 });
 
+                this.updateStatus('▶️ Starting playback... (再生開始中...)');
                 await this.playTracks(tracks);
+                this.updateStatus('Ready');
 
                 if (this.onTracksPlayed) {
                     this.onTracksPlayed(tracks);
@@ -1086,6 +1146,20 @@ export class DJCore {
                     .slice(foundIndex + 1)
                     .map(t => this.enrichTrackWithCachedMetadata(t));
             }
+
+            // CRITICAL: If ContextDJ triggered playback recently (within 15s) or has session tracks,
+            // never fall back to Spotify's stale live queue API!
+            // When foundIndex is -1, Spotify is either lagging or transitioning to track 0.
+            // Returning slice(1) guarantees Up Next shows the newly curated tracks immediately.
+            const now = Date.now();
+            if (this.lastPlayTime && now - this.lastPlayTime < 15000) {
+                return this.currentSessionTracks
+                    .slice(1)
+                    .map(t => this.enrichTrackWithCachedMetadata(t));
+            }
+
+            // If session tracks exist, always prioritize session tracks from current rather than stale Spotify queue
+            return this.getSessionTracksFromCurrent(activeTrack);
         }
 
         // 2. Fallback: Query Spotify live queue API (e.g. outside session, or playing external track)
@@ -1148,23 +1222,30 @@ export class DJCore {
     async getPlaybackState(): Promise<SpotifyApi.CurrentPlaybackResponse | null> {
         try {
             const state = await this.spotify.getMyCurrentPlaybackState();
+            const now = Date.now();
+
+            // Check if we recently triggered play (< 6s) and Spotify is still returning the OLD track or no track
+            if (this.lastPlayTime && now - this.lastPlayTime < 6000 && this.currentSessionTracks.length > 0) {
+                const firstSessionTrack = this.currentSessionTracks[0];
+                const isPlayingOldTrack = state?.item && this.findTrackIndexInSession(state.item) === -1;
+                const isNoTrack = !state || !state.item;
+
+                if (isNoTrack || isPlayingOldTrack) {
+                    const enriched = this.enrichTrackWithCachedMetadata(firstSessionTrack);
+                    this.lastPlayingTrack = enriched;
+                    return {
+                        is_playing: true,
+                        item: enriched,
+                        device: (state && state.device) || { id: this.activeDeviceId || 'unknown', name: 'Connecting...', is_active: true } as any
+                    } as any;
+                }
+            }
+
             if (state && state.item && state.item.type === 'track') {
                 const enriched = this.enrichTrackWithCachedMetadata(state.item as Track);
                 state.item = enriched as any;
                 this.lastPlayingTrack = enriched;
                 return state;
-            }
-
-            // If Spotify has not reported playback yet right after starting play (< 6s)
-            const now = Date.now();
-            if ((!state || !state.item) && this.lastPlayTime && now - this.lastPlayTime < 6000 && this.currentSessionTracks.length > 0) {
-                const firstTrack = this.enrichTrackWithCachedMetadata(this.currentSessionTracks[0]);
-                this.lastPlayingTrack = firstTrack;
-                return {
-                    is_playing: true,
-                    item: firstTrack,
-                    device: { id: this.activeDeviceId || 'unknown', name: 'Connecting...', is_active: true } as any
-                } as any;
             }
 
             if (!state || !state.item) {
@@ -1179,6 +1260,10 @@ export class DJCore {
     }
 
     // --- Status Inspection ---
+    getLastPlayTime(): number {
+        return this.lastPlayTime;
+    }
+
     getDJStatus() {
         const currentItem = this.getCurrentItem();
         return {

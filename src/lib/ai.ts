@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { DEFAULT_MODELS } from './constants';
 import { AIProvider, ScheduleItem, TrackEvaluation } from './types';
+import { normalizeTimeString } from './dj-utils';
 
 export type { ScheduleItem, TrackEvaluation };
 
@@ -35,6 +36,16 @@ You are ContextDJ, an expert radio DJ and music curator. Your mission is to anal
 # DJ Thought Rules
 - Detect the language of the user's request. Write the thought field in that exact language.
 - Speak in a friendly, sophisticated, and passionate radio-DJ tone. Explain the vibe of the selection and the flow of the transition.
+
+# Output Format (MANDATORY)
+You MUST return valid JSON (either a JSON array of blocks or a JSON object with a "schedule" array).
+Each schedule block MUST contain:
+- start: 24-hour time in "HH:mm" format (e.g., "14:00", "09:30"). Never use 12-hour or AM/PM.
+- end: 24-hour time in "HH:mm" format (e.g., "18:00", "23:00"). Never use 12-hour or AM/PM.
+- queries: array of 3 to 5 search strings for Spotify.
+- anchorTracks: array of 2 to 3 iconic songs or artists representing the vibe.
+- priorityTrack: optional exact track query (e.g. track:"Song" artist:"Artist").
+- thought: radio DJ's intent and vibe description in the user's language.
 `;
 
 export class AIService {
@@ -171,14 +182,24 @@ export class AIService {
             }
 
             // Normalize
+            let list: any[] = [];
             if (Array.isArray(schedule)) {
-                return schedule.map(item => ({ ...item, userRequest }));
+                list = schedule;
             } else if (typeof schedule === 'object' && schedule !== null) {
-                const scheduleObj = schedule as { schedule?: ScheduleItem[]; items?: ScheduleItem[]; list?: ScheduleItem[] };
-                const list = scheduleObj.schedule || scheduleObj.items || scheduleObj.list || [];
-                return list.map(item => ({ ...item, userRequest }));
+                const scheduleObj = schedule as Record<string, any>;
+                const candidate = scheduleObj.schedule || scheduleObj.items || scheduleObj.list || scheduleObj.timeline || scheduleObj.blocks || Object.values(scheduleObj).find(v => Array.isArray(v));
+                if (Array.isArray(candidate)) {
+                    list = candidate;
+                }
             }
-            return [];
+
+            return list.map(item => ({
+                ...item,
+                start: normalizeTimeString(item.start || '00:00'),
+                end: normalizeTimeString(item.end || '23:59'),
+                queries: Array.isArray(item.queries) && item.queries.length > 0 ? item.queries : (item.query ? [item.query] : []),
+                userRequest
+            }));
 
         } catch (error) {
             console.error('AI Generation Error:', error);

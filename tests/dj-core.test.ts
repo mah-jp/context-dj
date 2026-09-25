@@ -23,23 +23,24 @@ describe('DJCore', () => {
         it('sets and removes schedule items correctly', () => {
             const dj = new DJCore('fake_token');
             const items: ScheduleItem[] = [
-                { start: '10:00', end: '12:00', query: 'morning coffee' },
-                { start: '12:00', end: '14:00', query: 'lunch acoustic' },
-                { start: '14:00', end: '16:00', query: 'afternoon focus' },
+                { start: '02:00', end: '04:00', query: 'early morning coffee' },
+                { start: '04:00', end: '06:00', query: 'dawn acoustic' },
+                { start: '06:00', end: '08:00', query: 'morning focus' },
             ];
 
             dj.setSchedule(items);
-            assert.strictEqual(dj.getDJStatus().currentScheduleItem, null); // assuming test run time is not 10-16
+            const outsideDate = new Date(2026, 8, 24, 12, 30);
+            assert.strictEqual(dj.getItemForDate(outsideDate), null);
 
             // Remove item at index 1
             dj.removeScheduleItem(1);
-            // Verify by finding items around lunch
-            const testDate = new Date(2026, 8, 24, 12, 30);
-            assert.strictEqual(dj.getItemForDate(testDate), null);
+            // Verify by finding items around dawn (removed)
+            const dawnDate = new Date(2026, 8, 24, 5, 0);
+            assert.strictEqual(dj.getItemForDate(dawnDate), null);
 
             // Item 0 and 2 should still exist
-            const morningDate = new Date(2026, 8, 24, 10, 30);
-            assert.strictEqual(dj.getItemForDate(morningDate)?.query, 'morning coffee');
+            const earlyDate = new Date(2026, 8, 24, 3, 0);
+            assert.strictEqual(dj.getItemForDate(earlyDate)?.query, 'early morning coffee');
         });
 
         it('finds correct schedule item across midnight boundaries', () => {
@@ -76,6 +77,24 @@ describe('DJCore', () => {
             // Even if outside 12:00-14:00, single item acts as fallback
             const midnight = new Date(2026, 8, 24, 3, 0);
             assert.strictEqual(dj.getItemForDate(midnight)?.query, 'only one item');
+        });
+
+        it('guarantees continuous playback via getEffectiveItemForPlayback even before slots or in gaps', () => {
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([
+                { start: '15:00', end: '18:00', query: 'afternoon cafe' },
+                { start: '20:00', end: '23:00', query: 'night jazz' },
+            ]);
+
+            // 1. Current time is before the first slot (e.g. 14:55) -> must pick the first slot!
+            const beforeFirst = new Date(2026, 8, 24, 14, 55);
+            assert.strictEqual(dj.getItemForDate(beforeFirst), null); // strict item is null
+            assert.strictEqual(dj.getEffectiveItemForPlayback(beforeFirst)?.query, 'afternoon cafe'); // effective item picks first!
+
+            // 2. Current time is in the gap between slots (e.g. 19:00) -> picks the most recent slot!
+            const inGap = new Date(2026, 8, 24, 19, 0);
+            assert.strictEqual(dj.getItemForDate(inGap), null); // strict item is null
+            assert.strictEqual(dj.getEffectiveItemForPlayback(inGap)?.query, 'afternoon cafe');
         });
     });
 
@@ -249,6 +268,28 @@ describe('DJCore', () => {
             assert.strictEqual(enriched.selectionReason, '夕暮れの爽快なムードにぴったりの名曲。');
             assert.strictEqual(enriched.vibeTag, '#夕暮れドライブ');
             assert.strictEqual(enriched.stage, 'build');
+        });
+
+        it('returns new session upcoming tracks immediately even when activeTrack lags behind', async () => {
+            const dj = new DJCore('fake_token');
+            const newTracks: Track[] = [
+                { id: 'track_1', uri: 'spotify:track:1', name: 'New Track 1', artists: [{ name: 'New Artist' }] } as any,
+                { id: 'track_2', uri: 'spotify:track:2', name: 'New Track 2', artists: [{ name: 'New Artist' }] } as any,
+                { id: 'track_3', uri: 'spotify:track:3', name: 'New Track 3', artists: [{ name: 'New Artist' }] } as any,
+            ];
+
+            // Simulate session initiation (setting session tracks & lastPlayTime)
+            (dj as any).currentSessionTracks = newTracks;
+            (dj as any).lastPlayTime = Date.now();
+
+            // When activeTrack is null or an old track from previous session (Spotify hasn't switched yet)
+            const oldTrack = { id: 'old_0', uri: 'spotify:track:old', name: 'Old Stale Song', artists: [{ name: 'Old Artist' }] } as any;
+            const upcoming = await dj.getQueue(oldTrack);
+
+            // Must immediately return track_2 and track_3 (slice(1)) without stalling
+            assert.strictEqual(upcoming.length, 2);
+            assert.strictEqual(upcoming[0].id, 'track_2');
+            assert.strictEqual(upcoming[1].id, 'track_3');
         });
     });
 });

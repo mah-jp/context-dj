@@ -51,6 +51,13 @@ export default function Home() {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [showAiThought, setShowAiThought] = useState(false);
 
+  // Derived state for AI/DJ active operations
+  const isBusy = status.includes('thinking') ||
+    status.includes('Filtering') ||
+    status.includes('Curating') ||
+    status.includes('Searching') ||
+    status.includes('Starting');
+
   // Custom Hooks
   const { isListening, toggleListening } = useVoiceInput({
     onResult: setInputText,
@@ -148,12 +155,13 @@ export default function Home() {
       } else {
         setSchedule(schedule);
         setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, schedule);
-        // Clear status to avoid persistent message, rely on Toast for success
-        setStatus('Ready');
+        setStatus('🔎 Curating & preparing tracks... (楽曲を選曲・準備中...)');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
 
-        // Trigger immediate check & play
-        await djCore.processDJLoop(false);
+        // Trigger immediate check & play with force=true
+        await djCore.processDJLoop(false, true);
+        setStatus('Ready');
+
         // Explicitly sync UI immediately and after device buffer
         await syncUIState({ forceAll: true });
         setTimeout(() => syncUIState({ forceAll: true }), 1500);
@@ -162,9 +170,9 @@ export default function Home() {
 
     } catch (e: any) {
       console.error(e);
-      // Clear status to avoid persistent message, rely on Toast for error
-      setStatus('Ready');
-      setToast({ msg: `Error: ${e.message || "Failed to contact AI"} (エラーが発生しました)`, type: 'error' });
+      const errorMsg = e.message || "Failed to contact AI";
+      setStatus(`⚠️ ${errorMsg}`);
+      setToast({ msg: `Error: ${errorMsg} (エラーが発生しました)`, type: 'error' });
     }
     setInputText('');
   };
@@ -304,10 +312,10 @@ export default function Home() {
               className={styles.sendBtn}
               onClick={handleSend}
               title="Send Request"
-              disabled={!authorized || status.includes('thinking') || status.includes('Filtering')}
+              disabled={!authorized || isBusy}
               style={{ color: 'var(--primary)' }}
             >
-              {status.includes('thinking') || status.includes('Filtering') ? (
+              {isBusy ? (
                 <Loader size={20} className={styles.spin} />
               ) : (
                 <Send size={20} />

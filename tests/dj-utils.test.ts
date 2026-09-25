@@ -7,10 +7,33 @@ import {
     isScheduleItemPast,
     getScheduleItemSignature,
     getScheduleItemQueries,
+    parseTimeToMinutes,
+    normalizeTimeString,
 } from '../src/lib/dj-utils.ts';
 import { ScheduleItem, Track } from '../src/lib/types.ts';
 
 describe('dj-utils', () => {
+    describe('parseTimeToMinutes & normalizeTimeString', () => {
+        it('parses standard 24h times', () => {
+            assert.strictEqual(parseTimeToMinutes('00:00'), 0);
+            assert.strictEqual(parseTimeToMinutes('14:30'), 14 * 60 + 30);
+            assert.strictEqual(parseTimeToMinutes('23:59'), 23 * 60 + 59);
+        });
+
+        it('parses unpadded 1-digit hours and 12h AM/PM strings', () => {
+            assert.strictEqual(parseTimeToMinutes('9:00'), 9 * 60);
+            assert.strictEqual(parseTimeToMinutes('2:15 PM'), 14 * 60 + 15);
+            assert.strictEqual(parseTimeToMinutes('12:00 AM'), 0);
+            assert.strictEqual(parseTimeToMinutes('12:00 PM'), 12 * 60);
+        });
+
+        it('normalizes various time formats to standard HH:mm', () => {
+            assert.strictEqual(normalizeTimeString('9:05'), '09:05');
+            assert.strictEqual(normalizeTimeString('14:30:00'), '14:30');
+            assert.strictEqual(normalizeTimeString('2:15 PM'), '14:15');
+            assert.strictEqual(normalizeTimeString(''), '00:00');
+        });
+    });
     describe('normalizeTrackName', () => {
         it('should remove parentheses content (half-width and full-width)', () => {
             assert.strictEqual(normalizeTrackName('Song Title (Remastered 2020)'), 'song title');

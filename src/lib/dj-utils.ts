@@ -24,17 +24,45 @@ export function generateTrackKey(track: Track | SpotifyApi.TrackObjectFull): str
 }
 
 /**
+ * Parses time string (e.g. "14:00", "9:30", "2:00 PM", "14:00:00") into minutes from midnight (0 - 1439).
+ */
+export function parseTimeToMinutes(timeStr: string): number {
+    if (!timeStr) return 0;
+    const isPM = /pm/i.test(timeStr);
+    const isAM = /am/i.test(timeStr);
+    const clean = timeStr.replace(/[^\d:]/g, '');
+    const parts = clean.split(':').map(Number);
+    let hours = parts[0] || 0;
+    const minutes = parts[1] || 0;
+    if (isPM && hours < 12) hours += 12;
+    if (isAM && hours === 12) hours = 0;
+    return (hours % 24) * 60 + (minutes % 60);
+}
+
+/**
+ * Normalizes any time string into standard 24-hour "HH:mm" format.
+ */
+export function normalizeTimeString(timeStr: string): string {
+    const mins = parseTimeToMinutes(timeStr);
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/**
  * Checks whether a given schedule item is currently active for the specified date.
  * Handles overnight slots (e.g. 23:00 - 01:00).
  */
 export function isScheduleItemActive(item: ScheduleItem, date: Date = new Date()): boolean {
-    const currentTime = date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+    const currentMins = date.getHours() * 60 + date.getMinutes();
+    const startMins = parseTimeToMinutes(item.start);
+    const endMins = parseTimeToMinutes(item.end);
 
-    if (item.start <= item.end) {
-        return item.start <= currentTime && currentTime < item.end;
+    if (startMins <= endMins) {
+        return startMins <= currentMins && currentMins < endMins;
     }
     // Overnight case (e.g., 23:00 - 01:00)
-    return currentTime >= item.start || currentTime < item.end;
+    return currentMins >= startMins || currentMins < endMins;
 }
 
 /**
@@ -44,13 +72,15 @@ export function isScheduleItemActive(item: ScheduleItem, date: Date = new Date()
 export function isScheduleItemPast(item: ScheduleItem, date: Date = new Date()): boolean {
     if (isScheduleItemActive(item, date)) return false;
 
-    const currentTime = date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+    const currentMins = date.getHours() * 60 + date.getMinutes();
+    const startMins = parseTimeToMinutes(item.start);
+    const endMins = parseTimeToMinutes(item.end);
 
-    if (item.start <= item.end) {
-        return currentTime >= item.end;
+    if (startMins <= endMins) {
+        return currentMins >= endMins;
     }
     // Overnight case: passed if current time is after end but before start
-    return currentTime >= item.end && currentTime < item.start;
+    return currentMins >= endMins && currentMins < startMins;
 }
 
 /**

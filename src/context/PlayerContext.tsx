@@ -74,6 +74,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
     const lastTrackUriRef = useRef<string | null>(null);
     const lastDevicesFetchRef = useRef<number>(0);
+    const lastQueueSyncPlayTimeRef = useRef<number>(0);
 
     // Helper to sync UI with DJ Core state
     const syncUIState = React.useCallback(async (options?: { forceAll?: boolean }) => {
@@ -94,9 +95,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             }
 
             // 2. Conditionally fetch Queue:
-            // Only fetch when the track changed, on forceAll (e.g. user action, wakeup),
-            // or when queue is currently empty. This avoids pounding /v1/me/player/queue on every tick!
-            const shouldFetchQueue = forceAll || trackChanged || queue.length === 0;
+            // Fetch when track changed, on forceAll, when queue is empty, or when a new playback was initiated!
+            const lastPlayTime = typeof djRef.current.getLastPlayTime === 'function' ? djRef.current.getLastPlayTime() : 0;
+            const newPlayOccurred = lastPlayTime > lastQueueSyncPlayTimeRef.current;
+            const shouldFetchQueue = forceAll || trackChanged || queue.length === 0 || newPlayOccurred;
             let queuePromise: Promise<Track[]> | null = null;
             if (shouldFetchQueue) {
                 queuePromise = djRef.current.getQueue(currentTrackItem);
@@ -117,6 +119,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (queuePromise) {
                 const currentQ = await queuePromise;
                 setQueue(currentQ.slice(0, 20));
+                lastQueueSyncPlayTimeRef.current = lastPlayTime;
             }
             if (devicesPromise) {
                 const currentDevices = await devicesPromise;
@@ -245,10 +248,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, first);
                             setQueue(tracks.slice(1, 21));
                             setIsPlaying(true);
+                            lastTrackUriRef.current = tracks[0].uri;
+                            lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
                             // Schedule a synced refresh after Spotify digest time (1.5s)
                             setTimeout(() => syncUIState({ forceAll: true }), 1500);
                         }
                     });
+
+                    // Restore Current Session Tracks if any
+                    const savedSessionTracks = getStoredJSON<Track[]>(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, []);
+                    if (savedSessionTracks.length > 0) {
+                        setQueue(savedSessionTracks.slice(1, 21));
+                    }
 
                     // Restore Schedule
                     const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
