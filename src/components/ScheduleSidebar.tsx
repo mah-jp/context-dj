@@ -46,21 +46,8 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
                                 e.stopPropagation();
                                 onRemoveItem(i);
                             }}
-                            style={{
-                                background: 'transparent',
-                                border: 'none',
-                                color: '#b3b3b3',
-                                cursor: 'pointer',
-                                padding: '4px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                transition: 'color 0.2s',
-                                zIndex: 2
-                            }}
+                            className={styles.scheduleDeleteBtn}
                             title="Remove schedule item"
-                            onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
-                            onMouseLeave={(e) => e.currentTarget.style.color = '#b3b3b3'}
                         >
                             <Trash2 size={14} />
                         </button>

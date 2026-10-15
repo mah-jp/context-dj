@@ -233,7 +233,7 @@ export default function Home() {
         </div>
 
         {/* Input Wrapper for columnar layout of Input + Status */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', maxWidth: '480px', position: 'relative' }}>
+        <div className={styles.inputColumnWrapper}>
 
           {/* Input Bar */}
           <div className={styles.inputBar} style={{ width: '100%', position: 'relative' }}>
@@ -303,32 +303,12 @@ export default function Home() {
             </button>
 
             {showHistory && history.length > 0 && (
-              <div style={{
-                position: 'absolute',
-                top: '120%',
-                left: 0,
-                right: 0,
-                background: '#282828',
-                borderRadius: '8px',
-                padding: '8px 0',
-                maxHeight: '300px',
-                overflowY: 'auto',
-                boxShadow: '0 16px 24px rgba(0,0,0,0.5)',
-                zIndex: 3000
-              }}>
+              <div className={styles.historyDropdown}>
                 {history.map((item, i) => (
                   <div
                     key={`${item}-${i}`}
                     onClick={() => handleHistorySelect(item)}
-                    style={{
-                      padding: '8px 16px',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      color: '#eee',
-                      borderBottom: '1px solid #333'
-                    }}
-                    onMouseEnter={(e) => e.currentTarget.style.background = '#333'}
-                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                    className={styles.historyItem}
                   >
                     {item}
                   </div>
@@ -339,13 +319,7 @@ export default function Home() {
 
           {/* Status Display - Below Input Bar */}
           {status && status !== 'Ready' && (
-            <div style={{
-              marginTop: '4px',
-              fontSize: '0.75rem',
-              color: 'var(--accent)',
-              whiteSpace: 'nowrap',
-              pointerEvents: 'none'
-            }}>
+            <div className={styles.statusText}>
               {status}
             </div>
           )}

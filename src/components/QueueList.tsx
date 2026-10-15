@@ -41,11 +41,7 @@ export default function QueueList({
                 <>
                     {/* Connection Warning */}
                     {authorized && !deviceName && (
-                        <div style={{
-                            marginBottom: '1rem', padding: '12px', background: 'rgba(239, 68, 68, 0.1)',
-                            border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '8px', color: '#fca5a5',
-                            display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.9rem'
-                        }}>
+                        <div className={styles.noDeviceBanner}>
                             <AlertTriangle size={20} />
                             <span><b>No Active Device:</b> Open Spotify on your phone or computer to start playback.<br />(再生デバイスが見つかりません。スマホまたはPCでSpotifyを開いてください。)</span>
                         </div>
@@ -144,11 +140,12 @@ export default function QueueList({
                                                 </span>
                                             )}
                                             {track.stage && (
-                                                <span style={{
-                                                    color: track.stage === 'peak' ? '#f43f5e' : track.stage === 'build' ? '#fbbf24' : track.stage === 'outro' ? '#a78bfa' : '#34d399',
-                                                    fontWeight: 600,
-                                                    marginRight: '6px'
-                                                }}>
+                                                <span className={
+                                                    track.stage === 'peak' ? styles.stageTextPeak :
+                                                    track.stage === 'build' ? styles.stageTextBuild :
+                                                    track.stage === 'outro' ? styles.stageTextOutro :
+                                                    styles.stageTextIntro
+                                                }>
                                                     [{track.stage.toUpperCase()}{track.energy ? ` ⚡${track.energy}` : ''}]
                                                 </span>
                                             )}

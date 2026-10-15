@@ -983,3 +983,161 @@
   align-items: center;
   justify-content: center;
 }
+
+/* Extracted Component Utilities */
+.inputColumnWrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 480px;
+  position: relative;
+}
+
+.statusText {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--accent);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.historyDropdown {
+  position: absolute;
+  top: 120%;
+  left: 0;
+  right: 0;
+  background: #282828;
+  border-radius: 8px;
+  padding: 8px 0;
+  max-height: 300px;
+  overflow-y: auto;
+  box-shadow: 0 16px 24px rgba(0, 0, 0, 0.5);
+  z-index: 3000;
+}
+
+.historyItem {
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: #eee;
+  border-bottom: 1px solid #333;
+  transition: background-color 0.15s ease;
+}
+
+.historyItem:hover {
+  background: #333;
+}
+
+.largeCoverPopup {
+  position: fixed;
+  bottom: 90px;
+  left: 20px;
+  width: 300px;
+  height: 300px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.largeCoverImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.deviceDropdown {
+  position: absolute;
+  bottom: 120%;
+  right: 0;
+  background: #282828;
+  border-radius: 8px;
+  padding: 8px 0;
+  width: 240px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+  z-index: 2000;
+  border: 1px solid #333;
+}
+
+.deviceDropdownHeader {
+  padding: 8px 16px;
+  font-size: 0.8rem;
+  color: #888;
+  border-bottom: 1px solid #333;
+  margin-bottom: 4px;
+}
+
+.deviceDropdownItem {
+  padding: 8px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #eee;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.deviceDropdownItemActive {
+  color: var(--primary);
+  background: rgba(3, 218, 198, 0.1);
+}
+
+.deviceDropdownItem:hover {
+  background: #333;
+}
+
+.noDeviceBanner {
+  margin-bottom: 1rem;
+  padding: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #fca5a5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
+.stageTextIntro {
+  color: #34d399;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.stageTextBuild {
+  color: #fbbf24;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.stageTextPeak {
+  color: #f43f5e;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.stageTextOutro {
+  color: #a78bfa;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.scheduleDeleteBtn {
+  background: transparent;
+  border: none;
+  color: #b3b3b3;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+  z-index: 2;
+}
+
+.scheduleDeleteBtn:hover {
+  color: #ef4444;
+}

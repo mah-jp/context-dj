@@ -86,20 +86,11 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
         <div className={styles.bottomPlayer}>
             {/* Large Cover Popup */}
             {showCover && currentTrack?.album?.images?.[0]?.url && (
-                <div style={{
-                    position: 'fixed',
-                    bottom: '90px',
-                    left: '20px',
-                    width: '300px',
-                    height: '300px',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                    zIndex: 1000,
-                    animation: 'fadeIn 0.2s ease-out'
-                }}>
+                <div className={styles.largeCoverPopup}>
                     <img
                         src={currentTrack.album.images[0].url}
                         alt="Large Cover"
-                        style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '8px' }}
+                        className={styles.largeCoverImg}
                     />
                 </div>
             )}
@@ -257,19 +248,8 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
 
                     {/* Device Dropdown */}
                     {showDevices && (
-                        <div style={{
-                            position: 'absolute',
-                            bottom: '120%',
-                            right: 0,
-                            background: '#282828',
-                            borderRadius: '8px',
-                            padding: '8px 0',
-                            width: '240px',
-                            boxShadow: '0 8px 16px rgba(0,0,0,0.5)',
-                            zIndex: 2000,
-                            border: '1px solid #333'
-                        }}>
-                            <div style={{ padding: '8px 16px', fontSize: '0.8rem', color: '#888', borderBottom: '1px solid #333', marginBottom: '4px' }}>
+                        <div className={styles.deviceDropdown}>
+                            <div className={styles.deviceDropdownHeader}>
                                 Select Device
                             </div>
                             {devices.length > 0 ? devices.map((device) => (
@@ -279,17 +259,7 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                                         if (device.id) setDevice(device.id);
                                         setShowDevices(false);
                                     }}
-                                    style={{
-                                        padding: '8px 16px',
-                                        cursor: 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px',
-                                        color: device.is_active ? 'var(--primary)' : '#eee',
-                                        background: device.is_active ? 'rgba(3, 218, 198, 0.1)' : 'transparent'
-                                    }}
-                                    onMouseEnter={(e) => e.currentTarget.style.background = '#333'}
-                                    onMouseLeave={(e) => e.currentTarget.style.background = device.is_active ? 'rgba(3, 218, 198, 0.1)' : 'transparent'}
+                                    className={`${styles.deviceDropdownItem} ${device.is_active ? styles.deviceDropdownItemActive : ''}`}
                                 >
                                     <MonitorSpeaker size={14} />
                                     <div style={{ flex: 1 }}>

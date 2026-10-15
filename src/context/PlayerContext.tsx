@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo, ReactNode } from 'react';
 import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
@@ -76,6 +76,21 @@ function applyStoredConfigToDJ(dj: DJCore) {
     });
 }
 
+function isSameTrackDisplay(a: Track | null, b: Track | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    return (
+        a.uri === b.uri &&
+        a.id === b.id &&
+        a.name === b.name &&
+        a.vibeTag === b.vibeTag &&
+        a.selectionReason === b.selectionReason &&
+        a.stage === b.stage &&
+        a.energy === b.energy &&
+        a.contextName === b.contextName
+    );
+}
+
 export function PlayerProvider({ children }: { children: ReactNode }) {
     const [authorized, setAuthorized] = useState(false);
     const [djCore, setDjCore] = useState<DJCore | null>(null);
@@ -120,7 +135,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const updateQueueState = useCallback((nextQueue: Track[]) => {
         queueLengthRef.current = nextQueue.length;
-        setQueue(nextQueue);
+        setQueue(prev => {
+            if (
+                prev.length === nextQueue.length &&
+                prev.every((t, i) => isSameTrackDisplay(t, nextQueue[i]))
+            ) {
+                return prev;
+            }
+            return nextQueue;
+        });
     }, []);
 
     const updateDevicesState = useCallback((nextDevices: SpotifyApi.UserDevice[]) => {
@@ -193,11 +216,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 setDeviceName(activeDeviceName);
             }
 
-            // Sync Track Info
+            // Sync Track Info (avoid new object reference & localStorage write if unchanged)
             if (currentTrackItem) {
                 const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
-                setCurrentTrack(finalTrack);
-                setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, finalTrack);
+                setCurrentTrack(prev => {
+                    if (isSameTrackDisplay(prev, finalTrack)) {
+                        return prev;
+                    }
+                    setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, finalTrack);
+                    return finalTrack;
+                });
                 setIsPlaying(playbackState!.is_playing);
             } else {
                 setIsPlaying(false);
@@ -352,12 +380,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 }
 
                 // 3. Start Separate Loops (UI & DJ Logic)
-                // This decoupling ensures UI/Device status updates don't freeze while AI is thinking.
-
                 if (timerRef.current) clearTimeout(timerRef.current);
                 if (djTimerRef.current) clearTimeout(djTimerRef.current);
 
-                // Helper: Check and refresh token proactively if expiring soon
                 const checkAndRefreshToken = async () => {
                     if (!authorizedRef.current || !djRef.current) return;
                     const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
@@ -367,9 +392,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
                             if (clientId) {
                                 try {
-                                    const token = await SpotifyAuth.refreshToken(clientId);
-                                    if (token && djRef.current && !isCancelled) {
-                                        djRef.current.updateAccessToken(token);
+                                    const refreshedToken = await SpotifyAuth.refreshToken(clientId);
+                                    if (refreshedToken && djRef.current && !isCancelled) {
+                                        djRef.current.updateAccessToken(refreshedToken);
                                         console.log("🔑 Proactive token refresh succeeded");
                                     }
                                 } catch (e) {
@@ -384,7 +409,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 const runUILoop = async () => {
                     if (isCancelled) return;
 
-                    // Suspend UI polling completely while hidden/backgrounded to prevent overheating & save battery
                     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
                         timerRef.current = null;
                         return;
@@ -394,10 +418,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     try {
                         if (djRef.current) {
-                            // Sync UI
                             const playbackState = await syncUIState();
 
-                            // Dynamic Interval: If track is ending soon (< 10s), increase polling rate to 1s
                             if (playbackState && playbackState.is_playing && playbackState.item && playbackState.item.duration_ms && playbackState.progress_ms) {
                                 const remaining = playbackState.item.duration_ms - playbackState.progress_ms;
                                 if (remaining < PLAYBACK_CONSTANTS.TRACK_REMAINING_THRESHOLD_MS) {
@@ -405,13 +427,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                                 }
                             }
                         }
-                    } catch (error) {
-                        console.error("Error in UI Loop:", error);
+                    } catch (loopError) {
+                        console.error("Error in UI Loop:", loopError);
                     }
 
                     if (isCancelled) return;
 
-                    // Proactively refresh token
                     await checkAndRefreshToken();
 
                     if (!isCancelled && typeof document !== 'undefined' && document.visibilityState !== 'hidden') {
@@ -432,24 +453,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     try {
                         if (djRef.current) {
-                            // Sync Config
                             const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
                             djRef.current.updateConfig({
                                 aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
                             });
 
-                            // Check Schedule & Auto-Refill (AI Logic)
                             await djRef.current.processDJLoop();
                         }
-                    } catch (error: unknown) {
-                        console.error("Error in DJ Loop:", error);
-                        const msg = error instanceof Error ? error.message : "Unknown background error";
+                    } catch (djLoopError: unknown) {
+                        console.error("Error in DJ Loop:", djLoopError);
+                        const msg = djLoopError instanceof Error ? djLoopError.message : "Unknown background error";
                         setError(prev => prev === msg ? prev : msg);
                     }
 
                     if (isCancelled) return;
 
-                    // Also verify token during DJ loop if running in background
                     if (isHidden) {
                         await checkAndRefreshToken();
                     }
@@ -459,36 +477,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     }
                 };
 
-                // Start both loops
                 runUILoop();
                 runDJLoop();
 
-                // Visibility/Focus Handling
                 const handleVisibilityChange = () => {
                     if (isCancelled || !authorizedRef.current || !djRef.current) return;
 
                     if (document.visibilityState === 'visible') {
                         console.log("📱 App visible: immediately syncing UI and resuming loops");
-
-                        // 1. Proactively refresh token
                         checkAndRefreshToken();
-
-                        // 2. Immediate full sync (refresh currently playing, queue, and devices)
                         syncUIState({ forceAll: true });
 
-                        // 3. Restart loops in active mode
                         if (timerRef.current) clearTimeout(timerRef.current);
                         if (djTimerRef.current) clearTimeout(djTimerRef.current);
                         runUILoop();
                         runDJLoop();
                     } else {
                         console.log("💤 App backgrounded: suspending UI polling, throttling DJ loop to save battery");
-                        // Immediately stop UI loop
                         if (timerRef.current) {
                             clearTimeout(timerRef.current);
                             timerRef.current = null;
                         }
-                        // Reschedule DJ loop with low frequency (30s)
                         if (djTimerRef.current) {
                             clearTimeout(djTimerRef.current);
                             djTimerRef.current = setTimeout(runDJLoop, PLAYBACK_CONSTANTS.DJ_LOOP_BACKGROUND_INTERVAL_MS);
@@ -497,7 +506,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 };
 
                 const handleFocus = () => {
-                    // Only resume if visible and UI loop was stopped
                     if (document.visibilityState === 'visible' && !timerRef.current && authorizedRef.current && djRef.current) {
                         handleVisibilityChange();
                     }
@@ -518,7 +526,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             }
         };
 
-        // Initialize
         init();
 
         return () => {
@@ -527,79 +534,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (djTimerRef.current) clearTimeout(djTimerRef.current);
             if (cleanupListeners) cleanupListeners();
         };
-    }, [syncUIState, updateQueueState]); // Run ONCE on mount (with stable callbacks)
+    }, [syncUIState, updateQueueState]);
 
-    // Handlers
-    const handleNext = async () => {
-        startBackgroundKeepAlive();
-        if (djRef.current) {
-            // Optimistic update: advance current track and Up Next queue immediately
-            if (queue.length > 0) {
-                const nextTrack = queue[0];
-                setCurrentTrack(nextTrack);
-                setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, nextTrack);
-                updateQueueState(queue.slice(1));
-            }
-            await djRef.current.next();
-            // Staggered sync to absorb Spotify API latency
-            setTimeout(() => syncUIState({ forceAll: true }), 500);
-            setTimeout(() => syncUIState({ forceAll: true }), 1500);
-        }
-    };
-    const handlePrev = async () => {
-        startBackgroundKeepAlive();
-        if (djRef.current) {
-            await djRef.current.previous();
-            setTimeout(() => syncUIState({ forceAll: true }), 500);
-            setTimeout(() => syncUIState({ forceAll: true }), 1500);
-        }
-    };
-    const handleTogglePlay = async () => {
-        startBackgroundKeepAlive();
-        if (djRef.current) {
-            if (isPlaying) await djRef.current.pause();
-            else await djRef.current.resume();
-            setIsPlaying(!isPlaying); // Optimistic update
-            setTimeout(() => syncUIState(), 500);
-        }
-    };
-
-    const handleRemoveScheduleItem = (index: number) => {
-        if (djRef.current) {
-            // Update DJ Core
-            const newSchedule = djRef.current.removeScheduleItem(index);
-            // Update Local State
-            setSchedule([...newSchedule]);
-            // Persist
-            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, newSchedule);
-        }
-    };
-
-    const refreshDevices = async () => {
-        if (djRef.current) {
-            const d = await djRef.current.getDevices();
-            updateDevicesState(d);
-        }
-    };
-
-    const setDevice = async (deviceId: string) => {
-        if (djRef.current) {
-            await djRef.current.setActiveDevice(deviceId);
-            // Refresh state immediately to reflect 'active' status on new device
-            setTimeout(() => syncUIState({ forceAll: true }), 500);
-        }
-    };
-
-    const startBackgroundKeepAlive = () => {
-        // Check user setting
+    // Memoized Handlers
+    const startBackgroundKeepAlive = useCallback(() => {
         if (getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) !== 'true') return;
 
         if (!backgroundAudioRef.current) {
-            // 1-second silent MP3
             const SILENT_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAAtAAADgAAAB5WFb4AAABAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMAAA//uQZAAAAAAA0gAAAAABBQAA0gAAAAEAABAAAAAAAABAAAAAAAAAAAAAAP/7kGQAAAAAADSAAAAAAAEAAADSAAAAAQAAEAAAAAAAQAAAAAAAAAAAAAA//uQZAAAAAAA0gAAAAAAAQAAANIAAAABAAAQAAAAAAAQAAAAAAAAAAAAAAD/+5BkAAAAAADSAAAAAAABAAAA0gAAAAEAABAAAAAAAEAAAAAAAAAAAAAAA//uQZAAAAAAA0gAAAAAAAQAAANIAAAABAAAQAAAAAAAQAAAAAAAAAAAAAAA==';
             const audio = new Audio(SILENT_MP3);
             audio.loop = true;
-            audio.volume = 0.01; // Almost silent, but technically playing
+            audio.volume = 0.01;
             backgroundAudioRef.current = audio;
         }
 
@@ -607,40 +552,129 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             console.warn("Background audio auto-play blocked. User interaction required.", e);
         });
         console.log("🔊 Background Keep-Alive Audio Started");
-    };
+    }, []);
+
+    const handleNext = useCallback(async () => {
+        startBackgroundKeepAlive();
+        if (djRef.current) {
+            setQueue(prevQueue => {
+                if (prevQueue.length > 0) {
+                    const nextTrack = prevQueue[0];
+                    setCurrentTrack(nextTrack);
+                    setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, nextTrack);
+                    const remaining = prevQueue.slice(1);
+                    queueLengthRef.current = remaining.length;
+                    return remaining;
+                }
+                return prevQueue;
+            });
+            await djRef.current.next();
+            setTimeout(() => syncUIState({ forceAll: true }), 500);
+            setTimeout(() => syncUIState({ forceAll: true }), 1500);
+        }
+    }, [startBackgroundKeepAlive, syncUIState]);
+
+    const handlePrev = useCallback(async () => {
+        startBackgroundKeepAlive();
+        if (djRef.current) {
+            await djRef.current.previous();
+            setTimeout(() => syncUIState({ forceAll: true }), 500);
+            setTimeout(() => syncUIState({ forceAll: true }), 1500);
+        }
+    }, [startBackgroundKeepAlive, syncUIState]);
+
+    const handleTogglePlay = useCallback(async () => {
+        startBackgroundKeepAlive();
+        if (djRef.current) {
+            if (isPlaying) await djRef.current.pause();
+            else await djRef.current.resume();
+            setIsPlaying(prev => !prev);
+            setTimeout(() => syncUIState(), 500);
+        }
+    }, [isPlaying, startBackgroundKeepAlive, syncUIState]);
+
+    const handleRemoveScheduleItem = useCallback((index: number) => {
+        if (djRef.current) {
+            const newSchedule = djRef.current.removeScheduleItem(index);
+            setSchedule([...newSchedule]);
+            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, newSchedule);
+        }
+    }, []);
+
+    const refreshDevices = useCallback(async () => {
+        if (djRef.current) {
+            const d = await djRef.current.getDevices();
+            updateDevicesState(d);
+        }
+    }, [updateDevicesState]);
+
+    const setDevice = useCallback(async (deviceId: string) => {
+        if (djRef.current) {
+            await djRef.current.setActiveDevice(deviceId);
+            setTimeout(() => syncUIState({ forceAll: true }), 500);
+        }
+    }, [syncUIState]);
 
     const clearError = useCallback(() => setError(null), []);
 
+    const contextValue = useMemo<PlayerContextType>(() => ({
+        djCore,
+        authorized,
+        status,
+        setStatus,
+        currentTrack,
+        isPlaying,
+        deviceName,
+        schedule,
+        setSchedule,
+        currentQuery,
+        currentThought,
+        queue,
+        devices,
+        refreshDevices,
+        setDevice,
+        handleNext,
+        handlePrev,
+        handleTogglePlay,
+        handleRemoveScheduleItem,
+        needsOnboarding,
+        setupStatus,
+        logs: djLogs,
+        error,
+        clearError,
+        startBackgroundKeepAlive,
+        syncUIState,
+        reloadConfig
+    }), [
+        djCore,
+        authorized,
+        status,
+        currentTrack,
+        isPlaying,
+        deviceName,
+        schedule,
+        currentQuery,
+        currentThought,
+        queue,
+        devices,
+        refreshDevices,
+        setDevice,
+        handleNext,
+        handlePrev,
+        handleTogglePlay,
+        handleRemoveScheduleItem,
+        needsOnboarding,
+        setupStatus,
+        djLogs,
+        error,
+        clearError,
+        startBackgroundKeepAlive,
+        syncUIState,
+        reloadConfig
+    ]);
+
     return (
-        <PlayerContext.Provider value={{
-            djCore,
-            authorized,
-            status,
-            setStatus,
-            currentTrack,
-            isPlaying,
-            deviceName,
-            schedule,
-            setSchedule,
-            currentQuery,
-            currentThought,
-            queue,
-            devices,
-            refreshDevices,
-            setDevice,
-            handleNext,
-            handlePrev,
-            handleTogglePlay,
-            handleRemoveScheduleItem,
-            needsOnboarding,
-            setupStatus,
-            logs: djLogs,
-            error,
-            clearError,
-            startBackgroundKeepAlive,
-            syncUIState,
-            reloadConfig
-        }}>
+        <PlayerContext.Provider value={contextValue}>
             {children}
         </PlayerContext.Provider>
     );
