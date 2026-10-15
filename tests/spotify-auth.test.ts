@@ -1,17 +1,22 @@
-import test, { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { SpotifyAuth } from '../src/lib/spotify-auth';
 import { STORAGE_KEYS } from '../src/lib/constants';
 import { setStorageItem, getStorageItem } from '../src/lib/storage';
 
+const globalEnv = globalThis as unknown as {
+    window?: unknown;
+    localStorage?: unknown;
+};
+
 describe('SpotifyAuth', () => {
-    let originalWindow: any;
-    let originalFetch: any;
+    let originalWindow: unknown;
+    let originalFetch: typeof globalThis.fetch;
     let store: Record<string, string> = {};
 
     beforeEach(() => {
         store = {};
-        originalWindow = (globalThis as any).window;
+        originalWindow = globalEnv.window;
         originalFetch = globalThis.fetch;
 
         const localStorageMock = {
@@ -21,7 +26,7 @@ describe('SpotifyAuth', () => {
             clear: () => { store = {}; }
         };
 
-        (globalThis as any).window = {
+        globalEnv.window = {
             localStorage: localStorageMock,
             location: {
                 href: 'https://example.com/app?foo=bar#baz',
@@ -29,6 +34,7 @@ describe('SpotifyAuth', () => {
                 pathname: '/app',
             },
             crypto: {
+                getRandomValues: (arr: Uint8Array) => globalThis.crypto.getRandomValues(arr),
                 subtle: {
                     digest: async (_algo: string, data: Uint8Array) => {
                         return data.buffer;
@@ -36,11 +42,11 @@ describe('SpotifyAuth', () => {
                 }
             }
         };
-        (globalThis as any).localStorage = localStorageMock;
+        globalEnv.localStorage = localStorageMock;
     });
 
     afterEach(() => {
-        (globalThis as any).window = originalWindow;
+        globalEnv.window = originalWindow;
         globalThis.fetch = originalFetch;
     });
 
@@ -75,21 +81,44 @@ describe('SpotifyAuth', () => {
         assert.strictEqual(getStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN), '');
     });
 
+    it('validates OAuth state on handleCallback and rejects mismatched state', async () => {
+        setStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER, 'verifier_abc');
+        setStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE, 'expected_state_123');
+
+        globalThis.fetch = (async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                access_token: 'callback_token',
+                token_type: 'Bearer',
+                expires_in: 3600,
+            })
+        })) as unknown as typeof globalThis.fetch;
+
+        // Mismatched state should fail
+        const rejectedToken = await SpotifyAuth.handleCallback('client_123', 'code_xyz', 'wrong_state');
+        assert.strictEqual(rejectedToken, null);
+
+        // Matching state should succeed and clean up verifier & state
+        const validToken = await SpotifyAuth.handleCallback('client_123', 'code_xyz', 'expected_state_123');
+        assert.strictEqual(validToken, 'callback_token');
+        assert.strictEqual(getStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER), '');
+        assert.strictEqual(getStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE), '');
+    });
+
     it('handles successful token refresh via mock fetch', async () => {
         setStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, 'old_refresh_token');
 
-        globalThis.fetch = async (url: any) => {
-            return {
-                ok: true,
-                status: 200,
-                json: async () => ({
-                    access_token: 'new_access_token',
-                    token_type: 'Bearer',
-                    expires_in: 3600,
-                    refresh_token: 'new_refresh_token'
-                })
-            } as any;
-        };
+        globalThis.fetch = (async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                access_token: 'new_access_token',
+                token_type: 'Bearer',
+                expires_in: 3600,
+                refresh_token: 'new_refresh_token'
+            })
+        })) as unknown as typeof globalThis.fetch;
 
         const token = await SpotifyAuth.refreshToken('client_123');
         assert.strictEqual(token, 'new_access_token');
@@ -100,15 +129,14 @@ describe('SpotifyAuth', () => {
     it('handles token refresh failure gracefully', async () => {
         setStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, 'invalid_refresh_token');
 
-        globalThis.fetch = async () => {
-            return {
-                ok: false,
-                status: 400,
-                text: async () => 'Invalid grant',
-            } as any;
-        };
+        globalThis.fetch = (async () => ({
+            ok: false,
+            status: 400,
+            text: async () => 'Invalid grant',
+        })) as unknown as typeof globalThis.fetch;
 
         const token = await SpotifyAuth.refreshToken('client_123');
         assert.strictEqual(token, null);
     });
 });
+

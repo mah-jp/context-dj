@@ -2,7 +2,7 @@ import styles from '../app/page.module.css';
 import { DJCore } from '../lib/dj-core';
 import { Bot, AlertTriangle, Anchor } from 'lucide-react';
 import Onboarding from './Onboarding';
-import { Track, ScheduleItem } from '../lib/types';
+import { Track } from '../lib/types';
 
 interface QueueListProps {
     needsOnboarding: boolean;
@@ -12,7 +12,6 @@ interface QueueListProps {
     deviceName: string;
     currentQuery: string | null;
     showLogs: () => void;
-    schedule: ScheduleItem[];
     queue: Track[];
     showNotes: boolean;
     djCore: DJCore | null;
@@ -26,7 +25,6 @@ export default function QueueList({
     deviceName,
     currentQuery,
     showLogs,
-    schedule,
     queue,
     showNotes,
     djCore

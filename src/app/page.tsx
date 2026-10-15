@@ -11,8 +11,8 @@ import ProcessLogViewer from '../components/ProcessLogViewer';
 import ScheduleSidebar from '../components/ScheduleSidebar';
 import QueueList from '../components/QueueList';
 import DynamicBackground from '../components/DynamicBackground';
-import { STORAGE_KEYS, DEFAULTS } from '../lib/constants';
-import { ScheduleItem, AIProvider } from '../lib/types';
+import { STORAGE_KEYS } from '../lib/constants';
+import { ScheduleItem } from '../lib/types';
 import { getStorageItem, setStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import { useVisionInput } from '../hooks/useVisionInput';
@@ -30,6 +30,7 @@ export default function Home() {
     queue,
     handleRemoveScheduleItem,
     needsOnboarding,
+    setupStatus,
     deviceName,
     logs,
     error,
@@ -40,16 +41,16 @@ export default function Home() {
 
   const [inputText, setInputText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [setupStatus, setSetupStatus] = useState({ hasClientId: false, hasAiKey: false });
 
   const [showHistory, setShowHistory] = useState(false);
-  const [showNotes, setShowNotes] = useState(false);
+  const [showNotes, setShowNotes] = useState(() => getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
   const [showLogs, setShowLogs] = useState(false);
   const [toast, setToast] = useState<{ msg: string, type: 'info' | 'error' | 'success' } | null>(null);
 
-  const [history, setHistory] = useState<string[]>([]); // Prompt history
+  const [history, setHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []));
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [showAiThought, setShowAiThought] = useState(false);
+
+  const activeToast = toast || (error ? { msg: `System Message: ${error}`, type: 'error' as const } : null);
 
   // Derived state for AI/DJ active operations
   const isBusy = status.includes('thinking') ||
@@ -71,21 +72,23 @@ export default function Home() {
     setToast,
   });
 
-  // Auto-dismiss toast
-  // Auto-dismiss toast
+  // Auto-dismiss local toast
   useEffect(() => {
-    if (toast) {
-      const timer = setTimeout(() => setToast(null), 4000);
-      return () => clearTimeout(timer);
-    }
+    if (!toast) return;
+    const timer = setTimeout(() => {
+      setToast(null);
+    }, 4000);
+    return () => clearTimeout(timer);
   }, [toast]);
 
-  // Sync Global Error to Toast
+  // Auto-dismiss global error
   useEffect(() => {
-    if (error) {
-      setToast({ msg: `System Message: ${error}`, type: 'error' });
-    }
-  }, [error]);
+    if (!error) return;
+    const timer = setTimeout(() => {
+      clearError();
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [error, clearError]);
 
   // Autosize textarea
   useEffect(() => {
@@ -95,21 +98,6 @@ export default function Home() {
     }
   }, [inputText]);
 
-  useEffect(() => {
-    // Check local storage for setup completeness
-    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-    const provider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
-    let hasKey = false;
-    if (provider === 'gemini') {
-      hasKey = !!getStorageItem(STORAGE_KEYS.GEMINI_API_KEY);
-    } else {
-      hasKey = !!getStorageItem(STORAGE_KEYS.OPENAI_API_KEY);
-    }
-    setSetupStatus({ hasClientId: !!clientId, hasAiKey: hasKey });
-    setShowAiThought(getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT) === 'true');
-    setShowNotes(getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
-  }, [needsOnboarding]);
-
   const handleLogin = () => {
     const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
     if (clientId) {
@@ -118,14 +106,6 @@ export default function Home() {
       alert("Please set Spotify Client ID in settings.\n(設定画面でSpotify Client IDを設定してください)");
     }
   };
-
-  // Load history on mount
-  useEffect(() => {
-    const saved = getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []);
-    if (saved.length > 0) {
-      setHistory(saved);
-    }
-  }, []);
 
   const handleHistorySelect = (text: string) => {
     setInputText(text);
@@ -168,9 +148,9 @@ export default function Home() {
         setTimeout(() => syncUIState({ forceAll: true }), 3500);
       }
 
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      const errorMsg = e.message || "Failed to contact AI";
+      const errorMsg = e instanceof Error ? e.message : "Failed to contact AI";
       setStatus(`⚠️ ${errorMsg}`);
       setToast({ msg: `Error: ${errorMsg} (エラーが発生しました)`, type: 'error' });
     }
@@ -409,7 +389,6 @@ export default function Home() {
           deviceName={deviceName}
           currentQuery={currentQuery}
           showLogs={() => setShowLogs(true)}
-          schedule={schedule}
           queue={queue}
           showNotes={showNotes}
           djCore={djCore}
@@ -422,12 +401,12 @@ export default function Home() {
       )}
 
       {/* Toast Notification */}
-      {toast && (
-        <div className={styles.toast} style={{ borderLeft: `4px solid ${toast.type === 'error' ? '#ef4444' : toast.type === 'success' ? 'var(--primary)' : '#3b82f6'}` }}>
-          {toast.type === 'error' && <XCircle size={20} color="#ef4444" />}
-          {toast.type === 'success' && <CheckCircle size={20} color="var(--primary)" />}
-          {toast.type === 'info' && <Info size={20} color="#3b82f6" />}
-          <span>{toast.msg}</span>
+      {activeToast && (
+        <div className={styles.toast} style={{ borderLeft: `4px solid ${activeToast.type === 'error' ? '#ef4444' : activeToast.type === 'success' ? 'var(--primary)' : '#3b82f6'}` }}>
+          {activeToast.type === 'error' && <XCircle size={20} color="#ef4444" />}
+          {activeToast.type === 'success' && <CheckCircle size={20} color="var(--primary)" />}
+          {activeToast.type === 'info' && <Info size={20} color="#3b82f6" />}
+          <span>{activeToast.msg}</span>
         </div>
       )}
 

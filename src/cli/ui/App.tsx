@@ -60,7 +60,7 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
     }, [runner, initialPrompt]);
 
     // Handle global keyboard shortcuts & history navigation
-    useInput((input, key) => {
+    useInput((input: string, key: { ctrl?: boolean; upArrow?: boolean; downArrow?: boolean }) => {
         if (key.ctrl && input === 'c') {
             runner.stopAutoLoop();
             exit();
@@ -197,7 +197,7 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
             {/* DJ's Thought Panel */}
             {state.currentThought && (
                 <Box borderStyle="single" borderColor="magenta" flexDirection="column" paddingX={1} marginY={0}>
-                    <Text bold color="magenta">📻 DJ's Thought (選曲の意図)</Text>
+                    <Text bold color="magenta">📻 DJ&apos;s Thought (選曲の意図)</Text>
                     <Text italic color="white">
                         {state.currentThought}
                     </Text>

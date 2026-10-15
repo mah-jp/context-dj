@@ -48,6 +48,32 @@ Each schedule block MUST contain:
 - thought: radio DJ's intent and vibe description in the user's language.
 `;
 
+export interface RawScheduleItem {
+    start?: string;
+    end?: string;
+    query?: string;
+    queries?: string[];
+    anchorTracks?: string[];
+    priorityTrack?: string;
+    thought?: string;
+}
+
+export interface RawTrackEvaluation {
+    index?: number;
+    score?: number;
+    vibeTag?: string;
+    selectionReason?: string;
+    estimatedBpm?: number;
+    energy?: number;
+    stage?: string;
+}
+
+const VALID_STAGES = new Set<TrackEvaluation['stage']>(['intro', 'build', 'peak', 'outro']);
+
+function isValidStage(stage: unknown): stage is NonNullable<TrackEvaluation['stage']> {
+    return typeof stage === 'string' && VALID_STAGES.has(stage as TrackEvaluation['stage']);
+}
+
 export class AIService {
     private openai?: OpenAI;
     private storedKey?: string; // API Key for REST usage
@@ -71,6 +97,61 @@ export class AIService {
             // For REST API usage, store the key directly
             this.storedKey = apiKey;
         }
+    }
+
+    getModelName(): string {
+        return this.modelName;
+    }
+
+    private static stripMarkdownCodeBlock(text: string): string {
+        return text
+            .replace(/```json/g, '')
+            .replace(/```/g, '')
+            .trim();
+    }
+
+    private getGeminiEndpoint(): string {
+        return `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${this.storedKey}`;
+    }
+
+    private async requestStructuredText(options: {
+        systemPrompt: string;
+        userPrompt: string;
+        geminiText: string;
+        geminiGenerationConfig: Record<string, unknown>;
+    }): Promise<string> {
+        let responseText = '';
+
+        if (this.backend === 'openai' && this.openai) {
+            const completion = await this.openai.chat.completions.create({
+                messages: [
+                    { role: "system", content: options.systemPrompt },
+                    { role: "user", content: options.userPrompt }
+                ],
+                model: this.modelName,
+                response_format: { type: "json_object" }
+            });
+            responseText = completion.choices[0].message.content || '[]';
+        } else if (this.backend === 'gemini') {
+            const response = await fetch(this.getGeminiEndpoint(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: options.geminiText }] }],
+                    generationConfig: options.geminiGenerationConfig
+                })
+            });
+
+            if (!response.ok) {
+                const errText = await response.text().catch(() => '');
+                throw new Error(`Gemini API Error: ${response.status} ${response.statusText || ''} - ${errText} (Gemini APIエラーが発生しました)`);
+            }
+
+            const data = await response.json();
+            responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+        }
+
+        return AIService.stripMarkdownCodeBlock(responseText);
     }
 
     async generateSchedule(userRequest: string, currentSchedule?: ScheduleItem[], personalContext?: string): Promise<ScheduleItem[]> {
@@ -98,82 +179,41 @@ export class AIService {
         }
 
         try {
-            let responseText = '';
-
-            if (this.backend === 'openai' && this.openai) {
-                const completion = await this.openai.chat.completions.create({
-                    messages: [
-                        { role: "system", content: SYSTEM_PROMPT },
-                        { role: "user", content: contextInfo }
-                    ],
-                    model: this.modelName,
-                    response_format: { type: "json_object" }
-                });
-                responseText = completion.choices[0].message.content || '[]';
-
-            } else if (this.backend === 'gemini') {
-                // Direct REST API call with Structured Output config
-                const apiKey = this.storedKey;
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${apiKey}`;
-
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        contents: [{
-                            parts: [{
-                                text: SYSTEM_PROMPT + "\n\n" + contextInfo
-                            }]
-                        }],
-                        generationConfig: {
-                            responseMimeType: "application/json",
-                            responseSchema: {
-                                type: "array",
-                                description: "Timeline schedule of DJ sets.",
-                                items: {
-                                    type: "object",
-                                    properties: {
-                                        start: { type: "string" },
-                                        end: { type: "string" },
-                                        queries: {
-                                            type: "array",
-                                            items: { type: "string" }
-                                        },
-                                        anchorTracks: {
-                                            type: "array",
-                                            description: "2-3 iconic songs or artists that represent the vibe of this block.",
-                                            items: { type: "string" }
-                                        },
-                                        priorityTrack: { type: "string" },
-                                        thought: { type: "string" }
-                                    },
-                                    required: ["start", "end", "queries", "thought"]
-                                }
-                            }
+            const cleanJson = await this.requestStructuredText({
+                systemPrompt: SYSTEM_PROMPT,
+                userPrompt: contextInfo,
+                geminiText: SYSTEM_PROMPT + "\n\n" + contextInfo,
+                geminiGenerationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "array",
+                        description: "Timeline schedule of DJ sets.",
+                        items: {
+                            type: "object",
+                            properties: {
+                                start: { type: "string" },
+                                end: { type: "string" },
+                                queries: {
+                                    type: "array",
+                                    items: { type: "string" }
+                                },
+                                anchorTracks: {
+                                    type: "array",
+                                    description: "2-3 iconic songs or artists that represent the vibe of this block.",
+                                    items: { type: "string" }
+                                },
+                                priorityTrack: { type: "string" },
+                                thought: { type: "string" }
+                            },
+                            required: ["start", "end", "queries", "thought"]
                         }
-                    })
-                });
-
-                if (!response.ok) {
-                    const errText = await response.text();
-                    throw new Error(`Gemini API Error: ${response.status} ${response.statusText} - ${errText} (Gemini APIエラーが発生しました)`);
+                    }
                 }
+            });
 
-                const data = await response.json();
-                responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            }
+            console.log('AI Raw Output:', cleanJson);
 
-            console.log('AI Raw Output:', responseText);
-
-            // Cleanup response (ensure it can be parsed cleanly)
-            const cleanJson = responseText
-                .replace(/```json/g, '')
-                .replace(/```/g, '')
-                .trim();
-
-            let schedule;
+            let schedule: unknown;
             try {
                 schedule = JSON.parse(cleanJson);
             } catch (parseError) {
@@ -181,25 +221,31 @@ export class AIService {
                 throw new Error(`Failed to parse AI response: ${parseError} (AIの応答の解析に失敗しました)`);
             }
 
-            // Normalize
-            let list: any[] = [];
+            // Normalize response structure (array or object-wrapped array)
+            let list: RawScheduleItem[] = [];
             if (Array.isArray(schedule)) {
-                list = schedule;
+                list = schedule as RawScheduleItem[];
             } else if (typeof schedule === 'object' && schedule !== null) {
-                const scheduleObj = schedule as Record<string, any>;
+                const scheduleObj = schedule as Record<string, unknown>;
                 const candidate = scheduleObj.schedule || scheduleObj.items || scheduleObj.list || scheduleObj.timeline || scheduleObj.blocks || Object.values(scheduleObj).find(v => Array.isArray(v));
                 if (Array.isArray(candidate)) {
-                    list = candidate;
+                    list = candidate as RawScheduleItem[];
                 }
             }
 
-            return list.map(item => ({
-                ...item,
-                start: normalizeTimeString(item.start || '00:00'),
-                end: normalizeTimeString(item.end || '23:59'),
-                queries: Array.isArray(item.queries) && item.queries.length > 0 ? item.queries : (item.query ? [item.query] : []),
-                userRequest
-            }));
+            return list.map(item => {
+                const resolvedQueries = Array.isArray(item.queries) && item.queries.length > 0
+                    ? item.queries
+                    : (item.query ? [item.query] : []);
+                return {
+                    ...item,
+                    start: normalizeTimeString(item.start || '00:00'),
+                    end: normalizeTimeString(item.end || '23:59'),
+                    query: item.query || resolvedQueries[0] || '',
+                    queries: resolvedQueries,
+                    userRequest
+                };
+            });
 
         } catch (error) {
             console.error('AI Generation Error:', error);
@@ -250,59 +296,34 @@ ${trackListStr}
 `;
 
         try {
-            let responseText = '';
-            if (this.backend === 'openai' && this.openai) {
-                const completion = await this.openai.chat.completions.create({
-                    messages: [
-                        { role: "system", content: "You evaluate music candidates and output JSON containing an array of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage." },
-                        { role: "user", content: prompt }
-                    ],
-                    model: this.modelName,
-                    response_format: { type: "json_object" }
-                });
-                responseText = completion.choices[0].message.content || '[]';
-            } else if (this.backend === 'gemini') {
-                const apiKey = this.storedKey;
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${apiKey}`;
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: {
-                            responseMimeType: "application/json",
-                            maxOutputTokens: 8192,
-                            responseSchema: {
-                                type: "array",
-                                description: "Array of evaluated tracks matching the criteria.",
-                                items: {
-                                    type: "object",
-                                    properties: {
-                                        index: { type: "integer" },
-                                        score: { type: "integer" },
-                                        vibeTag: { type: "string" },
-                                        selectionReason: { type: "string" },
-                                        estimatedBpm: { type: "integer" },
-                                        energy: { type: "integer", description: "1 to 10 intensity" },
-                                        stage: { type: "string", enum: ["intro", "build", "peak", "outro"] }
-                                    },
-                                    required: ["index", "score", "vibeTag", "selectionReason"]
-                                }
-                            }
+            const cleanJson = await this.requestStructuredText({
+                systemPrompt: "You evaluate music candidates and output JSON containing an array of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage.",
+                userPrompt: prompt,
+                geminiText: prompt,
+                geminiGenerationConfig: {
+                    responseMimeType: "application/json",
+                    maxOutputTokens: 8192,
+                    responseSchema: {
+                        type: "array",
+                        description: "Array of evaluated tracks matching the criteria.",
+                        items: {
+                            type: "object",
+                            properties: {
+                                index: { type: "integer" },
+                                score: { type: "integer" },
+                                vibeTag: { type: "string" },
+                                selectionReason: { type: "string" },
+                                estimatedBpm: { type: "integer" },
+                                energy: { type: "integer", description: "1 to 10 intensity" },
+                                stage: { type: "string", enum: ["intro", "build", "peak", "outro"] }
+                            },
+                            required: ["index", "score", "vibeTag", "selectionReason"]
                         }
-                    })
-                });
-                if (!response.ok) {
-                    const errDetail = await response.text().catch(() => '');
-                    console.error(`Gemini API Error: ${response.status}`, errDetail);
-                    throw new Error(`Gemini API Error: ${response.status} ${errDetail}`);
+                    }
                 }
-                const data = await response.json();
-                responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
-            }
+            });
 
-            const cleanJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-            let parsed: any;
+            let parsed: unknown;
             try {
                 parsed = JSON.parse(cleanJson);
             } catch (pe) {
@@ -310,15 +331,21 @@ ${trackListStr}
                 parsed = [];
             }
 
-            let rawItems: any[] = [];
+            let rawItems: RawTrackEvaluation[] = [];
             if (Array.isArray(parsed)) {
-                rawItems = parsed;
+                rawItems = parsed as RawTrackEvaluation[];
             } else if (parsed && typeof parsed === 'object') {
-                rawItems = parsed.evaluations || parsed.tracks || parsed.matches || parsed.items || [];
+                const parsedObj = parsed as Record<string, unknown>;
+                const candidate = parsedObj.evaluations || parsedObj.tracks || parsedObj.matches || parsedObj.items;
+                if (Array.isArray(candidate)) {
+                    rawItems = candidate as RawTrackEvaluation[];
+                }
             }
 
             const evaluations: TrackEvaluation[] = rawItems
-                .filter(item => typeof item.index === 'number' && item.index >= 0 && item.index < candidatesToEval.length)
+                .filter((item): item is RawTrackEvaluation & { index: number } =>
+                    typeof item.index === 'number' && item.index >= 0 && item.index < candidatesToEval.length
+                )
                 .map(item => ({
                     id: candidatesToEval[item.index].id,
                     score: typeof item.score === 'number' ? item.score : 70,
@@ -326,7 +353,7 @@ ${trackListStr}
                     selectionReason: item.selectionReason || 'ムードに合わせた選曲です。',
                     estimatedBpm: typeof item.estimatedBpm === 'number' ? item.estimatedBpm : undefined,
                     energy: typeof item.energy === 'number' ? Math.max(1, Math.min(10, item.energy)) : 5,
-                    stage: ['intro', 'build', 'peak', 'outro'].includes(item.stage) ? item.stage : undefined
+                    stage: isValidStage(item.stage) ? item.stage : undefined
                 }));
 
             return evaluations;
@@ -379,8 +406,7 @@ Instructions:
                 return response.choices[0].message.content || 'No description.';
             } else if (this.backend === 'gemini') {
                 // Gemini Vision
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelName}:generateContent?key=${this.storedKey}`;
-                const response = await fetch(url, {
+                const response = await fetch(this.getGeminiEndpoint(), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -408,3 +434,4 @@ Instructions:
         return "AI backend not configured for Vision.";
     }
 }
+

@@ -1,4 +1,4 @@
-import test, { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     getStorageItem,
@@ -28,8 +28,9 @@ describe('storage', () => {
 
     beforeEach(() => {
         storageMock.clear();
-        (globalThis as any).window = { localStorage: storageMock };
-        (globalThis as any).localStorage = storageMock;
+        const g = globalThis as Record<string, unknown>;
+        g.window = { localStorage: storageMock };
+        g.localStorage = storageMock;
     });
 
     describe('getStorageItem & setStorageItem', () => {

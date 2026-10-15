@@ -1,7 +1,29 @@
-import test, { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { DJCore } from '../src/lib/dj-core';
 import { ScheduleItem, Track } from '../src/lib/types';
+
+function makeTrack(overrides: {
+    id: string;
+    name: string;
+    uri: string;
+    artistName: string;
+    selectionReason?: string;
+    vibeTag?: string;
+    stage?: 'intro' | 'build' | 'peak' | 'outro';
+}): Track {
+    return {
+        id: overrides.id,
+        name: overrides.name,
+        uri: overrides.uri,
+        artists: [{ name: overrides.artistName } as SpotifyApi.ArtistObjectSimplified],
+        album: {} as SpotifyApi.AlbumObjectSimplified,
+        selectionReason: overrides.selectionReason,
+        vibeTag: overrides.vibeTag,
+        stage: overrides.stage,
+        type: 'track',
+    } as unknown as Track;
+}
 
 describe('DJCore', () => {
     let store: Record<string, string> = {};
@@ -15,8 +37,9 @@ describe('DJCore', () => {
             clear: () => { store = {}; }
         };
 
-        (globalThis as any).window = { localStorage: localStorageMock };
-        (globalThis as any).localStorage = localStorageMock;
+        const g = globalThis as Record<string, unknown>;
+        g.window = { localStorage: localStorageMock };
+        g.localStorage = localStorageMock;
     });
 
     describe('Schedule management', () => {
@@ -101,7 +124,6 @@ describe('DJCore', () => {
     describe('Process log management', () => {
         it('limits process log to 100 entries', () => {
             const dj = new DJCore('fake_token');
-            // dj-core addLog is private, but triggered internally; let's check initial log
             assert.deepStrictEqual(dj.getProcessLog(), []);
         });
     });
@@ -118,69 +140,65 @@ describe('DJCore', () => {
             const dj = new DJCore('fake_token');
 
             // 1. Match by URI
-            const t1 = dj.enrichTrackWithCachedMetadata({
+            const t1 = dj.enrichTrackWithCachedMetadata(makeTrack({
                 id: 'other_id',
                 name: 'Some Name',
                 uri: 'spotify:track:uri1',
-                artists: [{ name: 'Artist1' } as any],
-                album: {} as any
-            } as any);
+                artistName: 'Artist1',
+            }));
             assert.strictEqual(t1.selectionReason, 'Reason by URI');
             assert.strictEqual(t1.stage, 'intro');
 
             // 2. Match by ID
-            const t2 = dj.enrichTrackWithCachedMetadata({
+            const t2 = dj.enrichTrackWithCachedMetadata(makeTrack({
                 id: 'id2',
                 name: 'Another Name',
                 uri: 'spotify:track:different_uri',
-                artists: [{ name: 'Artist2' } as any],
-                album: {} as any
-            } as any);
+                artistName: 'Artist2',
+            }));
             assert.strictEqual(t2.selectionReason, 'Reason by ID');
             assert.strictEqual(t2.stage, 'build');
 
             // 3. Match by TrackKey (Title + Artist) when URI and ID differ (relinked track)
-            const t3 = dj.enrichTrackWithCachedMetadata({
+            const t3 = dj.enrichTrackWithCachedMetadata(makeTrack({
                 id: 'relinked_id',
                 name: 'Ocean Walk (Remastered 2026)',
                 uri: 'spotify:track:relinked_uri',
-                artists: [{ name: 'Artist3' } as any],
-                album: {} as any
-            } as any);
+                artistName: 'Artist3',
+            }));
             assert.strictEqual(t3.selectionReason, 'Reason by TrackKey');
             assert.strictEqual(t3.stage, 'peak');
         });
 
         it('advances Up Next dynamically as currently playing track changes', async () => {
-            // Seed session tracks in localStorage
             const sessionTracks = [
-                { id: 't1', uri: 'spotify:track:1', name: 'Song 1', artists: [{ name: 'Art 1' }], selectionReason: 'Reason 1' },
-                { id: 't2', uri: 'spotify:track:2', name: 'Song 2', artists: [{ name: 'Art 2' }], selectionReason: 'Reason 2' },
-                { id: 't3', uri: 'spotify:track:3', name: 'Song 3', artists: [{ name: 'Art 3' }], selectionReason: 'Reason 3' },
-                { id: 't4', uri: 'spotify:track:4', name: 'Song 4', artists: [{ name: 'Art 4' }], selectionReason: 'Reason 4' },
+                makeTrack({ id: 't1', uri: 'spotify:track:1', name: 'Song 1', artistName: 'Art 1', selectionReason: 'Reason 1' }),
+                makeTrack({ id: 't2', uri: 'spotify:track:2', name: 'Song 2', artistName: 'Art 2', selectionReason: 'Reason 2' }),
+                makeTrack({ id: 't3', uri: 'spotify:track:3', name: 'Song 3', artistName: 'Art 3', selectionReason: 'Reason 3' }),
+                makeTrack({ id: 't4', uri: 'spotify:track:4', name: 'Song 4', artistName: 'Art 4', selectionReason: 'Reason 4' }),
             ];
             store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
 
             const dj = new DJCore('fake_token');
-            // Mock spotify.getGeneric to return empty queue (simulating mobile Spotify Connect)
-            (dj as any).spotify.getGeneric = async () => ({ queue: [] });
+            const djInternal = dj as unknown as { spotify: { getGeneric: () => Promise<unknown> } };
+            djInternal.spotify.getGeneric = async () => ({ queue: [] });
 
             // Case 1: Currently playing Song 1 (index 0) -> Up Next should be [Song 2, Song 3, Song 4]
-            const queueAtSong1 = await dj.getQueue(sessionTracks[0] as any);
+            const queueAtSong1 = await dj.getQueue(sessionTracks[0]);
             assert.strictEqual(queueAtSong1.length, 3);
             assert.strictEqual(queueAtSong1[0].name, 'Song 2');
             assert.strictEqual(queueAtSong1[0].selectionReason, 'Reason 2');
             assert.strictEqual(queueAtSong1[1].name, 'Song 3');
 
             // Case 2: Track advances to Song 2 (index 1) -> Up Next should dynamically advance to [Song 3, Song 4]
-            const queueAtSong2 = await dj.getQueue(sessionTracks[1] as any);
+            const queueAtSong2 = await dj.getQueue(sessionTracks[1]);
             assert.strictEqual(queueAtSong2.length, 2);
             assert.strictEqual(queueAtSong2[0].name, 'Song 3');
             assert.strictEqual(queueAtSong2[0].selectionReason, 'Reason 3');
             assert.strictEqual(queueAtSong2[1].name, 'Song 4');
 
             // Case 3: Track advances to Song 3 (index 2) -> Up Next should dynamically advance to [Song 4]
-            const queueAtSong3 = await dj.getQueue(sessionTracks[2] as any);
+            const queueAtSong3 = await dj.getQueue(sessionTracks[2]);
             assert.strictEqual(queueAtSong3.length, 1);
             assert.strictEqual(queueAtSong3[0].name, 'Song 4');
             assert.strictEqual(queueAtSong3[0].selectionReason, 'Reason 4');
@@ -188,15 +206,15 @@ describe('DJCore', () => {
 
         it('advances Up Next accurately even when Spotify API returns a lagging/stale queue', async () => {
             const sessionTracks = [
-                { id: 's1', uri: 'spotify:track:s1', name: 'Song 1', artists: [{ name: 'Artist 1' }], selectionReason: 'Reason 1' },
-                { id: 's2', uri: 'spotify:track:s2', name: 'Song 2', artists: [{ name: 'Artist 2' }], selectionReason: 'Reason 2' },
-                { id: 's3', uri: 'spotify:track:s3', name: 'Song 3', artists: [{ name: 'Artist 3' }], selectionReason: 'Reason 3' },
+                makeTrack({ id: 's1', uri: 'spotify:track:s1', name: 'Song 1', artistName: 'Artist 1', selectionReason: 'Reason 1' }),
+                makeTrack({ id: 's2', uri: 'spotify:track:s2', name: 'Song 2', artistName: 'Artist 2', selectionReason: 'Reason 2' }),
+                makeTrack({ id: 's3', uri: 'spotify:track:s3', name: 'Song 3', artistName: 'Artist 3', selectionReason: 'Reason 3' }),
             ];
             store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
 
             const dj = new DJCore('fake_token');
-            // Mock spotify.getGeneric to return a lagging queue that still includes Song 2 at index 0
-            (dj as any).spotify.getGeneric = async () => ({
+            const djInternal = dj as unknown as { spotify: { getGeneric: () => Promise<unknown> } };
+            djInternal.spotify.getGeneric = async () => ({
                 currently_playing: sessionTracks[1],
                 queue: [
                     { id: 's2', uri: 'spotify:track:s2', name: 'Song 2', type: 'track' },
@@ -205,14 +223,13 @@ describe('DJCore', () => {
             });
 
             // Currently playing Song 2 -> Up Next MUST advance to Song 3, NOT show Song 2 at index 0!
-            const upcoming = await dj.getQueue(sessionTracks[1] as any);
+            const upcoming = await dj.getQueue(sessionTracks[1]);
             assert.strictEqual(upcoming.length, 1);
             assert.strictEqual(upcoming[0].name, 'Song 3');
             assert.strictEqual(upcoming[0].selectionReason, 'Reason 3');
         });
 
         it('uses Spotify live queue when available from API and enriches with metadata', async () => {
-            // Seed metadata cache in localStorage
             store['dj_track_metadata_cache'] = JSON.stringify({
                 'spotify:track:q1': { selectionReason: 'Reason for Q1', vibeTag: '#Chill' },
                 'spotify:track:q2': { selectionReason: 'Reason for Q2', vibeTag: '#Energy' }
@@ -223,7 +240,8 @@ describe('DJCore', () => {
                 { id: 'q1', uri: 'spotify:track:q1', name: 'Track Q1', artists: [{ name: 'Artist 1' }], type: 'track' },
                 { id: 'q2', uri: 'spotify:track:q2', name: 'Track Q2', artists: [{ name: 'Artist 2' }], type: 'track' },
             ];
-            (dj as any).spotify.getGeneric = async () => ({ queue: realSpotifyQueue });
+            const djInternal = dj as unknown as { spotify: { getGeneric: () => Promise<unknown> } };
+            djInternal.spotify.getGeneric = async () => ({ queue: realSpotifyQueue });
 
             const queue = await dj.getQueue();
             assert.strictEqual(queue.length, 2);
@@ -235,36 +253,30 @@ describe('DJCore', () => {
         });
 
         it('restores selectionReason via currentSessionTracks and fuzzy title match on reload when cache is missing', async () => {
-            // Simulate page reload where track metadata cache was cleared or track was relinked,
-            // but session tracks exist in localStorage.
             const sessionTracks = [
-                {
+                makeTrack({
                     id: 'original_id',
                     uri: 'spotify:track:orig_uri',
                     name: 'Sunset Cruise',
-                    artists: [{ name: 'City Pop Band' }],
+                    artistName: 'City Pop Band',
                     selectionReason: '夕暮れの爽快なムードにぴったりの名曲。',
                     vibeTag: '#夕暮れドライブ',
                     stage: 'build'
-                }
+                })
             ];
             store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
-            // Notice: track_metadata_cache is intentionally empty in localStorage!
 
             const dj = new DJCore('fake_token');
 
-            // Spotify returns a relinked track with different ID/URI and minor title variance (e.g. remastered tag)
-            const rawSpotifyTrack = {
+            const rawSpotifyTrack = makeTrack({
                 id: 'relinked_different_id',
                 uri: 'spotify:track:relinked_different_uri',
                 name: 'Sunset Cruise - 2026 Remaster',
-                artists: [{ name: 'City Pop Band' }],
-                type: 'track'
-            };
+                artistName: 'City Pop Band',
+            });
 
-            const enriched = dj.enrichTrackWithCachedMetadata(rawSpotifyTrack as any);
+            const enriched = dj.enrichTrackWithCachedMetadata(rawSpotifyTrack);
 
-            // Should be successfully enriched from currentSessionTracks via fuzzy match
             assert.strictEqual(enriched.selectionReason, '夕暮れの爽快なムードにぴったりの名曲。');
             assert.strictEqual(enriched.vibeTag, '#夕暮れドライブ');
             assert.strictEqual(enriched.stage, 'build');
@@ -273,20 +285,21 @@ describe('DJCore', () => {
         it('returns new session upcoming tracks immediately even when activeTrack lags behind', async () => {
             const dj = new DJCore('fake_token');
             const newTracks: Track[] = [
-                { id: 'track_1', uri: 'spotify:track:1', name: 'New Track 1', artists: [{ name: 'New Artist' }] } as any,
-                { id: 'track_2', uri: 'spotify:track:2', name: 'New Track 2', artists: [{ name: 'New Artist' }] } as any,
-                { id: 'track_3', uri: 'spotify:track:3', name: 'New Track 3', artists: [{ name: 'New Artist' }] } as any,
+                makeTrack({ id: 'track_1', uri: 'spotify:track:1', name: 'New Track 1', artistName: 'New Artist' }),
+                makeTrack({ id: 'track_2', uri: 'spotify:track:2', name: 'New Track 2', artistName: 'New Artist' }),
+                makeTrack({ id: 'track_3', uri: 'spotify:track:3', name: 'New Track 3', artistName: 'New Artist' }),
             ];
 
-            // Simulate session initiation (setting session tracks & lastPlayTime)
-            (dj as any).currentSessionTracks = newTracks;
-            (dj as any).lastPlayTime = Date.now();
+            const djInternal = dj as unknown as {
+                currentSessionTracks: Track[];
+                lastPlayTime: number;
+            };
+            djInternal.currentSessionTracks = newTracks;
+            djInternal.lastPlayTime = Date.now();
 
-            // When activeTrack is null or an old track from previous session (Spotify hasn't switched yet)
-            const oldTrack = { id: 'old_0', uri: 'spotify:track:old', name: 'Old Stale Song', artists: [{ name: 'Old Artist' }] } as any;
+            const oldTrack = makeTrack({ id: 'old_0', uri: 'spotify:track:old', name: 'Old Stale Song', artistName: 'Old Artist' });
             const upcoming = await dj.getQueue(oldTrack);
 
-            // Must immediately return track_2 and track_3 (slice(1)) without stalling
             assert.strictEqual(upcoming.length, 2);
             assert.strictEqual(upcoming[0].id, 'track_2');
             assert.strictEqual(upcoming[1].id, 'track_3');

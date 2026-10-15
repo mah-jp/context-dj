@@ -21,7 +21,7 @@ export interface ScheduleItem {
     userRequest?: string; // Original user instruction for context
 }
 
-export interface Track extends SpotifyApi.TrackObjectFull {
+export interface TrackMetadata {
     contextName?: string;
     score?: number;
     vibeTag?: string;
@@ -30,6 +30,8 @@ export interface Track extends SpotifyApi.TrackObjectFull {
     energy?: number;
     stage?: 'intro' | 'build' | 'peak' | 'outro';
 }
+
+export interface Track extends SpotifyApi.TrackObjectFull, TrackMetadata {}
 
 export interface DJConfig {
     minPopularity: number;

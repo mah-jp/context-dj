@@ -59,11 +59,11 @@ describe('dj-utils', () => {
         it('should generate consistent deduplication key', () => {
             const track1: Partial<Track> = {
                 name: 'Plastic Love (Remastered)',
-                artists: [{ name: 'Mariya Takeuchi' }] as any,
+                artists: [{ name: 'Mariya Takeuchi' } as SpotifyApi.ArtistObjectSimplified],
             };
             const track2: Partial<Track> = {
                 name: 'Plastic Love - 2021 Version',
-                artists: [{ name: '  mariya takeuchi  ' }] as any,
+                artists: [{ name: '  mariya takeuchi  ' } as SpotifyApi.ArtistObjectSimplified],
             };
 
             assert.strictEqual(
@@ -79,7 +79,7 @@ describe('dj-utils', () => {
         it('should handle missing artists gracefully', () => {
             const track: Partial<Track> = {
                 name: 'Unknown Song',
-                artists: [] as any,
+                artists: [],
             };
             assert.strictEqual(generateTrackKey(track as Track), 'unknown song|');
         });

@@ -1,11 +1,10 @@
-import test, { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { AIService } from '../src/lib/ai';
 import { DEFAULT_MODELS } from '../src/lib/constants';
-import { ScheduleItem } from '../src/lib/types';
 
 describe('AIService', () => {
-    let originalFetch: any;
+    let originalFetch: typeof globalThis.fetch;
 
     beforeEach(() => {
         originalFetch = globalThis.fetch;
@@ -18,17 +17,17 @@ describe('AIService', () => {
     describe('Initialization & Model selection', () => {
         it('uses DEFAULT_MODELS for Gemini when modelName is omitted', () => {
             const service = new AIService('gemini', 'fake_key');
-            assert.strictEqual((service as any).modelName, DEFAULT_MODELS.GEMINI);
+            assert.strictEqual(service.getModelName(), DEFAULT_MODELS.GEMINI);
         });
 
         it('uses DEFAULT_MODELS for OpenAI when modelName is omitted', () => {
             const service = new AIService('openai', 'fake_key');
-            assert.strictEqual((service as any).modelName, DEFAULT_MODELS.OPENAI);
+            assert.strictEqual(service.getModelName(), DEFAULT_MODELS.OPENAI);
         });
 
         it('respects explicitly provided custom modelName', () => {
             const service = new AIService('gemini', 'fake_key', 'gemini-custom-pro');
-            assert.strictEqual((service as any).modelName, 'gemini-custom-pro');
+            assert.strictEqual(service.getModelName(), 'gemini-custom-pro');
         });
     });
 
@@ -44,11 +43,9 @@ describe('AIService', () => {
             ];
 
             let requestedUrl = '';
-            let requestBody: any = null;
 
-            globalThis.fetch = async (url: any, options: any) => {
-                requestedUrl = String(url);
-                requestBody = JSON.parse(options.body);
+            globalThis.fetch = (async (input: RequestInfo | URL) => {
+                requestedUrl = String(input);
 
                 return {
                     ok: true,
@@ -66,8 +63,8 @@ describe('AIService', () => {
                             }
                         ]
                     })
-                } as any;
-            };
+                } as unknown as Response;
+            }) as typeof globalThis.fetch;
 
             const service = new AIService('gemini', 'test_api_key');
             const result = await service.generateSchedule('I want some chill piano jazz');
@@ -90,13 +87,13 @@ describe('AIService', () => {
                 ]
             };
 
-            globalThis.fetch = async () => ({
+            globalThis.fetch = (async () => ({
                 ok: true,
                 status: 200,
                 json: async () => ({
                     candidates: [{ content: { parts: [{ text: JSON.stringify(mockWrapped) }] } }]
                 })
-            } as any);
+            } as unknown as Response)) as typeof globalThis.fetch;
 
             const service = new AIService('gemini', 'test_key');
             const result = await service.generateSchedule('study beats');
@@ -106,12 +103,12 @@ describe('AIService', () => {
         });
 
         it('throws error when API response is not ok', async () => {
-            globalThis.fetch = async () => ({
+            globalThis.fetch = (async () => ({
                 ok: false,
                 status: 403,
                 statusText: 'Forbidden',
                 text: async () => 'API key invalid'
-            } as any);
+            } as unknown as Response)) as typeof globalThis.fetch;
 
             const service = new AIService('gemini', 'invalid_key');
             await assert.rejects(
@@ -136,7 +133,7 @@ describe('AIService', () => {
             ];
 
             // AI selects indices 0 and 2 with structured evaluation
-            globalThis.fetch = async () => ({
+            globalThis.fetch = (async () => ({
                 ok: true,
                 status: 200,
                 text: async () => '',
@@ -152,7 +149,7 @@ describe('AIService', () => {
                         }
                     }]
                 })
-            } as any);
+            } as unknown as Response)) as typeof globalThis.fetch;
 
             const service = new AIService('gemini', 'test_key');
             const evaluations = await service.filterTracksWithAI('chill songs', tracks);
@@ -168,11 +165,11 @@ describe('AIService', () => {
                 { name: 'Track B', artist: 'Artist B', id: 'spotify:track:b' },
             ];
 
-            globalThis.fetch = async () => ({
+            globalThis.fetch = (async () => ({
                 ok: false,
                 status: 500,
                 text: async () => 'Internal Server Error'
-            } as any);
+            } as unknown as Response)) as typeof globalThis.fetch;
 
             const service = new AIService('gemini', 'test_key');
             const result = await service.filterTracksWithAI('some prompt', tracks);
@@ -184,8 +181,8 @@ describe('AIService', () => {
         it('sends vision request and extracts Japanese description', async () => {
             const mockJapaneseDescription = '黄金色の柔らかな夕陽が差し込む静かな部屋。ゆったりとしたローファイビーツ。';
 
-            globalThis.fetch = async (_url: any, options: any) => {
-                const body = JSON.parse(options.body);
+            globalThis.fetch = (async (_url: RequestInfo | URL, options?: RequestInit) => {
+                const body = JSON.parse(String(options?.body));
                 assert.strictEqual(body.contents[0].parts[1].inline_data.mime_type, 'image/jpeg');
                 assert.strictEqual(body.contents[0].parts[1].inline_data.data, 'base64data');
 
@@ -195,8 +192,8 @@ describe('AIService', () => {
                     json: async () => ({
                         candidates: [{ content: { parts: [{ text: mockJapaneseDescription }] } }]
                     })
-                } as any;
-            };
+                } as unknown as Response;
+            }) as typeof globalThis.fetch;
 
             const service = new AIService('gemini', 'test_key');
             const description = await service.analyzeImage('base64data', 'image/jpeg');

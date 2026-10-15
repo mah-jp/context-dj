@@ -1,53 +1,42 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
 import { STORAGE_KEYS, PRIVACY_NOTICE, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
 import { AIProvider } from '../../lib/types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../../lib/storage';
+import { usePlayer } from '../../context/PlayerContext';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
-    const [spotifyClientId, setSpotifyClientId] = useState('');
-    const [openAiKey, setOpenAiKey] = useState('');
-    const [openAiModel, setOpenAiModel] = useState('');
-    const [geminiKey, setGeminiKey] = useState('');
-    const [geminiModel, setGeminiModel] = useState('');
-    const [aiProvider, setAiProvider] = useState<AIProvider>(DEFAULTS.AI_PROVIDER);
-    const [status, setStatus] = useState('');
-    const [personalPref, setPersonalPref] = useState('');
-    const [prefHistory, setPrefHistory] = useState<string[]>([]);
-    const [showPrefHistory, setShowPrefHistory] = useState(false);
-    const [voiceLang, setVoiceLang] = useState<string>(DEFAULTS.VOICE_LANG);
-    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState<boolean>(DEFAULTS.BACKGROUND_KEEP_ALIVE);
-    const [aiFilteringEnabled, setAiFilteringEnabled] = useState<boolean>(DEFAULTS.AI_FILTERING_ENABLED);
+    const { reloadConfig } = usePlayer();
 
-    useEffect(() => {
-        // Load from local storage
-        setSpotifyClientId(getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, ''));
-        setOpenAiKey(getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, ''));
-        setOpenAiModel(getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI));
-        setGeminiKey(getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, ''));
-        setGeminiModel(getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI));
-
-        setVoiceLang(getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, navigator.language || DEFAULTS.VOICE_LANG));
-
+    const [spotifyClientId, setSpotifyClientId] = useState(() => getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, ''));
+    const [openAiKey, setOpenAiKey] = useState(() => getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, ''));
+    const [openAiModel, setOpenAiModel] = useState(() => getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI));
+    const [geminiKey, setGeminiKey] = useState(() => getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, ''));
+    const [geminiModel, setGeminiModel] = useState(() => getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI));
+    const [aiProvider, setAiProvider] = useState<AIProvider>(() => {
         const savedProvider = getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider;
-        if (savedProvider === 'gemini') {
-            setAiProvider('gemini');
-        } else {
-            setAiProvider('openai');
-        }
-
-        setPersonalPref(getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, ''));
-        setPrefHistory(getStoredJSON<string[]>(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, []));
-
-        setBackgroundKeepAlive(getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, '') === 'true');
+        return savedProvider === 'gemini' ? 'gemini' : 'openai';
+    });
+    const [status, setStatus] = useState('');
+    const [personalPref, setPersonalPref] = useState(() => getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, ''));
+    const [prefHistory, setPrefHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, []));
+    const [showPrefHistory, setShowPrefHistory] = useState(false);
+    const [voiceLang, setVoiceLang] = useState<string>(() => {
+        const defaultLang = typeof navigator !== 'undefined' && navigator.language ? navigator.language : DEFAULTS.VOICE_LANG;
+        return getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, defaultLang);
+    });
+    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState<boolean>(
+        () => getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, '') === 'true'
+    );
+    const [aiFilteringEnabled, setAiFilteringEnabled] = useState<boolean>(() => {
         const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
-        setAiFilteringEnabled(savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true');
-    }, []);
+        return savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
+    });
 
     const handleSave = () => {
         setStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, spotifyClientId);
@@ -68,6 +57,9 @@ export default function Settings() {
             setStoredJSON(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, newHistory);
         }
 
+        // Immediately sync updated settings to PlayerContext & DJCore without requiring page reload
+        reloadConfig();
+
         setStatus('Settings saved! (設定を保存しました)');
         setTimeout(() => setStatus(''), 3000);
     };
@@ -75,6 +67,7 @@ export default function Settings() {
     const handleLogout = () => {
         if (confirm('Are you sure you want to log out from Spotify?\n(Spotifyからログアウトしますか？)')) {
             SpotifyAuth.logout();
+            reloadConfig();
             setStatus('Logged out from Spotify. (ログアウトしました)');
             setTimeout(() => setStatus(''), 3000);
         }
@@ -432,7 +425,7 @@ export default function Settings() {
                         <button
                             onClick={() => {
                                 if (confirm('Are you sure you want to clear the main chat prompt history?\n(チャット履歴を削除しますか？)')) {
-                                    localStorage.removeItem(STORAGE_KEYS.PROMPT_HISTORY);
+                                    removeStorageItem(STORAGE_KEYS.PROMPT_HISTORY);
                                     setStatus('Chat history cleared! (チャット履歴を削除しました)');
                                     setTimeout(() => setStatus(''), 3000);
                                 }

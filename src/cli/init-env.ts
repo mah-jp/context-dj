@@ -2,13 +2,15 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 
+const g = globalThis as Record<string, unknown>;
+
 if (typeof window === 'undefined') {
-    (globalThis as any).window = globalThis;
+    g.window = globalThis;
 }
 
-if (!(globalThis as any).localStorage) {
+if (!g.localStorage) {
     const memory = new Map<string, string>();
-    (globalThis as any).localStorage = {
+    g.localStorage = {
         getItem: (key: string) => memory.get(key) ?? null,
         setItem: (key: string, value: string) => memory.set(key, String(value)),
         removeItem: (key: string) => memory.delete(key),
@@ -18,8 +20,8 @@ if (!(globalThis as any).localStorage) {
     };
 }
 
-if (!(globalThis as any).XMLHttpRequest) {
-    (globalThis as any).XMLHttpRequest = require('xhr2');
+if (!g.XMLHttpRequest) {
+    g.XMLHttpRequest = require('xhr2');
 }
 
 export {};

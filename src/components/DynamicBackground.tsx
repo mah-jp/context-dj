@@ -12,19 +12,21 @@ export default function DynamicBackground({ imageUrl }: DynamicBackgroundProps) 
     const [currentImage, setCurrentImage] = useState<string | undefined>(imageUrl);
     const [isTransitioning, setIsTransitioning] = useState(false);
 
+    if (imageUrl !== currentImage) {
+        setPrevImage(currentImage);
+        setCurrentImage(imageUrl);
+        setIsTransitioning(true);
+    }
+
     useEffect(() => {
-        if (imageUrl !== currentImage) {
-            setPrevImage(currentImage);
-            setCurrentImage(imageUrl);
-            setIsTransitioning(true);
-            
-            const timer = setTimeout(() => {
-                setIsTransitioning(false);
-            }, 1500); // Match CSS transition duration
-            
-            return () => clearTimeout(timer);
-        }
-    }, [imageUrl]);
+        if (!isTransitioning) return;
+
+        const timer = setTimeout(() => {
+            setIsTransitioning(false);
+        }, 1500); // Match CSS transition duration
+
+        return () => clearTimeout(timer);
+    }, [isTransitioning, currentImage]);
 
     if (!currentImage && !prevImage) return <div className={styles.bgBaseLayer} />;
 

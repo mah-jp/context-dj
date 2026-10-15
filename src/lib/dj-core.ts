@@ -1,9 +1,10 @@
 import SpotifyWebApi from 'spotify-web-api-js';
 import { AIService } from './ai';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
-import { AIProvider, ScheduleItem, Track, DJConfig, TrackEvaluation } from './types';
+import { AIProvider, ScheduleItem, Track, TrackMetadata, DJConfig, TrackEvaluation } from './types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
-import { normalizeTrackName, generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries, parseTimeToMinutes, normalizeTimeString } from './dj-utils';
+import { normalizeTrackName, generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries, parseTimeToMinutes } from './dj-utils';
+import { extractTargetArtists, deduplicateTracks, filterTracksByPopularityAndArtist, sequenceTracksByStory } from './track-curator';
 
 export type { Track };
 
@@ -17,28 +18,20 @@ export class DJCore {
     private currentSessionTracks: Track[] = [];
     private lastPlayTime: number = 0;
     private config: DJConfig = {
-        minPopularity: PLAYBACK_CONSTANTS.MIN_TRACK_POPULARITY,
+        minPopularity: PLAYBACK_CONSTANTS.PREFERRED_TRACK_POPULARITY,
         trackSearchLimit: PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT,
         onlyOfficial: false,
         aiFiltering: true
     };
     private onStatusUpdate?: (status: string) => void;
     private lastPlayingTrack: Track | null = null;
-    private trackMetadataCache = new Map<string, {
-        score?: number;
-        vibeTag?: string;
-        selectionReason?: string;
-        estimatedBpm?: number;
-        energy?: number;
-        stage?: 'intro' | 'build' | 'peak' | 'outro';
-        contextName?: string;
-    }>();
+    private trackMetadataCache = new Map<string, TrackMetadata>();
 
     private cacheTrackMetadata(tracks: Track[]) {
         let changed = false;
         for (const t of tracks) {
             if (!t) continue;
-            const meta = {
+            const meta: TrackMetadata = {
                 ...(t.score !== undefined ? { score: t.score } : {}),
                 ...(t.vibeTag ? { vibeTag: t.vibeTag } : {}),
                 ...(t.selectionReason ? { selectionReason: t.selectionReason } : {}),
@@ -69,7 +62,7 @@ export class DJCore {
 
         if (changed) {
             // Persist to localStorage (limit to latest 300 items to avoid quota issues)
-            const obj: Record<string, any> = {};
+            const obj: Record<string, TrackMetadata> = {};
             const entries = Array.from(this.trackMetadataCache.entries());
             const sliced = entries.slice(-300);
             sliced.forEach(([k, v]) => { obj[k] = v; });
@@ -80,7 +73,7 @@ export class DJCore {
     enrichTrackWithCachedMetadata(track: Track): Track {
         if (!track) return track;
         const key = generateTrackKey(track);
-        let cached = (track.uri ? this.trackMetadataCache.get(track.uri) : undefined)
+        let cached: TrackMetadata | undefined = (track.uri ? this.trackMetadataCache.get(track.uri) : undefined)
             || (track.id ? this.trackMetadataCache.get(track.id) : undefined)
             || (key ? this.trackMetadataCache.get(`key:${key}`) : undefined);
 
@@ -129,12 +122,12 @@ export class DJCore {
         this.spotify.setAccessToken(accessToken);
 
         // Restore state
-        this.lastQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, null as any);
+        this.lastQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null;
         const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
         this.config.aiFiltering = savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
 
         // Restore track metadata cache from localStorage
-        const savedCache = getStoredJSON<Record<string, any>>(STORAGE_KEYS.TRACK_METADATA_CACHE, {});
+        const savedCache = getStoredJSON<Record<string, TrackMetadata>>(STORAGE_KEYS.TRACK_METADATA_CACHE, {});
         Object.entries(savedCache).forEach(([key, meta]) => {
             this.trackMetadataCache.set(key, meta);
         });
@@ -242,7 +235,7 @@ export class DJCore {
         const anchorTracks = await this.findAnchorTracks(context?.anchorTracks);
 
         // 2. Parse target artists for strict filtering
-        const targetArtists = this.extractTargetArtists(queries);
+        const targetArtists = extractTargetArtists(queries);
         if (targetArtists.length > 0) this.addLog(`🎯 Target Artists: ${targetArtists.join(', ')}`);
 
         // 3. Execute Parallel Search
@@ -255,7 +248,7 @@ export class DJCore {
         }
 
         // 4. Deduplicate
-        const uniqueTracks = this.deduplicateTracks(allRawTracks);
+        const uniqueTracks = deduplicateTracks(allRawTracks);
         this.addLog(`📊 Found ${allRawTracks.length} raw hits -> ${uniqueTracks.length} unique tracks`);
 
         // 5. Apply Filters (Strict Artist -> Popularity)
@@ -265,7 +258,11 @@ export class DJCore {
         const candidates = await this.performAIFiltering(filteredTracks, context);
 
         // 7. Smart Sequencing (起承転結: Intro -> Build -> Peak -> Outro)
-        let finalTracks = this.sequenceTracks(candidates, targetArtists);
+        const { tracks: sequencedTracks, stageCounts } = sequenceTracksByStory(candidates, targetArtists);
+        let finalTracks = sequencedTracks;
+        if (candidates.length > 2) {
+            this.addLog(`🎼 Smart Sequencing (起承転結): Intro (${stageCounts.intro}) → Build (${stageCounts.build}) → Peak (${stageCounts.peak}) → Outro (${stageCounts.outro})`);
+        }
 
         // 8. Merge Priority Track
         if (priorityTracks.length > 0) {
@@ -432,26 +429,9 @@ export class DJCore {
         }
     }
 
-    private extractTargetArtists(queries: string[]): string[] {
-        const targetArtists: string[] = [];
-        queries.forEach(q => {
-            if (q.includes('artist:')) {
-                const parts = q.split('artist:');
-                if (parts.length > 1) {
-                    let rawName = parts[1].trim().toLowerCase();
-                    const quoteMatch = rawName.match(/["']([^"']+)["']/);
-                    if (quoteMatch) {
-                        rawName = quoteMatch[1];
-                    }
-                    targetArtists.push(rawName);
-                }
-            }
-        });
-        return targetArtists;
-    }
-
     private async executeParallelSearch(queries: string[]): Promise<Track[]> {
         const allRawTracks: Track[] = [];
+        const limit = this.config.trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
 
         await Promise.all(queries.map(async (query) => {
             // Do NOT strip quotes from queries.
@@ -460,10 +440,10 @@ export class DJCore {
             const searchQuery = this.config.onlyOfficial ? `owner:spotify ${query}` : query;
 
             try {
-                // Fetch up to 20 tracks per query via pagination (respecting Spotify's maximum limit: 10)
+                // Fetch up to 2 pages per query via pagination (respecting configured limit)
                 const [trackResPage1, trackResPage2] = await Promise.all([
-                    this.spotify.searchTracks(searchQuery, { limit: 10, offset: 0 }),
-                    this.spotify.searchTracks(searchQuery, { limit: 10, offset: 10 }).catch(() => null)
+                    this.spotify.searchTracks(searchQuery, { limit, offset: 0 }),
+                    this.spotify.searchTracks(searchQuery, { limit, offset: limit }).catch(() => null)
                 ]);
 
                 if (trackResPage1?.tracks?.items) {
@@ -481,64 +461,26 @@ export class DJCore {
         return allRawTracks.sort(() => Math.random() - 0.5);
     }
 
-    private deduplicateTracks(tracks: Track[]): Track[] {
-        const seenKeys = new Set<string>();
-        const uniqueTracks: Track[] = [];
-
-        for (const track of tracks) {
-            const key = generateTrackKey(track);
-
-            if (!seenKeys.has(key)) {
-                seenKeys.add(key);
-                uniqueTracks.push(track);
-            }
-        }
-        return uniqueTracks;
-    }
-
     private applyTrackFilters(tracks: Track[], targetArtists: string[] = []): Track[] {
-        const candidates = tracks;
+        const preferredPopularity = this.config.minPopularity;
+        const minPopularity = Math.min(preferredPopularity, PLAYBACK_CONSTANTS.MIN_TRACK_POPULARITY);
 
-        // Separate tracks by target artists (MUST be preserved regardless of popularity)
-        const targetTracks: Track[] = [];
-        const nonTargetCandidates: Track[] = [];
+        const result = filterTracksByPopularityAndArtist(tracks, targetArtists, preferredPopularity, minPopularity);
 
-        if (targetArtists.length > 0) {
-            candidates.forEach(t => {
-                const aName = (t.artists[0]?.name || '').toLowerCase();
-                if (targetArtists.some(ta => aName.includes(ta) || ta.includes(aName))) {
-                    targetTracks.push(t);
-                } else {
-                    nonTargetCandidates.push(t);
-                }
-            });
-            if (targetTracks.length > 0) {
-                this.addLog(`🎯 Preserved ${targetTracks.length} tracks by requested artist(s) without popularity cutoff`);
-            }
-        } else {
-            nonTargetCandidates.push(...candidates);
+        if (result.targetPreservedCount > 0) {
+            this.addLog(`🎯 Preserved ${result.targetPreservedCount} tracks by requested artist(s) without popularity cutoff`);
         }
-
-        // Popularity Filtering (Adaptive) for non-target candidates
-        const PREFERRED_POPULARITY = 15;
-        const MIN_POPULARITY = 5;
-
-        let filteredTracks = nonTargetCandidates.filter(t => (t.popularity || 0) >= PREFERRED_POPULARITY);
-
-        if (filteredTracks.length < 5 && nonTargetCandidates.length >= 5) {
-            this.addLog(`⚠️ Popularity >= ${PREFERRED_POPULARITY} too strict (${filteredTracks.length} tracks). Relaxing to >= ${MIN_POPULARITY}...`);
-            filteredTracks = nonTargetCandidates.filter(t => (t.popularity || 0) >= MIN_POPULARITY);
+        if (result.relaxedToMin) {
+            this.addLog(`⚠️ Popularity >= ${preferredPopularity} too strict. Relaxing to >= ${minPopularity}...`);
         }
-
-        if (filteredTracks.length === 0 && targetTracks.length === 0) {
+        if (result.revertedToAll) {
             this.addLog('⚠️ No tracks matched popularity criteria. Using all candidates.');
-            return candidates;
+            return result.tracks;
         }
 
-        const combined = [...targetTracks, ...filteredTracks];
-        this.addLog(`🔍 Filter: Popularity Check (${combined.length} / ${candidates.length} kept)`);
-        this.logTrackSamples(combined);
-        return combined;
+        this.addLog(`🔍 Filter: Popularity Check (${result.tracks.length} / ${tracks.length} kept)`);
+        this.logTrackSamples(result.tracks);
+        return result.tracks;
     }
 
     private logTrackSamples(tracks: Track[]) {
@@ -546,113 +488,6 @@ export class DJCore {
         const samples = tracks.slice(0, 3).map(t => `${t.name} (${t.artists[0].name})`).join(', ');
         const more = tracks.length > 3 ? `...and ${tracks.length - 3} more` : '';
         this.addLog(`   👉 [Sample]: ${samples} ${more}`);
-    }
-
-    private shuffle<T>(array: T[]): T[] {
-        const arr = [...array];
-        for (let i = arr.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [arr[i], arr[j]] = [arr[j], arr[i]];
-        }
-        return arr;
-    }
-
-    private sequenceTracks(tracks: Track[], targetArtists: string[] = []): Track[] {
-        const MAX_FINAL_TRACKS = 40;
-        if (tracks.length <= 2) {
-            return tracks.slice(0, MAX_FINAL_TRACKS);
-        }
-
-        // Helper to check if a track matches requested target artists
-        const isTarget = (t: Track): boolean => {
-            if (targetArtists.length === 0) return false;
-            const aName = (t.artists[0]?.name || '').toLowerCase();
-            return targetArtists.some(ta => aName.includes(ta) || ta.includes(aName));
-        };
-
-        // Ensure every track has an energy and stage assigned
-        const prepared = tracks.map(t => {
-            const energy = typeof t.energy === 'number' ? t.energy : 5;
-            let stage = t.stage;
-            if (!stage) {
-                if (energy <= 4) stage = 'intro';
-                else if (energy <= 7) stage = 'build';
-                else stage = 'peak';
-            }
-            return { ...t, energy, stage };
-        });
-
-        // Group into the 4 storytelling buckets
-        let intro = prepared.filter(t => t.stage === 'intro');
-        let build = prepared.filter(t => t.stage === 'build');
-        let peak = prepared.filter(t => t.stage === 'peak');
-        let outro = prepared.filter(t => t.stage === 'outro');
-
-        // Check if AI distribution is too unbalanced (e.g. all in one stage, or missing critical stages with >= 4 tracks)
-        const total = prepared.length;
-        const needsRebalancing = total >= 4 && (intro.length === 0 || peak.length === 0 || (build.length === 0 && outro.length === 0));
-
-        if (needsRebalancing) {
-            // Sort by energy (ascending), then by score (descending)
-            const sortedByEnergy = [...prepared].sort((a, b) => {
-                const diff = (a.energy ?? 5) - (b.energy ?? 5);
-                if (diff !== 0) return diff;
-                return (b.score ?? 0) - (a.score ?? 0);
-            });
-
-            // Distribute across Intro (15%), Build (35%), Peak (35%), Outro (15%)
-            const introCount = Math.max(1, Math.round(total * 0.15));
-            const outroCount = Math.max(1, Math.round(total * 0.15));
-            const remainingCount = total - introCount - outroCount;
-            const buildCount = Math.max(1, Math.floor(remainingCount / 2));
-
-            intro = sortedByEnergy.slice(0, introCount).map(t => ({ ...t, stage: 'intro' as const }));
-            build = sortedByEnergy.slice(introCount, introCount + buildCount).map(t => ({ ...t, stage: 'build' as const }));
-            peak = sortedByEnergy.slice(introCount + buildCount, total - outroCount).map(t => ({ ...t, stage: 'peak' as const }));
-            outro = sortedByEnergy.slice(total - outroCount).map(t => ({ ...t, stage: 'outro' as const }));
-        }
-
-        // Sort within each stage to build the narrative curve:
-        // 1. Intro (起): Target artists first -> High AI score -> Smooth moderate energy
-        intro.sort((a, b) => {
-            const aT = isTarget(a) ? 1 : 0;
-            const bT = isTarget(b) ? 1 : 0;
-            if (aT !== bT) return bT - aT;
-            if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0);
-            return (a.energy ?? 5) - (b.energy ?? 5);
-        });
-
-        // 2. Build (承): Energy rising (low to high) -> BPM rising
-        build.sort((a, b) => {
-            const aT = isTarget(a) ? 1 : 0;
-            const bT = isTarget(b) ? 1 : 0;
-            if (aT !== bT) return bT - aT;
-            const eDiff = (a.energy ?? 5) - (b.energy ?? 5);
-            if (eDiff !== 0) return eDiff;
-            return (a.estimatedBpm ?? 100) - (b.estimatedBpm ?? 100);
-        });
-
-        // 3. Peak (転): Target artists first -> Highest AI score -> Peak energy
-        peak.sort((a, b) => {
-            const aT = isTarget(a) ? 1 : 0;
-            const bT = isTarget(b) ? 1 : 0;
-            if (aT !== bT) return bT - aT;
-            if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0);
-            return (b.energy ?? 5) - (a.energy ?? 5);
-        });
-
-        // 4. Outro (結): Gradual cooldown (energy descending)
-        outro.sort((a, b) => {
-            const aT = isTarget(a) ? 1 : 0;
-            const bT = isTarget(b) ? 1 : 0;
-            if (aT !== bT) return bT - aT;
-            return (b.energy ?? 5) - (a.energy ?? 5);
-        });
-
-        const sequenced = [...intro, ...build, ...peak, ...outro];
-        this.addLog(`🎼 Smart Sequencing (起承転結): Intro (${intro.length}) → Build (${build.length}) → Peak (${peak.length}) → Outro (${outro.length})`);
-
-        return sequenced.slice(0, MAX_FINAL_TRACKS);
     }
 
     // --- Device Management ---
@@ -777,7 +612,7 @@ export class DJCore {
                 if (this.onTracksPlayed) {
                     this.onTracksPlayed(tracks);
                 }
-            } catch (e: any) {
+            } catch (e: unknown) {
                 console.error("Spotify Play Error (Fetch):", e);
                 throw e;
             }
@@ -1204,17 +1039,27 @@ export class DJCore {
                 if (isNoTrack || isPlayingOldTrack) {
                     const enriched = this.enrichTrackWithCachedMetadata(firstSessionTrack);
                     this.lastPlayingTrack = enriched;
+                    const fallbackDevice: SpotifyApi.UserDevice = (state && state.device) || {
+                        id: this.activeDeviceId || 'unknown',
+                        is_active: true,
+                        is_private_session: false,
+                        is_restricted: false,
+                        name: 'Connecting...',
+                        type: 'Computer',
+                        volume_percent: 100
+                    };
                     return {
+                        ...(state || {}),
                         is_playing: true,
                         item: enriched,
-                        device: (state && state.device) || { id: this.activeDeviceId || 'unknown', name: 'Connecting...', is_active: true } as any
-                    } as any;
+                        device: fallbackDevice
+                    } as SpotifyApi.CurrentPlaybackResponse;
                 }
             }
 
             if (state && state.item && state.item.type === 'track') {
                 const enriched = this.enrichTrackWithCachedMetadata(state.item as Track);
-                state.item = enriched as any;
+                state.item = enriched;
                 this.lastPlayingTrack = enriched;
                 return state;
             }

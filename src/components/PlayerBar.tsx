@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { usePlayer } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
 import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor } from 'lucide-react';
@@ -10,12 +10,10 @@ interface PlayerBarProps {
 }
 
 export default function PlayerBar({ onLogin }: PlayerBarProps) {
-    const [showAiThought, setShowAiThought] = useState(true);
-
-    useEffect(() => {
+    const [showAiThought, setShowAiThought] = useState<boolean>(() => {
         const stored = getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT, '');
-        setShowAiThought(stored === '' ? true : stored === 'true');
-    }, []);
+        return stored === '' ? true : stored === 'true';
+    });
 
     const toggleAiThought = () => {
         const newVal = !showAiThought;
@@ -36,8 +34,7 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
         handleNext,
         handleTogglePlay,
         currentQuery,
-        currentThought,
-        schedule
+        currentThought
     } = usePlayer();
 
     // Local UI state

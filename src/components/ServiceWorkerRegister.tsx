@@ -9,7 +9,7 @@ export default function ServiceWorkerRegister() {
             return;
         }
 
-        const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera || '';
+        const userAgent = navigator.userAgent || navigator.vendor || (window as Window & { opera?: string }).opera || '';
         const blockedApps = [
             'FBAN',      // Facebook App Name
             'FBAV',      // Facebook App Version

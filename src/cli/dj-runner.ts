@@ -167,7 +167,7 @@ export class DJRunner {
                 currentThought: djStatus.currentThought || this.state.currentThought,
                 logs: this.djCore.getProcessLog(),
             });
-        } catch (e) {
+        } catch {
             // Ignore minor transient poll errors
         }
     }

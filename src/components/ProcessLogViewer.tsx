@@ -1,4 +1,3 @@
-import styles from '../app/page.module.css';
 import { X, Terminal } from 'lucide-react';
 
 interface ProcessLogViewerProps {

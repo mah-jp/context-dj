@@ -35,16 +35,17 @@ export function useVisionInput({ djCore, onPromptGenerated, setStatus, setToast 
                     onPromptGenerated(generatedPrompt);
                     setToast({ msg: 'Visual scene description generated! (画像を解釈しました)', type: 'success' });
                     setStatus('Ready');
-                } catch (err: any) {
+                } catch (err: unknown) {
                     console.error("Vision Analysis Error:", err);
-                    setToast({ msg: `Failed to analyze image: ${err.message || err}`, type: 'error' });
+                    const message = err instanceof Error ? err.message : String(err);
+                    setToast({ msg: `Failed to analyze image: ${message}`, type: 'error' });
                     setStatus('⚠️ Image Analysis Failed');
                 } finally {
                     if (fileInputRef.current) fileInputRef.current.value = '';
                 }
             };
             reader.readAsDataURL(file);
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error(err);
             setToast({ msg: 'Failed to read image file.', type: 'error' });
             setStatus('Ready');

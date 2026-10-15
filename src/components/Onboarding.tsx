@@ -30,7 +30,7 @@ export default function Onboarding({ setupStatus, authorized, onLogin }: Onboard
                 </h2>
                 <p className={styles.onboardingDescription}>
                     ContextDJ is your personal <b>AI Music Curator</b>. <br />
-                    Simply tell it what you're doing or how you're feeling, and it will curate the perfect soundtrack for your moment.<br />
+                    Simply tell it what you&apos;re doing or how you&apos;re feeling, and it will curate the perfect soundtrack for your moment.<br />
                     <span style={{ fontSize: '0.9em', color: '#999' }}>
                         (ContextDJは、あなたのための<b>AI音楽キュレーター</b>です。今の気分や状況を伝えるだけで、その瞬間に最適な音楽を選曲してくれます。)
                     </span>

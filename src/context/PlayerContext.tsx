@@ -1,11 +1,16 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef, useCallback, ReactNode } from 'react';
 import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
 import { AIProvider, ScheduleItem, Track } from '../lib/types';
-import { getStorageItem, setStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+
+interface SetupStatus {
+    hasClientId: boolean;
+    hasAiKey: boolean;
+}
 
 interface PlayerContextType {
     djCore: DJCore | null;
@@ -28,14 +33,48 @@ interface PlayerContextType {
     handleTogglePlay: () => Promise<void>;
     handleRemoveScheduleItem: (index: number) => void;
     needsOnboarding: boolean;
+    setupStatus: SetupStatus;
     logs: string[];
     error: string | null;
     clearError: () => void;
     startBackgroundKeepAlive: () => void;
     syncUIState: (options?: { forceAll?: boolean }) => Promise<SpotifyApi.CurrentPlaybackResponse | null>;
+    reloadConfig: () => void;
 }
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
+
+function computeSetupStatus(): SetupStatus {
+    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+    const provider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
+    const hasAiKey = provider === 'gemini'
+        ? !!getStorageItem(STORAGE_KEYS.GEMINI_API_KEY)
+        : !!getStorageItem(STORAGE_KEYS.OPENAI_API_KEY);
+    return { hasClientId: !!clientId, hasAiKey };
+}
+
+function applyStoredConfigToDJ(dj: DJCore) {
+    const openaiKey = getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '');
+    const openaiModel = getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI);
+    const geminiKey = getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '');
+    const geminiModel = getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI);
+    const selectedProvider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider) || DEFAULTS.AI_PROVIDER;
+
+    if (selectedProvider === 'gemini' && geminiKey) {
+        dj.initAI('gemini', geminiKey, geminiModel);
+    } else if (selectedProvider === 'openai' && openaiKey) {
+        dj.initAI('openai', openaiKey, openaiModel);
+    } else if (openaiKey) {
+        dj.initAI('openai', openaiKey, openaiModel);
+    } else if (geminiKey) {
+        dj.initAI('gemini', geminiKey, geminiModel);
+    }
+
+    const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
+    dj.updateConfig({
+        aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
+    });
+}
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
     const [authorized, setAuthorized] = useState(false);
@@ -62,9 +101,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         return null;
     });
     const [needsOnboarding, setNeedsOnboarding] = useState(false);
+    const [setupStatus, setSetupStatus] = useState<SetupStatus>(() => computeSetupStatus());
     const [queue, setQueue] = useState<Track[]>([]);
     const [devices, setDevices] = useState<SpotifyApi.UserDevice[]>([]);
-    const [djLogs, setDjLogs] = useState<string[]>([]); // Added logs state
+    const [djLogs, setDjLogs] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
 
     const djRef = useRef<DJCore | null>(null);
@@ -75,9 +115,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const lastTrackUriRef = useRef<string | null>(null);
     const lastDevicesFetchRef = useRef<number>(0);
     const lastQueueSyncPlayTimeRef = useRef<number>(0);
+    const queueLengthRef = useRef<number>(0);
+    const devicesRef = useRef<SpotifyApi.UserDevice[]>([]);
 
-    // Helper to sync UI with DJ Core state
-    const syncUIState = React.useCallback(async (options?: { forceAll?: boolean }) => {
+    const updateQueueState = useCallback((nextQueue: Track[]) => {
+        queueLengthRef.current = nextQueue.length;
+        setQueue(nextQueue);
+    }, []);
+
+    const updateDevicesState = useCallback((nextDevices: SpotifyApi.UserDevice[]) => {
+        devicesRef.current = nextDevices;
+        setDevices(nextDevices);
+    }, []);
+
+    // Helper to sync UI with DJ Core state (stable reference to prevent re-running initialization effect)
+    const syncUIState = useCallback(async (options?: { forceAll?: boolean }) => {
         if (!djRef.current) return null;
         const forceAll = options?.forceAll ?? false;
 
@@ -98,7 +150,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             // Fetch when track changed, on forceAll, when queue is empty, or when a new playback was initiated!
             const lastPlayTime = typeof djRef.current.getLastPlayTime === 'function' ? djRef.current.getLastPlayTime() : 0;
             const newPlayOccurred = lastPlayTime > lastQueueSyncPlayTimeRef.current;
-            const shouldFetchQueue = forceAll || trackChanged || queue.length === 0 || newPlayOccurred;
+            const shouldFetchQueue = forceAll || trackChanged || queueLengthRef.current === 0 || newPlayOccurred;
             let queuePromise: Promise<Track[]> | null = null;
             if (shouldFetchQueue) {
                 queuePromise = djRef.current.getQueue(currentTrackItem);
@@ -107,7 +159,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             // 3. Conditionally fetch Devices:
             // Only fetch when forced, on initial fetch, or after DEVICE_REFRESH_INTERVAL_MS (30s)
             const now = Date.now();
-            const shouldFetchDevices = forceAll || devices.length === 0 ||
+            const shouldFetchDevices = forceAll || devicesRef.current.length === 0 ||
                 (now - lastDevicesFetchRef.current > PLAYBACK_CONSTANTS.DEVICE_REFRESH_INTERVAL_MS);
             let devicesPromise: Promise<SpotifyApi.UserDevice[]> | null = null;
             if (shouldFetchDevices) {
@@ -118,12 +170,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             // Resolve promises
             if (queuePromise) {
                 const currentQ = await queuePromise;
-                setQueue(currentQ.slice(0, 20));
+                updateQueueState(currentQ.slice(0, 20));
                 lastQueueSyncPlayTimeRef.current = lastPlayTime;
             }
+            let latestDevices = devicesRef.current;
             if (devicesPromise) {
                 const currentDevices = await devicesPromise;
-                setDevices(currentDevices);
+                latestDevices = currentDevices;
+                updateDevicesState(currentDevices);
             }
 
             // Determine Device Name
@@ -131,8 +185,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             let activeDeviceName = '';
             if (playbackState && playbackState.device) {
                 activeDeviceName = playbackState.device.name;
-            } else if (devices.length > 0) {
-                const activeD = devices.find(d => d.is_active);
+            } else if (latestDevices.length > 0) {
+                const activeD = latestDevices.find(d => d.is_active);
                 if (activeD) activeDeviceName = activeD.name;
             }
             if (activeDeviceName) {
@@ -154,9 +208,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             setCurrentQuery(djStatus.currentQuery);
             setCurrentThought(djStatus.currentThought);
 
-            // Sync Logs
+            // Sync Logs (only update state when log entries actually change)
             if (typeof djRef.current.getProcessLog === 'function') {
-                setDjLogs([...djRef.current.getProcessLog()]);
+                const latestLogs = djRef.current.getProcessLog();
+                setDjLogs(prev =>
+                    prev.length === latestLogs.length && prev[0] === latestLogs[0]
+                        ? prev
+                        : [...latestLogs]
+                );
             }
 
             return playbackState;
@@ -164,7 +223,40 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             console.error("Error in syncUIState:", syncErr);
             return null;
         }
-    }, [queue.length, devices]);
+    }, [updateQueueState, updateDevicesState]);
+
+    const reloadConfig = useCallback(() => {
+        const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+        setNeedsOnboarding(!storedClientId);
+        setSetupStatus(computeSetupStatus());
+
+        if (!storedClientId) {
+            setAuthorized(false);
+            authorizedRef.current = false;
+            setStatus('Please configure settings first.');
+            return;
+        }
+
+        const isAuth = SpotifyAuth.isAuthenticated();
+        if (!isAuth) {
+            setAuthorized(false);
+            authorizedRef.current = false;
+            setStatus('connect_needed');
+            if (timerRef.current) {
+                clearTimeout(timerRef.current);
+                timerRef.current = null;
+            }
+            if (djTimerRef.current) {
+                clearTimeout(djTimerRef.current);
+                djTimerRef.current = null;
+            }
+            return;
+        }
+
+        if (djRef.current) {
+            applyStoredConfigToDJ(djRef.current);
+        }
+    }, []);
 
     // Initialize
     useEffect(() => {
@@ -173,12 +265,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         const init = async () => {
             try {
-                // 0. Check Onboarding
+                // 0. Check Onboarding & Setup Status
                 setNeedsOnboarding(!getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID));
+                setSetupStatus(computeSetupStatus());
 
                 // 1. Check for Callback Code
                 const params = new URLSearchParams(window.location.search);
                 const code = params.get('code');
+                const returnedState = params.get('state');
                 const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
 
                 if (!storedClientId) {
@@ -190,7 +284,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                 if (code) {
                     setStatus('Authenticating...');
-                    token = await SpotifyAuth.handleCallback(storedClientId, code);
+                    token = await SpotifyAuth.handleCallback(storedClientId, code, returnedState);
                     // Clear code from URL after successful handling
                     window.history.replaceState({}, document.title, window.location.pathname);
                 }
@@ -217,26 +311,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 authorizedRef.current = true;
                 setStatus('Ready');
 
-                // Prevent re-creating DJCore if it exists (though useEffect run once implies it shouldn't exist)
+                // Prevent re-creating DJCore if it exists
                 if (!djRef.current) {
                     const dj = new DJCore(token);
-
-                    // Load AI Config
-                    const openaiKey = getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '');
-                    const openaiModel = getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI);
-                    const geminiKey = getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '');
-                    const geminiModel = getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI);
-                    const selectedProvider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider) || DEFAULTS.AI_PROVIDER;
-
-                    if (selectedProvider === 'gemini' && geminiKey) {
-                        dj.initAI('gemini', geminiKey, geminiModel);
-                    } else if (selectedProvider === 'openai' && openaiKey) {
-                        dj.initAI('openai', openaiKey, openaiModel);
-                    } else {
-                        // Fallback
-                        if (openaiKey) dj.initAI('openai', openaiKey, openaiModel);
-                        else if (geminiKey) dj.initAI('gemini', geminiKey, geminiModel);
-                    }
+                    applyStoredConfigToDJ(dj);
 
                     djRef.current = dj;
                     setDjCore(dj);
@@ -246,7 +324,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             const first = tracks[0];
                             setCurrentTrack(first);
                             setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, first);
-                            setQueue(tracks.slice(1, 21));
+                            updateQueueState(tracks.slice(1, 21));
                             setIsPlaying(true);
                             lastTrackUriRef.current = tracks[0].uri;
                             lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
@@ -258,7 +336,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     // Restore Current Session Tracks if any
                     const savedSessionTracks = getStoredJSON<Track[]>(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, []);
                     if (savedSessionTracks.length > 0) {
-                        setQueue(savedSessionTracks.slice(1, 21));
+                        updateQueueState(savedSessionTracks.slice(1, 21));
                     }
 
                     // Restore Schedule
@@ -449,7 +527,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (djTimerRef.current) clearTimeout(djTimerRef.current);
             if (cleanupListeners) cleanupListeners();
         };
-    }, [syncUIState]); // Run ONCE on mount (with syncUIState stable)
+    }, [syncUIState, updateQueueState]); // Run ONCE on mount (with stable callbacks)
 
     // Handlers
     const handleNext = async () => {
@@ -460,7 +538,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 const nextTrack = queue[0];
                 setCurrentTrack(nextTrack);
                 setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, nextTrack);
-                setQueue(queue.slice(1));
+                updateQueueState(queue.slice(1));
             }
             await djRef.current.next();
             // Staggered sync to absorb Spotify API latency
@@ -500,7 +578,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const refreshDevices = async () => {
         if (djRef.current) {
             const d = await djRef.current.getDevices();
-            setDevices(d);
+            updateDevicesState(d);
         }
     };
 
@@ -531,6 +609,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         console.log("🔊 Background Keep-Alive Audio Started");
     };
 
+    const clearError = useCallback(() => setError(null), []);
+
     return (
         <PlayerContext.Provider value={{
             djCore,
@@ -553,11 +633,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             handleTogglePlay,
             handleRemoveScheduleItem,
             needsOnboarding,
+            setupStatus,
             logs: djLogs,
             error,
-            clearError: () => setError(null),
+            clearError,
             startBackgroundKeepAlive,
-            syncUIState
+            syncUIState,
+            reloadConfig
         }}>
             {children}
         </PlayerContext.Provider>

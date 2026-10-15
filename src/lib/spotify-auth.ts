@@ -1,9 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
-import { STORAGE_KEYS } from '../lib/constants';
+import { STORAGE_KEYS, SPOTIFY_AUTH_CONSTANTS } from '../lib/constants';
 import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
-
-const SPOTIFY_AUTH_URL = 'https://accounts.spotify.com/authorize';
-const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 
 interface TokenResponse {
     access_token: string;
@@ -23,21 +20,37 @@ export class SpotifyAuth {
         return '';
     }
 
-    // Generate a random string for code verifier
-    private static generateCodeVerifier(length: number) {
-        let text = '';
+    // Generate a cryptographically secure random string for PKCE code verifier
+    private static generateCodeVerifier(length: number): string {
         const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+        const randomValues = new Uint8Array(length);
+        const cryptoObj = (typeof window !== 'undefined' && window.crypto)
+            ? window.crypto
+            : globalThis.crypto;
+
+        if (typeof cryptoObj?.getRandomValues === 'function') {
+            cryptoObj.getRandomValues(randomValues);
+        } else {
+            for (let i = 0; i < length; i++) {
+                randomValues[i] = Math.floor(Math.random() * 256);
+            }
+        }
+
+        let text = '';
         for (let i = 0; i < length; i++) {
-            text += possible.charAt(Math.floor(Math.random() * possible.length));
+            text += possible.charAt(randomValues[i] % possible.length);
         }
         return text;
     }
 
     // Hash the code verifier to create code challenge
-    private static async generateCodeChallenge(codeVerifier: string) {
+    private static async generateCodeChallenge(codeVerifier: string): Promise<string> {
         const encoder = new TextEncoder();
         const data = encoder.encode(codeVerifier);
-        const digest = await window.crypto.subtle.digest('SHA-256', data);
+        const subtle = (typeof window !== 'undefined' && window.crypto?.subtle)
+            ? window.crypto.subtle
+            : globalThis.crypto.subtle;
+        const digest = await subtle.digest('SHA-256', data);
 
         // Convert array buffer to base64url string
         return btoa(String.fromCharCode(...new Uint8Array(digest)))
@@ -51,18 +64,7 @@ export class SpotifyAuth {
         const codeVerifier = this.generateCodeVerifier(128);
         const codeChallenge = await this.generateCodeChallenge(codeVerifier);
         const state = uuidv4();
-        const scope = [
-            'user-read-playback-state',
-            'user-modify-playback-state',
-            'user-read-currently-playing',
-            'streaming',
-            'app-remote-control',
-            'playlist-read-private',
-            'user-read-email',
-            'user-read-private',
-            'user-library-read',
-            'user-library-modify'
-        ].join(' ');
+        const scope = SPOTIFY_AUTH_CONSTANTS.SCOPES.join(' ');
 
         // Store verifier and state locally to verify later
         setStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER, codeVerifier);
@@ -78,12 +80,13 @@ export class SpotifyAuth {
             code_challenge: codeChallenge,
         });
 
-        window.location.href = `${SPOTIFY_AUTH_URL}?${args}`;
+        window.location.href = `${SPOTIFY_AUTH_CONSTANTS.AUTH_URL}?${args}`;
     }
 
     // Handle Callback from Spotify
-    static async handleCallback(clientId: string, code: string): Promise<string | null> {
+    static async handleCallback(clientId: string, code: string, returnedState?: string | null): Promise<string | null> {
         const codeVerifier = getStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER, '');
+        const savedState = getStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE, '');
         const redirectUri = this.getRedirectUri();
 
         if (!codeVerifier) {
@@ -91,8 +94,13 @@ export class SpotifyAuth {
             return null;
         }
 
+        if (savedState && returnedState !== undefined && returnedState !== null && savedState !== returnedState) {
+            console.error('OAuth state mismatch. Possible CSRF attempt.');
+            return null;
+        }
+
         try {
-            const response = await fetch(SPOTIFY_TOKEN_URL, {
+            const response = await fetch(SPOTIFY_AUTH_CONSTANTS.TOKEN_URL, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -116,6 +124,8 @@ export class SpotifyAuth {
 
             if (data.access_token) {
                 this.setSession(data);
+                removeStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
+                removeStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE);
                 return data.access_token;
             }
         } catch (error) {
@@ -130,7 +140,7 @@ export class SpotifyAuth {
         if (!refreshToken) return null;
 
         try {
-            const response = await fetch(SPOTIFY_TOKEN_URL, {
+            const response = await fetch(SPOTIFY_AUTH_CONSTANTS.TOKEN_URL, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',

@@ -49,6 +49,23 @@ export const PRIVACY_NOTICE = {
     JP: "安全に関わる情報 (APIキーなど) は、すべて**ご利用のブラウザ内にローカル保存**されます。応答生成の目的以外で、各AIプロバイダー (OpenAI/Google) 以外の外部サーバーに情報を送信することは一切ありません。"
 };
 
+export const SPOTIFY_AUTH_CONSTANTS = {
+    AUTH_URL: 'https://accounts.spotify.com/authorize',
+    TOKEN_URL: 'https://accounts.spotify.com/api/token',
+    SCOPES: [
+        'user-read-playback-state',
+        'user-modify-playback-state',
+        'user-read-currently-playing',
+        'streaming',
+        'app-remote-control',
+        'playlist-read-private',
+        'user-read-email',
+        'user-read-private',
+        'user-library-read',
+        'user-library-modify',
+    ],
+} as const;
+
 export const PLAYBACK_CONSTANTS = {
     UI_POLL_INTERVAL_MS: 3000,
     UI_POLL_FAST_INTERVAL_MS: 1000,
@@ -59,6 +76,6 @@ export const PLAYBACK_CONSTANTS = {
     TRACK_REMAINING_THRESHOLD_MS: 10000,
     MIN_QUEUE_SIZE_FOR_REFILL: 3,
     TRACK_SEARCH_LIMIT: 10,
-    MIN_TRACK_POPULARITY: 45,
+    PREFERRED_TRACK_POPULARITY: 15,
+    MIN_TRACK_POPULARITY: 5,
 } as const;
-

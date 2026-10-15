@@ -1,23 +1,13 @@
 import crypto from 'node:crypto';
 import readline from 'node:readline';
-import { loadConfig, saveConfig, CLIConfig } from './config';
+import { saveConfig, CLIConfig } from './config';
+import { SPOTIFY_AUTH_CONSTANTS } from '../lib/constants';
 
-const SPOTIFY_AUTH_URL = 'https://accounts.spotify.com/authorize';
-const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
+const SPOTIFY_AUTH_URL = SPOTIFY_AUTH_CONSTANTS.AUTH_URL;
+const SPOTIFY_TOKEN_URL = SPOTIFY_AUTH_CONSTANTS.TOKEN_URL;
 export const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:8888/callback';
 
-const SCOPES = [
-    'user-read-playback-state',
-    'user-modify-playback-state',
-    'user-read-currently-playing',
-    'streaming',
-    'app-remote-control',
-    'playlist-read-private',
-    'user-read-email',
-    'user-read-private',
-    'user-library-read',
-    'user-library-modify'
-].join(' ');
+const SCOPES = SPOTIFY_AUTH_CONSTANTS.SCOPES.join(' ');
 
 function generateCodeVerifier(length = 128): string {
     const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
