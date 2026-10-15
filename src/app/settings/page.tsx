@@ -4,10 +4,11 @@ import { useState } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
-import { STORAGE_KEYS, PRIVACY_NOTICE, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
+import { STORAGE_KEYS, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
 import { AIProvider } from '../../lib/types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../../lib/storage';
 import { usePlayer } from '../../context/PlayerContext';
+import PrivacyNotice from '../../components/PrivacyNotice';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
@@ -50,14 +51,12 @@ export default function Settings() {
         setStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
         setStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(aiFilteringEnabled));
 
-        // Update history if new unique entry
         if (personalPref.trim()) {
             const newHistory = [personalPref, ...prefHistory.filter(h => h !== personalPref)].slice(0, 10);
             setPrefHistory(newHistory);
             setStoredJSON(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, newHistory);
         }
 
-        // Immediately sync updated settings to PlayerContext & DJCore without requiring page reload
         reloadConfig();
 
         setStatus('Settings saved! (設定を保存しました)');
@@ -85,17 +84,7 @@ export default function Settings() {
                     href="https://github.com/mah-jp/context-dj"
                     target="_blank"
                     rel="noopener noreferrer"
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        textDecoration: 'none',
-                        color: 'var(--foreground)',
-                        fontSize: '0.9rem',
-                        marginLeft: '16px',
-                        marginTop: '4px',
-                        opacity: 0.8
-                    }}
+                    className={styles.githubLink}
                 >
                     <Github size={16} />
                     <span>View Source on GitHub</span>
@@ -107,7 +96,7 @@ export default function Settings() {
                 <div className={styles.inputGroup}>
                     <label className={styles.label}>
                         Client ID
-                        <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>クライアントID</span>
+                        <span className={styles.subLabel}>クライアントID</span>
                     </label>
                     <input
                         type="text"
@@ -117,21 +106,12 @@ export default function Settings() {
                         placeholder="Your Spotify App Client ID"
                     />
                     <p className={styles.description}>
-                        Required for playback. Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" style={{ color: 'var(--primary)' }}>developer.spotify.com</a><br />
-                        <span style={{ fontSize: '0.9em', color: '#999' }}>音楽再生に必要です。公式サイトでアプリを作成しIDを取得してください。</span>
+                        Required for playback. Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" className={styles.primaryLink}>developer.spotify.com</a><br />
+                        <span className={styles.subDescription}>音楽再生に必要です。公式サイトでアプリを作成しIDを取得してください。</span>
                     </p>
                     <button
                         onClick={handleLogout}
-                        style={{
-                            background: 'transparent',
-                            border: '1px solid #ef4444',
-                            color: '#ef4444',
-                            padding: '8px 16px',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            marginTop: '12px',
-                            fontSize: '0.85rem'
-                        }}
+                        className={styles.disconnectBtn}
                     >
                         Disconnect Spotify Session <span style={{ fontSize: '0.8em' }}>(切断)</span>
                     </button>
@@ -141,40 +121,33 @@ export default function Settings() {
             <div className={styles.section}>
                 <h2 className={styles.sectionTitle}>AI Configuration</h2>
 
-                <div style={{ padding: '12px', background: 'rgba(3, 218, 198, 0.1)', borderLeft: '4px solid #03dac6', marginBottom: '20px', borderRadius: '4px' }}>
-                    <p style={{ margin: 0, fontSize: '0.9rem', color: '#eee' }}>
-                        🔒 <b>Privacy Notice (プライバシー通知):</b><br />
-                        <span dangerouslySetInnerHTML={{ __html: PRIVACY_NOTICE.EN.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
-                        <br /><br />
-                        <span dangerouslySetInnerHTML={{ __html: PRIVACY_NOTICE.JP.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
-                    </p>
-                </div>
+                <PrivacyNotice />
 
                 <div className={styles.inputGroup}>
-                    <label className={styles.label} style={{ marginBottom: '10px', display: 'block' }}>
+                    <label className={styles.label}>
                         Select AI Provider
-                        <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>AIプロバイダーの選択</span>
+                        <span className={styles.subLabel}>AIプロバイダーの選択</span>
                     </label>
-                    <div style={{ display: 'flex', gap: '20px', marginBottom: '16px' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: '1rem' }}>
+                    <div className={styles.radioGroup}>
+                        <label className={styles.radioLabel}>
                             <input
                                 type="radio"
                                 name="aiProvider"
                                 value="openai"
                                 checked={aiProvider === 'openai'}
                                 onChange={() => setAiProvider('openai')}
-                                style={{ marginRight: '8px', accentColor: 'var(--primary)', transform: 'scale(1.2)' }}
+                                className={styles.radioInput}
                             />
                             OpenAI
                         </label>
-                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: '1rem' }}>
+                        <label className={styles.radioLabel}>
                             <input
                                 type="radio"
                                 name="aiProvider"
                                 value="gemini"
                                 checked={aiProvider === 'gemini'}
                                 onChange={() => setAiProvider('gemini')}
-                                style={{ marginRight: '8px', accentColor: 'var(--primary)', transform: 'scale(1.2)' }}
+                                className={styles.radioInput}
                             />
                             Google Gemini
                         </label>
@@ -186,7 +159,7 @@ export default function Settings() {
                         <div className={styles.inputGroup}>
                             <label className={styles.label}>
                                 OpenAI API Key
-                                <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>OpenAI APIキー</span>
+                                <span className={styles.subLabel}>OpenAI APIキー</span>
                             </label>
                             <input
                                 type="password"
@@ -196,14 +169,14 @@ export default function Settings() {
                                 placeholder="sk-..."
                             />
                             <p className={styles.description}>
-                                Create an ID at <a href="https://platform.openai.com/api-keys" target="_blank" style={{ color: 'var(--primary)' }}>platform.openai.com</a><br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>上記サイトでAPIキーを作成してください。</span>
+                                Create an ID at <a href="https://platform.openai.com/api-keys" target="_blank" className={styles.primaryLink}>platform.openai.com</a><br />
+                                <span className={styles.subDescription}>上記サイトでAPIキーを作成してください。</span>
                             </p>
                         </div>
                         <div className={styles.inputGroup}>
                             <label className={styles.label}>
                                 OpenAI Model Name
-                                <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>モデル名 (任意)</span>
+                                <span className={styles.subLabel}>モデル名 (任意)</span>
                             </label>
                             <input
                                 type="text"
@@ -214,7 +187,7 @@ export default function Settings() {
                             />
                             <p className={styles.description}>
                                 Optional. Default: {DEFAULT_MODELS.OPENAI}.<br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は {DEFAULT_MODELS.OPENAI} が使用されます。</span>
+                                <span className={styles.subDescription}>指定がない場合は {DEFAULT_MODELS.OPENAI} が使用されます。</span>
                             </p>
                         </div>
                     </>
@@ -225,7 +198,7 @@ export default function Settings() {
                         <div className={styles.inputGroup}>
                             <label className={styles.label}>
                                 Google Gemini API Key
-                                <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>Google Gemini APIキー</span>
+                                <span className={styles.subLabel}>Google Gemini APIキー</span>
                             </label>
                             <input
                                 type="password"
@@ -235,14 +208,14 @@ export default function Settings() {
                                 placeholder="AIza..."
                             />
                             <p className={styles.description}>
-                                Create an ID at <a href="https://aistudio.google.com/app/api-keys" target="_blank" style={{ color: 'var(--primary)' }}>aistudio.google.com</a><br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>上記サイトでAPIキーを作成してください。</span>
+                                Create an ID at <a href="https://aistudio.google.com/app/api-keys" target="_blank" className={styles.primaryLink}>aistudio.google.com</a><br />
+                                <span className={styles.subDescription}>上記サイトでAPIキーを作成してください。</span>
                             </p>
                         </div>
                         <div className={styles.inputGroup}>
                             <label className={styles.label}>
                                 Gemini Model Name
-                                <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>モデル名 (任意)</span>
+                                <span className={styles.subLabel}>モデル名 (任意)</span>
                             </label>
                             <input
                                 type="text"
@@ -252,8 +225,8 @@ export default function Settings() {
                                 placeholder={DEFAULT_MODELS.GEMINI}
                             />
                             <p className={styles.description}>
-                                Optional. Default: {DEFAULT_MODELS.GEMINI}. See <a href="https://ai.google.dev/models/gemini" target="_blank" style={{ color: 'var(--primary)' }}>Gemini Models</a>.<br />
-                                <span style={{ fontSize: '0.9em', color: '#999' }}>指定がない場合は {DEFAULT_MODELS.GEMINI} が使用されます。</span>
+                                Optional. Default: {DEFAULT_MODELS.GEMINI}. See <a href="https://ai.google.dev/models/gemini" target="_blank" className={styles.primaryLink}>Gemini Models</a>.<br />
+                                <span className={styles.subDescription}>指定がない場合は {DEFAULT_MODELS.GEMINI} が使用されます。</span>
                             </p>
                         </div>
                     </>
@@ -265,13 +238,12 @@ export default function Settings() {
                 <div className={styles.inputGroup}>
                     <label className={styles.label}>
                         Recognition Language
-                        <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>音声認識の言語</span>
+                        <span className={styles.subLabel}>音声認識の言語</span>
                     </label>
                     <select
-                        className={styles.input}
+                        className={`${styles.input} ${styles.selectInput}`}
                         value={voiceLang}
                         onChange={(e) => setVoiceLang(e.target.value)}
-                        style={{ appearance: 'auto', cursor: 'pointer' }}
                     >
                         <option value="ja-JP">Japanese (日本語)</option>
                         <option value="en-US">English (US)</option>
@@ -284,7 +256,7 @@ export default function Settings() {
                     </select>
                     <p className={styles.description}>
                         Select the language for voice input. Default: Browser/OS setting if available, otherwise Japanese.<br />
-                        <span style={{ fontSize: '0.9em', color: '#999' }}>音声入力で使用する言語を選択してください。</span>
+                        <span className={styles.subDescription}>音声入力で使用する言語を選択してください。</span>
                     </p>
                 </div>
             </div>
@@ -292,45 +264,22 @@ export default function Settings() {
             <div className={styles.section}>
                 <h2 className={styles.sectionTitle}>
                     Personal Preferences
-                    <span style={{ display: 'block', fontSize: '0.6em', fontWeight: 'normal', color: '#888', marginTop: '4px' }}>個人の好み・設定 (Personal Preferences)</span>
+                    <span className={styles.sectionSubTitle}>個人の好み・設定 (Personal Preferences)</span>
                 </h2>
-                <div className={styles.inputGroup} style={{ position: 'relative' }}>
+                <div className={styles.inputGroup}>
                     <label className={styles.label}>
                         Universal Style Instructions
-                        <span style={{ display: 'block', fontSize: '0.8em', fontWeight: 'normal', color: '#888' }}>共通スタイル指示 (毎回AIへの指示に追加されます)</span>
+                        <span className={styles.subLabel}>共通スタイル指示 (毎回AIへの指示に追加されます)</span>
                         <button
                             onClick={() => setShowPrefHistory(!showPrefHistory)}
-                            style={{
-                                position: 'absolute',
-                                right: 0,
-                                top: 0,
-                                background: 'transparent',
-                                border: '1px solid var(--primary)',
-                                color: 'var(--primary)',
-                                borderRadius: '4px',
-                                fontSize: '0.7em',
-                                padding: '2px 8px',
-                                cursor: 'pointer'
-                            }}
+                            className={styles.historyToggleBtn}
                         >
                             History (履歴)
                         </button>
                     </label>
 
                     {showPrefHistory && prefHistory.length > 0 && (
-                        <div style={{
-                            position: 'absolute',
-                            top: '50px',
-                            right: 0,
-                            left: 0,
-                            background: '#282828',
-                            zIndex: 100,
-                            border: '1px solid #444',
-                            borderRadius: '4px',
-                            boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-                            maxHeight: '200px',
-                            overflowY: 'auto'
-                        }}>
+                        <div className={styles.prefHistoryDropdown}>
                             {prefHistory.map((h, i) => (
                                 <div
                                     key={`${h}-${i}`}
@@ -338,13 +287,7 @@ export default function Settings() {
                                         setPersonalPref(h);
                                         setShowPrefHistory(false);
                                     }}
-                                    style={{
-                                        padding: '8px',
-                                        borderBottom: '1px solid #333',
-                                        cursor: 'pointer',
-                                        fontSize: '0.9rem'
-                                    }}
-                                    className="history-item"
+                                    className={styles.prefHistoryItem}
                                 >
                                     {h.slice(0, 60)}...
                                 </div>
@@ -353,15 +296,14 @@ export default function Settings() {
                     )}
 
                     <textarea
-                        className={styles.input}
+                        className={`${styles.input} ${styles.textareaInput}`}
                         value={personalPref}
                         onChange={(e) => setPersonalPref(e.target.value)}
                         placeholder="e.g. I generally prefer 90s rock. I love live recordings. / 例: 基本的に90年代ロックが好き。ライブ音源は大好きです。"
-                        style={{ height: '80px', resize: 'vertical' }}
                     />
                     <p className={styles.description}>
                         These preferences will be appended to the AI prompt as high-priority instructions for every request.<br />
-                        <span style={{ fontSize: '0.9em', color: '#999' }}>ここで設定した内容は、AIへのリクエストの際に「最優先の指示」として常に追加されます。</span>
+                        <span className={styles.subDescription}>ここで設定した内容は、AIへのリクエストの際に「最優先の指示」として常に追加されます。</span>
                     </p>
                 </div>
             </div>
@@ -369,16 +311,16 @@ export default function Settings() {
             <div className={styles.section}>
                 <h2 className={styles.sectionTitle}>
                     Experimental Features
-                    <span style={{ display: 'block', fontSize: '0.6em', fontWeight: 'normal', color: '#888', marginTop: '4px' }}>実験的機能</span>
+                    <span className={styles.sectionSubTitle}>実験的機能</span>
                 </h2>
 
                 <div className={styles.inputGroup}>
-                    <label className={styles.label} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                    <label className={styles.checkboxLabel}>
                         <input
                             type="checkbox"
                             checked={aiFilteringEnabled}
                             onChange={(e) => setAiFilteringEnabled(e.target.checked)}
-                            style={{ marginRight: '10px', width: '20px', height: '20px', accentColor: 'var(--primary)' }}
+                            className={styles.checkboxInput}
                         />
                         <span>
                             AI Filtering / Smart Selection (AIによる選曲フィルタリング)
@@ -386,16 +328,16 @@ export default function Settings() {
                     </label>
                     <p className={styles.description}>
                         Uses AI to verify if searched tracks match your request. Improves quality but adds about 30 seconds delay to search.<br />
-                        <span style={{ fontSize: '0.9em', color: '#999' }}>検索された曲がリクエストに合っているかAIが判定し、無関係な曲を除外します。精度が向上しますが、検索時に約30秒の待ち時間が発生します。</span>
+                        <span className={styles.subDescription}>検索された曲がリクエストに合っているかAIが判定し、無関係な曲を除外します。精度が向上しますが、検索時に約30秒の待ち時間が発生します。</span>
                     </p>
                 </div>
                 <div className={styles.inputGroup}>
-                    <label className={styles.label} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                    <label className={styles.checkboxLabel}>
                         <input
                             type="checkbox"
                             checked={backgroundKeepAlive}
                             onChange={(e) => setBackgroundKeepAlive(e.target.checked)}
-                            style={{ marginRight: '10px', width: '20px', height: '20px', accentColor: 'var(--primary)' }}
+                            className={styles.checkboxInput}
                         />
                         <span>
                             Run in Background (Keep Alive)
@@ -406,7 +348,7 @@ export default function Settings() {
                         <br />
                         <b>Warning:</b> This may stop music playback if you are listening on the <b>same device</b> (due to Audio Focus). Recommended only when controlling a separate device (PC, Alexa, etc).
                         <br />
-                        <span style={{ fontSize: '0.9em', color: '#999' }}>
+                        <span className={styles.subDescription}>
                             画面消灯時もアプリを動作させ続けるため、無音の音声をループ再生します。<br />
                             <b>注意:</b> <b>同じ端末</b>で音楽を聴いている場合、再生が止まることがあります (オーディオ権限の競合)。PCやスマートスピーカーを操作する場合にのみ推奨します。
                         </span>
@@ -419,9 +361,9 @@ export default function Settings() {
                 <div className={styles.inputGroup}>
                     <p className={styles.description}>
                         Manage your locally stored history data.<br />
-                        <span style={{ fontSize: '0.9em', color: '#999' }}>ブラウザに保存された履歴データを管理します。</span>
+                        <span className={styles.subDescription}>ブラウザに保存された履歴データを管理します。</span>
                     </p>
-                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <div className={styles.dangerButtonGroup}>
                         <button
                             onClick={() => {
                                 if (confirm('Are you sure you want to clear the main chat prompt history?\n(チャット履歴を削除しますか？)')) {
@@ -430,16 +372,7 @@ export default function Settings() {
                                     setTimeout(() => setStatus(''), 3000);
                                 }
                             }}
-                            style={{
-                                background: '#ef4444',
-                                color: 'white',
-                                border: 'none',
-                                padding: '10px 16px',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontSize: '0.9rem',
-                                marginTop: '8px'
-                            }}
+                            className={styles.dangerBtn}
                         >
                             Clear Chat History<br />
                             <span style={{ fontSize: '0.8em' }}>(チャット履歴削除)</span>
@@ -454,16 +387,7 @@ export default function Settings() {
                                     setTimeout(() => setStatus(''), 3000);
                                 }
                             }}
-                            style={{
-                                background: '#dc2626',
-                                color: 'white',
-                                border: 'none',
-                                padding: '10px 16px',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontSize: '0.9rem',
-                                marginTop: '8px'
-                            }}
+                            className={`${styles.dangerBtn} ${styles.dangerBtnDark}`}
                         >
                             Clear Preferences History<br />
                             <span style={{ fontSize: '0.8em' }}>(設定履歴削除)</span>
@@ -472,17 +396,17 @@ export default function Settings() {
                 </div>
             </div>
 
-            <div style={{ minHeight: '1.5em', marginBottom: '8px', textAlign: 'center', fontWeight: 'bold' }}>
-                {status && <span style={{ color: 'var(--primary)' }}>{status}</span>}
+            <div className={styles.statusArea}>
+                {status && <span>{status}</span>}
             </div>
 
             <button className={styles.saveBtn} onClick={handleSave}>
                 Save Configuration <span style={{ fontSize: '0.8em', marginLeft: '4px' }}>(保存)</span>
             </button>
 
-            <div style={{ marginTop: '32px', color: '#444', fontSize: '0.75rem', textAlign: 'center' }}>
+            <div className={styles.footerVersion}>
                 ContextDJ v{process.env.NEXT_PUBLIC_APP_VERSION}
             </div>
-        </div >
+        </div>
     );
 }

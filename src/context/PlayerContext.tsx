@@ -6,6 +6,7 @@ import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
 import { AIProvider, ScheduleItem, Track } from '../lib/types';
 import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
 
 interface SetupStatus {
     hasClientId: boolean;
@@ -123,9 +124,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [error, setError] = useState<string | null>(null);
 
     const djRef = useRef<DJCore | null>(null);
-    const authorizedRef = useRef(false);
-    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const djTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
     const lastTrackUriRef = useRef<string | null>(null);
     const lastDevicesFetchRef = useRef<number>(0);
@@ -151,7 +149,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setDevices(nextDevices);
     }, []);
 
-    // Helper to sync UI with DJ Core state (stable reference to prevent re-running initialization effect)
     const syncUIState = useCallback(async (options?: { forceAll?: boolean }) => {
         if (!djRef.current) return null;
         const forceAll = options?.forceAll ?? false;
@@ -169,8 +166,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastTrackUriRef.current = currentTrackUri;
             }
 
-            // 2. Conditionally fetch Queue:
-            // Fetch when track changed, on forceAll, when queue is empty, or when a new playback was initiated!
+            // 2. Conditionally fetch Queue
             const lastPlayTime = typeof djRef.current.getLastPlayTime === 'function' ? djRef.current.getLastPlayTime() : 0;
             const newPlayOccurred = lastPlayTime > lastQueueSyncPlayTimeRef.current;
             const shouldFetchQueue = forceAll || trackChanged || queueLengthRef.current === 0 || newPlayOccurred;
@@ -179,8 +175,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 queuePromise = djRef.current.getQueue(currentTrackItem);
             }
 
-            // 3. Conditionally fetch Devices:
-            // Only fetch when forced, on initial fetch, or after DEVICE_REFRESH_INTERVAL_MS (30s)
+            // 3. Conditionally fetch Devices
             const now = Date.now();
             const shouldFetchDevices = forceAll || devicesRef.current.length === 0 ||
                 (now - lastDevicesFetchRef.current > PLAYBACK_CONSTANTS.DEVICE_REFRESH_INTERVAL_MS);
@@ -190,7 +185,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastDevicesFetchRef.current = now;
             }
 
-            // Resolve promises
             if (queuePromise) {
                 const currentQ = await queuePromise;
                 updateQueueState(currentQ.slice(0, 20));
@@ -204,7 +198,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             }
 
             // Determine Device Name
-            // Priority: 1. Playback State Device, 2. Active Device in List, 3. Empty
             let activeDeviceName = '';
             if (playbackState && playbackState.device) {
                 activeDeviceName = playbackState.device.name;
@@ -260,7 +253,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         if (!storedClientId) {
             setAuthorized(false);
-            authorizedRef.current = false;
             setStatus('Please configure settings first.');
             return;
         }
@@ -268,16 +260,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         const isAuth = SpotifyAuth.isAuthenticated();
         if (!isAuth) {
             setAuthorized(false);
-            authorizedRef.current = false;
             setStatus('connect_needed');
-            if (timerRef.current) {
-                clearTimeout(timerRef.current);
-                timerRef.current = null;
-            }
-            if (djTimerRef.current) {
-                clearTimeout(djTimerRef.current);
-                djTimerRef.current = null;
-            }
             return;
         }
 
@@ -286,18 +269,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
     }, []);
 
-    // Initialize
+    // Initialize Auth & DJCore
     useEffect(() => {
-        let cleanupListeners: (() => void) | null = null;
         let isCancelled = false;
 
         const init = async () => {
             try {
-                // 0. Check Onboarding & Setup Status
                 setNeedsOnboarding(!getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID));
                 setSetupStatus(computeSetupStatus());
 
-                // 1. Check for Callback Code
                 const params = new URLSearchParams(window.location.search);
                 const code = params.get('code');
                 const returnedState = params.get('state');
@@ -313,14 +293,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (code) {
                     setStatus('Authenticating...');
                     token = await SpotifyAuth.handleCallback(storedClientId, code, returnedState);
-                    // Clear code from URL after successful handling
                     window.history.replaceState({}, document.title, window.location.pathname);
                 }
 
                 if (isCancelled) return;
 
                 if (!token || !SpotifyAuth.isAuthenticated()) {
-                    // Try refreshing token
                     const newToken = await SpotifyAuth.refreshToken(storedClientId);
                     if (isCancelled) return;
                     if (newToken) {
@@ -334,12 +312,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                 if (isCancelled) return;
 
-                // 2. Initialize DJ Core
                 setAuthorized(true);
-                authorizedRef.current = true;
                 setStatus('Ready');
 
-                // Prevent re-creating DJCore if it exists
                 if (!djRef.current) {
                     const dj = new DJCore(token);
                     applyStoredConfigToDJ(dj);
@@ -356,18 +331,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             setIsPlaying(true);
                             lastTrackUriRef.current = tracks[0].uri;
                             lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
-                            // Schedule a synced refresh after Spotify digest time (1.5s)
                             setTimeout(() => syncUIState({ forceAll: true }), 1500);
                         }
                     });
 
-                    // Restore Current Session Tracks if any
                     const savedSessionTracks = getStoredJSON<Track[]>(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, []);
                     if (savedSessionTracks.length > 0) {
                         updateQueueState(savedSessionTracks.slice(1, 21));
                     }
 
-                    // Restore Schedule
                     const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
                     if (savedSchedule.length > 0) {
                         setSchedule(savedSchedule);
@@ -378,146 +350,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                         }
                     }
                 }
-
-                // 3. Start Separate Loops (UI & DJ Logic)
-                if (timerRef.current) clearTimeout(timerRef.current);
-                if (djTimerRef.current) clearTimeout(djTimerRef.current);
-
-                const checkAndRefreshToken = async () => {
-                    if (!authorizedRef.current || !djRef.current) return;
-                    const expiresAtStr = getStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
-                    if (expiresAtStr) {
-                        const expiresAt = parseInt(expiresAtStr);
-                        if (Date.now() > expiresAt - PLAYBACK_CONSTANTS.TOKEN_REFRESH_BUFFER_MS) {
-                            const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-                            if (clientId) {
-                                try {
-                                    const refreshedToken = await SpotifyAuth.refreshToken(clientId);
-                                    if (refreshedToken && djRef.current && !isCancelled) {
-                                        djRef.current.updateAccessToken(refreshedToken);
-                                        console.log("🔑 Proactive token refresh succeeded");
-                                    }
-                                } catch (e) {
-                                    console.error("Token Refresh Failed:", e);
-                                }
-                            }
-                        }
-                    }
-                };
-
-                // --- UI Loop (High Priority, Suspended when Backgrounded) ---
-                const runUILoop = async () => {
-                    if (isCancelled) return;
-
-                    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-                        timerRef.current = null;
-                        return;
-                    }
-
-                    let nextDelay: number = PLAYBACK_CONSTANTS.UI_POLL_INTERVAL_MS;
-
-                    try {
-                        if (djRef.current) {
-                            const playbackState = await syncUIState();
-
-                            if (playbackState && playbackState.is_playing && playbackState.item && playbackState.item.duration_ms && playbackState.progress_ms) {
-                                const remaining = playbackState.item.duration_ms - playbackState.progress_ms;
-                                if (remaining < PLAYBACK_CONSTANTS.TRACK_REMAINING_THRESHOLD_MS) {
-                                    nextDelay = PLAYBACK_CONSTANTS.UI_POLL_FAST_INTERVAL_MS;
-                                }
-                            }
-                        }
-                    } catch (loopError) {
-                        console.error("Error in UI Loop:", loopError);
-                    }
-
-                    if (isCancelled) return;
-
-                    await checkAndRefreshToken();
-
-                    if (!isCancelled && typeof document !== 'undefined' && document.visibilityState !== 'hidden') {
-                        timerRef.current = setTimeout(runUILoop, nextDelay);
-                    } else {
-                        timerRef.current = null;
-                    }
-                };
-
-                // --- DJ Logic Loop (AI, Heavy Process, Throttled in Background) ---
-                const runDJLoop = async () => {
-                    if (isCancelled) return;
-
-                    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
-                    const nextDelay: number = isHidden
-                        ? PLAYBACK_CONSTANTS.DJ_LOOP_BACKGROUND_INTERVAL_MS
-                        : PLAYBACK_CONSTANTS.DJ_LOOP_INTERVAL_MS;
-
-                    try {
-                        if (djRef.current) {
-                            const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
-                            djRef.current.updateConfig({
-                                aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
-                            });
-
-                            await djRef.current.processDJLoop();
-                        }
-                    } catch (djLoopError: unknown) {
-                        console.error("Error in DJ Loop:", djLoopError);
-                        const msg = djLoopError instanceof Error ? djLoopError.message : "Unknown background error";
-                        setError(prev => prev === msg ? prev : msg);
-                    }
-
-                    if (isCancelled) return;
-
-                    if (isHidden) {
-                        await checkAndRefreshToken();
-                    }
-
-                    if (!isCancelled) {
-                        djTimerRef.current = setTimeout(runDJLoop, nextDelay);
-                    }
-                };
-
-                runUILoop();
-                runDJLoop();
-
-                const handleVisibilityChange = () => {
-                    if (isCancelled || !authorizedRef.current || !djRef.current) return;
-
-                    if (document.visibilityState === 'visible') {
-                        console.log("📱 App visible: immediately syncing UI and resuming loops");
-                        checkAndRefreshToken();
-                        syncUIState({ forceAll: true });
-
-                        if (timerRef.current) clearTimeout(timerRef.current);
-                        if (djTimerRef.current) clearTimeout(djTimerRef.current);
-                        runUILoop();
-                        runDJLoop();
-                    } else {
-                        console.log("💤 App backgrounded: suspending UI polling, throttling DJ loop to save battery");
-                        if (timerRef.current) {
-                            clearTimeout(timerRef.current);
-                            timerRef.current = null;
-                        }
-                        if (djTimerRef.current) {
-                            clearTimeout(djTimerRef.current);
-                            djTimerRef.current = setTimeout(runDJLoop, PLAYBACK_CONSTANTS.DJ_LOOP_BACKGROUND_INTERVAL_MS);
-                        }
-                    }
-                };
-
-                const handleFocus = () => {
-                    if (document.visibilityState === 'visible' && !timerRef.current && authorizedRef.current && djRef.current) {
-                        handleVisibilityChange();
-                    }
-                };
-
-                document.addEventListener('visibilitychange', handleVisibilityChange);
-                window.addEventListener('focus', handleFocus);
-
-                cleanupListeners = () => {
-                    document.removeEventListener('visibilitychange', handleVisibilityChange);
-                    window.removeEventListener('focus', handleFocus);
-                };
             } catch (initError: unknown) {
                 if (isCancelled) return;
                 console.error("Fatal initialization error:", initError);
@@ -530,11 +362,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         return () => {
             isCancelled = true;
-            if (timerRef.current) clearTimeout(timerRef.current);
-            if (djTimerRef.current) clearTimeout(djTimerRef.current);
-            if (cleanupListeners) cleanupListeners();
         };
     }, [syncUIState, updateQueueState]);
+
+    const handleLoopError = useCallback((msg: string) => {
+        setError(prev => (prev === msg ? prev : msg));
+    }, []);
+
+    // Manage decoupled UI polling & DJ background loops
+    useDJPollingLoops({
+        authorized,
+        djCore,
+        syncUIState,
+        onError: handleLoopError,
+    });
 
     // Memoized Handlers
     const startBackgroundKeepAlive = useCallback(() => {
