@@ -35,5 +35,6 @@
     "tsx": "^4.23.15",
     "typescript": "^5",
     "wrangler": "^4.112.0"
-  }
+  },
+  "packageManager": "yarn@4.18.1"
 }
