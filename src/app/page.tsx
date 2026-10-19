@@ -5,7 +5,7 @@ import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { Send, History, Loader, Settings, Mic, MicOff, Quote, XCircle, CheckCircle, Info, Camera } from 'lucide-react';
-import { usePlayer } from '../context/PlayerContext';
+import { usePlayerPlayback, usePlayerQueueSchedule, usePlayerActions } from '../context/PlayerContext';
 import PlayerBar from '../components/PlayerBar';
 import ProcessLogViewer from '../components/ProcessLogViewer';
 import ScheduleSidebar from '../components/ScheduleSidebar';
@@ -19,25 +19,30 @@ import { useVisionInput } from '../hooks/useVisionInput';
 
 export default function Home() {
   const {
-    djCore,
-    authorized,
     status,
-    setStatus,
     currentTrack,
+    currentQuery,
+    deviceName,
+    error,
+  } = usePlayerPlayback();
+
+  const {
     schedule,
     setSchedule,
-    currentQuery,
     queue,
     handleRemoveScheduleItem,
+  } = usePlayerQueueSchedule();
+
+  const {
+    djCore,
+    authorized,
+    setStatus,
     needsOnboarding,
     setupStatus,
-    deviceName,
-    logs,
-    error,
     clearError,
     startBackgroundKeepAlive,
     syncUIState,
-  } = usePlayer();
+  } = usePlayerActions();
 
   const [inputText, setInputText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -134,21 +139,18 @@ export default function Home() {
         setStatus('⚠️ No schedule created. (作成失敗)');
       } else {
         setSchedule(schedule);
-        setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, schedule);
         setStatus('🔎 Curating & preparing tracks... (楽曲を選曲・準備中...)');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
 
-        // Trigger immediate check & play with force=true
+        // Trigger immediate check & play with force=true (onTracksPlayed initiates convergence backoff sync)
         await djCore.processDJLoop(false, true);
         setStatus('Ready');
 
-        // Explicitly sync UI immediately and after device buffer
         await syncUIState({ forceAll: true });
-        setTimeout(() => syncUIState({ forceAll: true }), 1500);
-        setTimeout(() => syncUIState({ forceAll: true }), 3500);
       }
 
     } catch (e: unknown) {
+
       console.error(e);
       const errorMsg = e instanceof Error ? e.message : "Failed to contact AI";
       setStatus(`⚠️ ${errorMsg}`);
@@ -371,7 +373,7 @@ export default function Home() {
 
       {/* Log Viewer Modal */}
       {showLogs && (
-        <ProcessLogViewer logs={logs} onClose={() => setShowLogs(false)} />
+        <ProcessLogViewer onClose={() => setShowLogs(false)} />
       )}
 
       {/* Toast Notification */}

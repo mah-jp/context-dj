@@ -21,7 +21,7 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
                     <div
                         key={`${item.start}-${item.end}-${i}`}
                         className={`${styles.scheduleItem} ${past ? styles.pastItem : ''}`}
-                        onClick={() => past && onRecallItem(item)}
+                        onClick={() => onRecallItem(item)}
                         style={{
                             position: 'relative',
                             display: 'flex',
@@ -30,10 +30,10 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
                             borderLeft: isActive ? '3px solid var(--primary)' : '3px solid transparent',
                             background: isActive ? 'rgba(3, 218, 198, 0.05)' : undefined,
                             opacity: past ? 0.5 : 1,
-                            cursor: past ? 'pointer' : 'default',
+                            cursor: 'pointer',
                             transition: 'all 0.2s'
                         }}
-                        title={past ? "Click to recall this context / クリックでこの文脈を再利用" : undefined}
+                        title="Click to recall this context / クリックでこの文脈を再利用"
                     >
                         <div style={{ flex: 1, marginRight: '8px' }}>
                             <div className={styles.scheduleTime} style={{ color: isActive ? 'var(--primary)' : undefined }}>{item.start} - {item.end}</div>

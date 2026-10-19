@@ -3,6 +3,7 @@ import { DJCore, Track } from '../lib/dj-core';
 import { ScheduleItem } from '../lib/types';
 import { CLIConfig, loadConfig, saveConfig } from './config';
 import { getValidSpotifyToken } from './auth';
+import { PlaybackConvergenceController } from '../lib/playback-sync';
 
 export interface DJRunnerState {
     status: string;
@@ -24,6 +25,7 @@ export class DJRunner {
     private listeners = new Set<StateListener>();
     private loopTimer: NodeJS.Timeout | null = null;
     private pollTimer: NodeJS.Timeout | null = null;
+    private convergence = new PlaybackConvergenceController();
     private isProcessing = false;
 
     private constructor(config: CLIConfig, token: string) {
@@ -155,7 +157,7 @@ export class DJRunner {
         }
     }
 
-    async pollPlayback() {
+    async pollPlayback(): Promise<SpotifyApi.CurrentPlaybackResponse | null> {
         try {
             const playback = await this.djCore.getPlaybackState();
             const track = (playback?.item as Track) || null;
@@ -167,8 +169,10 @@ export class DJRunner {
                 currentThought: djStatus.currentThought || this.state.currentThought,
                 logs: this.djCore.getProcessLog(),
             });
+            return playback;
         } catch {
             // Ignore minor transient poll errors
+            return null;
         }
     }
 
@@ -193,6 +197,7 @@ export class DJRunner {
     }
 
     stopAutoLoop() {
+        this.convergence.cancel();
         if (this.loopTimer) {
             clearInterval(this.loopTimer);
             this.loopTimer = null;
@@ -210,13 +215,23 @@ export class DJRunner {
 
     // Playback control delegates
     async pause() {
-        await this.djCore.pause();
-        await this.pollPlayback();
+        const res = await this.djCore.pause();
+        if (res.ok) {
+            await this.convergence.syncUntilConverged(
+                { expectedIsPlaying: false },
+                () => this.pollPlayback()
+            );
+        }
     }
 
     async resume() {
-        await this.djCore.resume();
-        await this.pollPlayback();
+        const res = await this.djCore.resume();
+        if (res.ok) {
+            await this.convergence.syncUntilConverged(
+                { expectedIsPlaying: true },
+                () => this.pollPlayback()
+            );
+        }
     }
 
     async togglePlay() {
@@ -228,14 +243,29 @@ export class DJRunner {
     }
 
     async next() {
-        await this.djCore.next();
-        await new Promise((r) => setTimeout(r, 600));
-        await this.pollPlayback();
+        const departedUri = this.state.currentTrack?.uri || null;
+        const res = await this.djCore.next();
+        if (res.ok) {
+            await this.convergence.syncUntilConverged(
+                { departedTrackUri: departedUri },
+                () => this.pollPlayback()
+            );
+        }
     }
 
     async previous() {
-        await this.djCore.previous();
-        await new Promise((r) => setTimeout(r, 600));
-        await this.pollPlayback();
+        const departedUri = this.state.currentTrack?.uri || null;
+        const departedProgressMs = this.state.playbackState?.progress_ms ?? null;
+        const res = await this.djCore.previous();
+        if (res.ok) {
+            await this.convergence.syncUntilConverged(
+                {
+                    departedTrackUri: departedUri,
+                    departedProgressMs,
+                    allowSameTrackRewind: true,
+                },
+                () => this.pollPlayback()
+            );
+        }
     }
 }

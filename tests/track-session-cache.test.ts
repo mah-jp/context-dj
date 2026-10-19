@@ -90,4 +90,22 @@ describe('TrackSessionCache', () => {
         assert.strictEqual(enriched.vibeTag, '#CityPop');
         assert.strictEqual(enriched.stage, 'peak');
     });
+
+    it('returns empty array from getSessionTracksFromCurrent when activeTrack is external and clears session tracks cleanly', () => {
+        const cache = new TrackSessionCache();
+        const t1 = makeTrack({ id: '1', uri: 'spotify:track:1', name: 'Song 1', artistName: 'Artist 1' });
+        const t2 = makeTrack({ id: '2', uri: 'spotify:track:2', name: 'Song 2', artistName: 'Artist 2' });
+        const external = makeTrack({ id: 'ext', uri: 'spotify:track:ext', name: 'External Song', artistName: 'Other Artist' });
+
+        cache.setSessionTracks([t1, t2], true);
+        assert.strictEqual(cache.getSessionTracksFromCurrent(t1).length, 1);
+        assert.strictEqual(cache.getSessionTracksFromCurrent(t1)[0].id, '2');
+
+        // External track not in session -> must return [] instead of stale slice(1)
+        assert.deepStrictEqual(cache.getSessionTracksFromCurrent(external), []);
+
+        cache.clearSessionTracks(true);
+        assert.deepStrictEqual(cache.getSessionTracks(), []);
+        assert.strictEqual(store['dj_current_session_tracks'], undefined);
+    });
 });

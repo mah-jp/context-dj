@@ -75,8 +75,10 @@ export default function QueueList({
                                 key={track.uri || track.id || `queue-${i}`}
                                 className={styles.queueItem}
                                 onClick={() => {
-                                    const tracksToPlay = queue.slice(i);
-                                    djCore?.playTracks(tracksToPlay);
+                                    if (!djCore) return;
+                                    djCore.playFromQueueIndex(i, queue).catch((err) => {
+                                        console.error('Failed to play selected queue track:', err);
+                                    });
                                 }}
                             >
                                 <div className={styles.queueIndex}>{i + 1}</div>

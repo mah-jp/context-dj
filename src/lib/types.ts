@@ -40,6 +40,63 @@ export interface DJConfig {
     aiFiltering: boolean;
 }
 
+export interface SearchPipelineContext {
+    userRequest?: string;
+    thought?: string;
+    anchorTracks?: string[];
+}
+
+// Spotify Queue API Types (/v1/me/player/queue)
+export interface SpotifyNonTrackQueueItem {
+    type?: string;
+    id?: string;
+    uri?: string;
+    name?: string;
+}
+
+export type SpotifyQueueItem = Track | SpotifyNonTrackQueueItem;
+
+export interface SpotifyQueueResponse {
+    currently_playing: Track | null;
+    queue: Track[];
+}
+
+// Granular Spotify API Error Classification
+export type SpotifyErrorCategory =
+    | 'auth_expired'       // 401 Unauthorized
+    | 'forbidden'          // 403 Forbidden (Premium required / device restriction)
+    | 'device_not_found'   // 404 Not Found (Device asleep / inactive)
+    | 'rate_limited'       // 429 Too Many Requests
+    | 'network_or_server'; // 5xx or network error
+
+export interface SpotifyApiErrorInfo {
+    status?: number;
+    category: SpotifyErrorCategory;
+    operation: string;
+    message: string;
+    retryAfterSeconds?: number;
+}
+
+export interface SpotifyControlResult {
+    ok: boolean;
+    status?: number;
+    error?: SpotifyApiErrorInfo;
+}
+
+// DJCore Subscription / Event Types
+export interface DJStateSnapshot {
+    status: string;
+    schedule: ScheduleItem[];
+    currentQuery: string | null;
+    currentThought: string | null;
+    logs: string[];
+    lastError: string | null;
+}
+
+export type DJStateListener = (snapshot: DJStateSnapshot) => void;
+export type DJLogListener = (logs: string[]) => void;
+export type DJErrorListener = (errorMessage: string, errorInfo?: SpotifyApiErrorInfo) => void;
+
 // Web Speech API Types
 export interface SpeechRecognitionAlternative {
     readonly transcript: string;
@@ -86,4 +143,13 @@ declare global {
         SpeechRecognition?: ISpeechRecognitionConstructor;
         webkitSpeechRecognition?: ISpeechRecognitionConstructor;
     }
+
+    // eslint-disable-next-line @typescript-eslint/no-namespace
+    namespace SpotifyApi {
+        interface CurrentPlaybackResponse {
+            currently_playing_type?: 'track' | 'episode' | 'ad' | 'unknown' | string;
+            __optimisticFallback?: boolean;
+        }
+    }
 }
+

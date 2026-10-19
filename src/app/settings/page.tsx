@@ -7,12 +7,13 @@ import { SpotifyAuth } from '../../lib/spotify-auth';
 import { STORAGE_KEYS, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
 import { AIProvider } from '../../lib/types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../../lib/storage';
-import { usePlayer } from '../../context/PlayerContext';
+import { usePlayerActions } from '../../context/PlayerContext';
 import PrivacyNotice from '../../components/PrivacyNotice';
 import { ArrowLeft, Github } from 'lucide-react';
 
 export default function Settings() {
-    const { reloadConfig } = usePlayer();
+    const { reloadConfig } = usePlayerActions();
+
 
     const [spotifyClientId, setSpotifyClientId] = useState(() => getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, ''));
     const [openAiKey, setOpenAiKey] = useState(() => getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, ''));

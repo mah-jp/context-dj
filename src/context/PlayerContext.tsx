@@ -4,46 +4,68 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
-import { AIProvider, ScheduleItem, Track } from '../lib/types';
-import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+import { AIProvider, ScheduleItem, SpotifyApiErrorInfo, Track } from '../lib/types';
+import { getStorageItem, getStoredJSON } from '../lib/storage';
 import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
+import { PlaybackConvergenceController } from '../lib/playback-sync';
+import { generateTrackKey } from '../lib/dj-utils';
 
-interface SetupStatus {
+export interface SetupStatus {
     hasClientId: boolean;
     hasAiKey: boolean;
 }
 
-interface PlayerContextType {
-    djCore: DJCore | null;
-    authorized: boolean;
+export interface PlayerLogsContextType {
+    logs: string[];
+}
+
+export interface PlayerQueueScheduleContextType {
+    queue: Track[];
+    schedule: ScheduleItem[];
+    setSchedule: (s: ScheduleItem[]) => void;
+    handleRemoveScheduleItem: (index: number) => void;
+}
+
+export interface PlayerPlaybackContextType {
     status: string;
-    setStatus: (s: string) => void;
     currentTrack: Track | null;
     isPlaying: boolean;
     deviceName: string;
-    schedule: ScheduleItem[];
-    setSchedule: (s: ScheduleItem[]) => void;
+    devices: SpotifyApi.UserDevice[];
     currentQuery: string | null;
     currentThought: string | null;
-    queue: Track[];
-    devices: SpotifyApi.UserDevice[];
+    error: string | null;
+}
+
+export interface PlayerActionsContextType {
+    djCore: DJCore | null;
+    authorized: boolean;
+    needsOnboarding: boolean;
+    setupStatus: SetupStatus;
+    setStatus: (s: string) => void;
+    setSchedule: (s: ScheduleItem[]) => void;
     refreshDevices: () => Promise<void>;
     setDevice: (deviceId: string) => Promise<void>;
     handleNext: () => Promise<void>;
     handlePrev: () => Promise<void>;
     handleTogglePlay: () => Promise<void>;
     handleRemoveScheduleItem: (index: number) => void;
-    needsOnboarding: boolean;
-    setupStatus: SetupStatus;
-    logs: string[];
-    error: string | null;
     clearError: () => void;
     startBackgroundKeepAlive: () => void;
     syncUIState: (options?: { forceAll?: boolean }) => Promise<SpotifyApi.CurrentPlaybackResponse | null>;
     reloadConfig: () => void;
 }
 
-const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
+export type PlayerContextType =
+    PlayerActionsContextType &
+    PlayerPlaybackContextType &
+    PlayerQueueScheduleContextType &
+    PlayerLogsContextType;
+
+const PlayerLogsContext = createContext<PlayerLogsContextType | undefined>(undefined);
+const PlayerQueueScheduleContext = createContext<PlayerQueueScheduleContextType | undefined>(undefined);
+const PlayerPlaybackContext = createContext<PlayerPlaybackContextType | undefined>(undefined);
+const PlayerActionsContext = createContext<PlayerActionsContextType | undefined>(undefined);
 
 function computeSetupStatus(): SetupStatus {
     const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
@@ -77,7 +99,7 @@ function applyStoredConfigToDJ(dj: DJCore) {
     });
 }
 
-function isSameTrackDisplay(a: Track | null, b: Track | null): boolean {
+export function isSameTrackDisplay(a: Track | null, b: Track | null): boolean {
     if (a === b) return true;
     if (!a || !b) return false;
     return (
@@ -90,6 +112,23 @@ function isSameTrackDisplay(a: Track | null, b: Track | null): boolean {
         a.energy === b.energy &&
         a.contextName === b.contextName
     );
+}
+
+export function isSameDeviceList(a: SpotifyApi.UserDevice[], b: SpotifyApi.UserDevice[]): boolean {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (
+            a[i].id !== b[i].id ||
+            a[i].name !== b[i].name ||
+            a[i].is_active !== b[i].is_active ||
+            a[i].type !== b[i].type ||
+            a[i].volume_percent !== b[i].volume_percent
+        ) {
+            return false;
+        }
+    }
+    return true;
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
@@ -105,7 +144,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     });
     const [isPlaying, setIsPlaying] = useState(false);
     const [deviceName, setDeviceName] = useState('');
-    const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
+    const [schedule, setScheduleState] = useState<ScheduleItem[]>([]);
     const [currentQuery, setCurrentQuery] = useState<string | null>(null);
     const [currentThought, setCurrentThought] = useState<string | null>(() => {
         if (typeof window !== 'undefined') {
@@ -124,14 +163,47 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [error, setError] = useState<string | null>(null);
 
     const djRef = useRef<DJCore | null>(null);
+    const convergenceRef = useRef<PlaybackConvergenceController>(new PlaybackConvergenceController());
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
-    const lastTrackUriRef = useRef<string | null>(null);
+    const lastTrackUriRef = useRef<string | null>(currentTrack?.uri || null);
+    const currentTrackRef = useRef<Track | null>(currentTrack);
+    const isPlayingRef = useRef<boolean>(false);
+    const deviceNameRef = useRef<string>('');
+    const lastProgressMsRef = useRef<number | null>(null);
+    const isRefreshingTokenRef = useRef<boolean>(false);
+    const lastSessionActiveRef = useRef<boolean | null>(null);
     const lastDevicesFetchRef = useRef<number>(0);
     const lastQueueSyncPlayTimeRef = useRef<number>(0);
     const queueLengthRef = useRef<number>(0);
+    const queueRef = useRef<Track[]>([]);
+    const hasInitialQueueSyncRef = useRef<boolean>(false);
     const devicesRef = useRef<SpotifyApi.UserDevice[]>([]);
 
+    const updateIsPlaying = useCallback((next: boolean) => {
+        isPlayingRef.current = next;
+        setIsPlaying(next);
+    }, []);
+
+    const updateDeviceName = useCallback((next: string) => {
+        deviceNameRef.current = next;
+        setDeviceName(next);
+    }, []);
+
+    const persistPlayingTrack = useCallback((track: Track | null) => {
+        if (djRef.current) {
+            djRef.current.getSessionCache().setLastPlayingTrack(track);
+        }
+    }, []);
+
+    const setSchedule = useCallback((nextSchedule: ScheduleItem[]) => {
+        setScheduleState(nextSchedule);
+        if (djRef.current && djRef.current.getSchedule() !== nextSchedule) {
+            djRef.current.setSchedule(nextSchedule, false);
+        }
+    }, []);
+
     const updateQueueState = useCallback((nextQueue: Track[]) => {
+        queueRef.current = nextQueue;
         queueLengthRef.current = nextQueue.length;
         setQueue(prev => {
             if (
@@ -146,7 +218,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const updateDevicesState = useCallback((nextDevices: SpotifyApi.UserDevice[]) => {
         devicesRef.current = nextDevices;
-        setDevices(nextDevices);
+        setDevices(prev => (isSameDeviceList(prev, nextDevices) ? prev : nextDevices));
+    }, []);
+
+    const handleAuthExpired = useCallback(() => {
+        if (isRefreshingTokenRef.current) return;
+        const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+        if (!clientId) {
+            SpotifyAuth.logout();
+            setAuthorized(false);
+            setStatus('connect_needed');
+            return;
+        }
+        isRefreshingTokenRef.current = true;
+        void SpotifyAuth.refreshToken(clientId)
+            .then((refreshed) => {
+                if (refreshed) {
+                    djRef.current?.updateAccessToken(refreshed);
+                } else {
+                    SpotifyAuth.logout();
+                    setAuthorized(false);
+                    setStatus('connect_needed');
+                }
+            })
+            .finally(() => {
+                isRefreshingTokenRef.current = false;
+            });
     }, []);
 
     const syncUIState = useCallback(async (options?: { forceAll?: boolean }) => {
@@ -156,20 +253,34 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         try {
             // 1. Fetch playback state first to determine the exact currently playing track & progress
             const playbackState = await djRef.current.getPlaybackState();
+            const guard = convergenceRef.current.inspectState(playbackState);
+
+            if (playbackState && !playbackState.__optimisticFallback && typeof playbackState.progress_ms === 'number') {
+                lastProgressMsRef.current = playbackState.progress_ms;
+            }
+
             const currentTrackItem = (playbackState && playbackState.item && playbackState.item.type === 'track')
                 ? (playbackState.item as Track)
                 : null;
 
             const currentTrackUri = currentTrackItem?.uri || null;
-            const trackChanged = currentTrackUri !== lastTrackUriRef.current;
+            const trackChanged = !guard.suppressTrackUpdate && currentTrackUri !== lastTrackUriRef.current;
             if (trackChanged) {
                 lastTrackUriRef.current = currentTrackUri;
             }
 
-            // 2. Conditionally fetch Queue
+            const isSessionActive = typeof djRef.current.isSessionPlaybackActive === 'function'
+                ? djRef.current.isSessionPlaybackActive()
+                : false;
+            const sessionModeChanged = lastSessionActiveRef.current !== null && isSessionActive !== lastSessionActiveRef.current;
+            lastSessionActiveRef.current = isSessionActive;
+
+            // 2. Conditionally fetch Queue (skip overwriting optimistic queue if track is still in stale transition)
             const lastPlayTime = typeof djRef.current.getLastPlayTime === 'function' ? djRef.current.getLastPlayTime() : 0;
             const newPlayOccurred = lastPlayTime > lastQueueSyncPlayTimeRef.current;
-            const shouldFetchQueue = forceAll || trackChanged || queueLengthRef.current === 0 || newPlayOccurred;
+            const shouldFetchQueue = !guard.suppressTrackUpdate && (
+                forceAll || trackChanged || sessionModeChanged || !hasInitialQueueSyncRef.current || newPlayOccurred
+            );
             let queuePromise: Promise<Track[]> | null = null;
             if (shouldFetchQueue) {
                 queuePromise = djRef.current.getQueue(currentTrackItem);
@@ -187,6 +298,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
             if (queuePromise) {
                 const currentQ = await queuePromise;
+                hasInitialQueueSyncRef.current = true;
                 updateQueueState(currentQ.slice(0, 20));
                 lastQueueSyncPlayTimeRef.current = lastPlayTime;
             }
@@ -197,31 +309,55 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 updateDevicesState(currentDevices);
             }
 
-            // Determine Device Name
-            let activeDeviceName = '';
-            if (playbackState && playbackState.device) {
-                activeDeviceName = playbackState.device.name;
-            } else if (latestDevices.length > 0) {
-                const activeD = latestDevices.find(d => d.is_active);
-                if (activeD) activeDeviceName = activeD.name;
-            }
-            if (activeDeviceName) {
-                setDeviceName(activeDeviceName);
+            // Determine Device Name (suppress stale device revert while device transfer is converging,
+            // and never overwrite a real device name with synthetic startup fallback 'Connecting...')
+            if (!guard.suppressDeviceUpdate) {
+                let activeDeviceName = '';
+                if (playbackState && playbackState.device && !playbackState.__optimisticFallback) {
+                    activeDeviceName = playbackState.device.name;
+                } else if (latestDevices.length > 0) {
+                    const activeD = latestDevices.find(d => d.is_active);
+                    if (activeD) activeDeviceName = activeD.name;
+                } else if (playbackState?.device?.name && !deviceNameRef.current) {
+                    activeDeviceName = playbackState.device.name;
+                }
+                if (activeDeviceName && activeDeviceName !== deviceNameRef.current) {
+                    updateDeviceName(activeDeviceName);
+                }
             }
 
-            // Sync Track Info (avoid new object reference & localStorage write if unchanged)
+            // Sync Track Info (suppress stale track/play-state revert while transport command is converging)
             if (currentTrackItem) {
-                const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
-                setCurrentTrack(prev => {
-                    if (isSameTrackDisplay(prev, finalTrack)) {
-                        return prev;
-                    }
-                    setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, finalTrack);
-                    return finalTrack;
-                });
-                setIsPlaying(playbackState!.is_playing);
-            } else {
-                setIsPlaying(false);
+                if (!guard.suppressTrackUpdate) {
+                    const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
+                    currentTrackRef.current = finalTrack;
+                    setCurrentTrack(prev => {
+                        if (isSameTrackDisplay(prev, finalTrack)) {
+                            return prev;
+                        }
+                        persistPlayingTrack(finalTrack);
+                        return finalTrack;
+                    });
+                }
+                if (!guard.suppressPlayStateUpdate) {
+                    updateIsPlaying(playbackState!.is_playing);
+                }
+            } else if (!guard.suppressTrackUpdate) {
+                const isNonTrackMedia = Boolean(
+                    playbackState &&
+                    ((playbackState.item && playbackState.item.type !== 'track') ||
+                        (playbackState.currently_playing_type &&
+                            playbackState.currently_playing_type !== 'track' &&
+                            playbackState.currently_playing_type !== 'unknown'))
+                );
+                if (isNonTrackMedia) {
+                    currentTrackRef.current = null;
+                    setCurrentTrack(null);
+                    persistPlayingTrack(null);
+                }
+                if (!guard.suppressPlayStateUpdate) {
+                    updateIsPlaying(false);
+                }
             }
 
             // Update Status
@@ -229,22 +365,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             setCurrentQuery(djStatus.currentQuery);
             setCurrentThought(djStatus.currentThought);
 
-            // Sync Logs (only update state when log entries actually change)
-            if (typeof djRef.current.getProcessLog === 'function') {
-                const latestLogs = djRef.current.getProcessLog();
-                setDjLogs(prev =>
-                    prev.length === latestLogs.length && prev[0] === latestLogs[0]
-                        ? prev
-                        : [...latestLogs]
-                );
-            }
-
             return playbackState;
         } catch (syncErr) {
             console.error("Error in syncUIState:", syncErr);
             return null;
         }
-    }, [updateQueueState, updateDevicesState]);
+    }, [updateQueueState, updateDevicesState, updateDeviceName, updateIsPlaying, persistPlayingTrack]);
 
     const reloadConfig = useCallback(() => {
         const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
@@ -272,6 +398,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // Initialize Auth & DJCore
     useEffect(() => {
         let isCancelled = false;
+        let unsubscribeLogs: (() => void) | null = null;
+        let unsubscribeState: (() => void) | null = null;
+        const convergenceController = convergenceRef.current;
 
         const init = async () => {
             try {
@@ -305,6 +434,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                         token = newToken;
                         console.log("Token refreshed successfully");
                     } else {
+                        SpotifyAuth.logout();
+                        setAuthorized(false);
                         setStatus('connect_needed');
                         return;
                     }
@@ -322,32 +453,50 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     djRef.current = dj;
                     setDjCore(dj);
                     dj.setStatusCallback(setStatus);
+                    dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
+                        setError(prev => (prev === errMsg ? prev : errMsg));
+                        if (errInfo?.category === 'auth_expired') {
+                            handleAuthExpired();
+                        }
+                    });
+                    unsubscribeState = dj.subscribe((snapshot) => {
+                        setStatus(snapshot.status);
+                        setCurrentQuery(snapshot.currentQuery);
+                        setCurrentThought(snapshot.currentThought);
+                        setScheduleState(prev => (prev === snapshot.schedule ? prev : snapshot.schedule));
+                    });
+                    unsubscribeLogs = dj.subscribeLogs((latestLogs) => {
+                        setDjLogs(prev =>
+                            prev.length === latestLogs.length && prev[0] === latestLogs[0]
+                                ? prev
+                                : latestLogs
+                        );
+                    });
+
                     dj.setOnTracksPlayedCallback((tracks) => {
                         if (tracks.length > 0) {
                             const first = tracks[0];
+                            currentTrackRef.current = first;
                             setCurrentTrack(first);
-                            setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, first);
+                            persistPlayingTrack(first);
                             updateQueueState(tracks.slice(1, 21));
-                            setIsPlaying(true);
-                            lastTrackUriRef.current = tracks[0].uri;
+                            updateIsPlaying(true);
+                            lastTrackUriRef.current = first.uri;
                             lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
-                            setTimeout(() => syncUIState({ forceAll: true }), 1500);
+                            void convergenceRef.current.syncUntilConverged(
+                                {
+                                    expectedTrackUri: first.uri,
+                                    expectedTrackKey: generateTrackKey(first),
+                                    expectedIsPlaying: true,
+                                },
+                                syncUIState
+                            );
                         }
                     });
 
-                    const savedSessionTracks = getStoredJSON<Track[]>(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, []);
+                    const savedSessionTracks = dj.getSessionCache().getSessionTracks();
                     if (savedSessionTracks.length > 0) {
                         updateQueueState(savedSessionTracks.slice(1, 21));
-                    }
-
-                    const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
-                    if (savedSchedule.length > 0) {
-                        setSchedule(savedSchedule);
-                        dj.setSchedule(savedSchedule);
-                        const djStatus = dj.getDJStatus();
-                        if (djStatus.currentThought) {
-                            setCurrentThought(djStatus.currentThought);
-                        }
                     }
                 }
             } catch (initError: unknown) {
@@ -362,8 +511,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         return () => {
             isCancelled = true;
+            convergenceController.cancel();
+            if (unsubscribeState) {
+                unsubscribeState();
+            }
+            if (unsubscribeLogs) {
+                unsubscribeLogs();
+            }
         };
-    }, [syncUIState, updateQueueState]);
+    }, [syncUIState, updateQueueState, updateIsPlaying, persistPlayingTrack, handleAuthExpired]);
 
     const handleLoopError = useCallback((msg: string) => {
         setError(prev => (prev === msg ? prev : msg));
@@ -375,6 +531,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         djCore,
         syncUIState,
         onError: handleLoopError,
+        onAuthExpired: handleAuthExpired,
     });
 
     // Memoized Handlers
@@ -398,47 +555,88 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const handleNext = useCallback(async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
-            setQueue(prevQueue => {
-                if (prevQueue.length > 0) {
-                    const nextTrack = prevQueue[0];
-                    setCurrentTrack(nextTrack);
-                    setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, nextTrack);
-                    const remaining = prevQueue.slice(1);
-                    queueLengthRef.current = remaining.length;
-                    return remaining;
-                }
-                return prevQueue;
-            });
-            await djRef.current.next();
-            setTimeout(() => syncUIState({ forceAll: true }), 500);
-            setTimeout(() => syncUIState({ forceAll: true }), 1500);
+            const previousTrack = currentTrackRef.current;
+            const previousUri = lastTrackUriRef.current;
+            const currentQueue = queueRef.current;
+            let expectedNextUri: string | null = null;
+            let expectedNextKey: string | null = null;
+            if (currentQueue.length > 0) {
+                const nextTrack = currentQueue[0];
+                const remaining = currentQueue.slice(1);
+                expectedNextUri = nextTrack.uri || null;
+                expectedNextKey = generateTrackKey(nextTrack);
+                currentTrackRef.current = nextTrack;
+                setCurrentTrack(nextTrack);
+                persistPlayingTrack(nextTrack);
+                lastTrackUriRef.current = expectedNextUri;
+                updateQueueState(remaining);
+            }
+            const res = await djRef.current.next();
+            if (res.ok) {
+                void convergenceRef.current.syncUntilConverged(
+                    expectedNextUri
+                        ? {
+                            expectedTrackUri: expectedNextUri,
+                            expectedTrackKey: expectedNextKey,
+                            departedTrackUri: previousUri,
+                        }
+                        : { departedTrackUri: previousUri },
+                    syncUIState
+                );
+            } else if (currentQueue.length > 0) {
+                // Revert optimistic track & queue shift if skip failed
+                currentTrackRef.current = previousTrack;
+                setCurrentTrack(previousTrack);
+                persistPlayingTrack(previousTrack);
+                lastTrackUriRef.current = previousUri;
+                updateQueueState(currentQueue);
+            }
         }
-    }, [startBackgroundKeepAlive, syncUIState]);
+    }, [startBackgroundKeepAlive, syncUIState, updateQueueState, persistPlayingTrack]);
 
     const handlePrev = useCallback(async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
-            await djRef.current.previous();
-            setTimeout(() => syncUIState({ forceAll: true }), 500);
-            setTimeout(() => syncUIState({ forceAll: true }), 1500);
+            const previousUri = lastTrackUriRef.current;
+            const previousProgressMs = lastProgressMsRef.current;
+            const res = await djRef.current.previous();
+            if (res.ok) {
+                void convergenceRef.current.syncUntilConverged(
+                    {
+                        departedTrackUri: previousUri,
+                        departedProgressMs: previousProgressMs,
+                        allowSameTrackRewind: true,
+                    },
+                    syncUIState
+                );
+            }
         }
     }, [startBackgroundKeepAlive, syncUIState]);
 
     const handleTogglePlay = useCallback(async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
-            if (isPlaying) await djRef.current.pause();
-            else await djRef.current.resume();
-            setIsPlaying(prev => !prev);
-            setTimeout(() => syncUIState(), 500);
+            const targetIsPlaying = !isPlayingRef.current;
+            updateIsPlaying(targetIsPlaying);
+            const res = targetIsPlaying
+                ? await djRef.current.resume()
+                : await djRef.current.pause();
+            if (res.ok) {
+                void convergenceRef.current.syncUntilConverged(
+                    { expectedIsPlaying: targetIsPlaying },
+                    syncUIState
+                );
+            } else {
+                // Revert optimistic toggle if request failed immediately
+                updateIsPlaying(!targetIsPlaying);
+            }
         }
-    }, [isPlaying, startBackgroundKeepAlive, syncUIState]);
+    }, [startBackgroundKeepAlive, syncUIState, updateIsPlaying]);
 
     const handleRemoveScheduleItem = useCallback((index: number) => {
         if (djRef.current) {
-            const newSchedule = djRef.current.removeScheduleItem(index);
-            setSchedule([...newSchedule]);
-            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, newSchedule);
+            const newSchedule = djRef.current.removeScheduleItem(index, true);
+            setScheduleState([...newSchedule]);
         }
     }, []);
 
@@ -451,80 +649,152 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const setDevice = useCallback(async (deviceId: string) => {
         if (djRef.current) {
-            await djRef.current.setActiveDevice(deviceId);
-            setTimeout(() => syncUIState({ forceAll: true }), 500);
+            const prevDeviceName = deviceNameRef.current;
+            const targetDevice = devicesRef.current.find(d => d.id === deviceId);
+            if (targetDevice?.name) {
+                updateDeviceName(targetDevice.name);
+            }
+            const res = await djRef.current.setActiveDevice(deviceId);
+            if (res.ok) {
+                void convergenceRef.current.syncUntilConverged(
+                    { expectedDeviceId: deviceId },
+                    syncUIState
+                );
+            } else {
+                updateDeviceName(prevDeviceName);
+            }
         }
-    }, [syncUIState]);
+    }, [syncUIState, updateDeviceName]);
 
     const clearError = useCallback(() => setError(null), []);
 
-    const contextValue = useMemo<PlayerContextType>(() => ({
-        djCore,
-        authorized,
+    // Granular Context Values to isolate re-renders
+    const logsContextValue = useMemo<PlayerLogsContextType>(() => ({
+        logs: djLogs,
+    }), [djLogs]);
+
+    const queueScheduleContextValue = useMemo<PlayerQueueScheduleContextType>(() => ({
+        queue,
+        schedule,
+        setSchedule,
+        handleRemoveScheduleItem,
+    }), [queue, schedule, setSchedule, handleRemoveScheduleItem]);
+
+    const playbackContextValue = useMemo<PlayerPlaybackContextType>(() => ({
         status,
-        setStatus,
         currentTrack,
         isPlaying,
         deviceName,
-        schedule,
-        setSchedule,
+        devices,
         currentQuery,
         currentThought,
-        queue,
+        error,
+    }), [
+        status,
+        currentTrack,
+        isPlaying,
+        deviceName,
         devices,
+        currentQuery,
+        currentThought,
+        error,
+    ]);
+
+    const actionsContextValue = useMemo<PlayerActionsContextType>(() => ({
+        djCore,
+        authorized,
+        needsOnboarding,
+        setupStatus,
+        setStatus,
+        setSchedule,
         refreshDevices,
         setDevice,
         handleNext,
         handlePrev,
         handleTogglePlay,
         handleRemoveScheduleItem,
-        needsOnboarding,
-        setupStatus,
-        logs: djLogs,
-        error,
         clearError,
         startBackgroundKeepAlive,
         syncUIState,
-        reloadConfig
+        reloadConfig,
     }), [
         djCore,
         authorized,
-        status,
-        currentTrack,
-        isPlaying,
-        deviceName,
-        schedule,
-        currentQuery,
-        currentThought,
-        queue,
-        devices,
+        needsOnboarding,
+        setupStatus,
+        setSchedule,
         refreshDevices,
         setDevice,
         handleNext,
         handlePrev,
         handleTogglePlay,
         handleRemoveScheduleItem,
-        needsOnboarding,
-        setupStatus,
-        djLogs,
-        error,
         clearError,
         startBackgroundKeepAlive,
         syncUIState,
-        reloadConfig
+        reloadConfig,
     ]);
 
     return (
-        <PlayerContext.Provider value={contextValue}>
-            {children}
-        </PlayerContext.Provider>
+        <PlayerActionsContext.Provider value={actionsContextValue}>
+            <PlayerPlaybackContext.Provider value={playbackContextValue}>
+                <PlayerQueueScheduleContext.Provider value={queueScheduleContextValue}>
+                    <PlayerLogsContext.Provider value={logsContextValue}>
+                        {children}
+                    </PlayerLogsContext.Provider>
+                </PlayerQueueScheduleContext.Provider>
+            </PlayerPlaybackContext.Provider>
+        </PlayerActionsContext.Provider>
     );
 }
 
-export function usePlayer() {
-    const context = useContext(PlayerContext);
+export function usePlayerLogs(): PlayerLogsContextType {
+    const context = useContext(PlayerLogsContext);
     if (context === undefined) {
-        throw new Error('usePlayer must be used within a PlayerProvider');
+        throw new Error('usePlayerLogs must be used within a PlayerProvider');
     }
     return context;
+}
+
+export function usePlayerQueueSchedule(): PlayerQueueScheduleContextType {
+    const context = useContext(PlayerQueueScheduleContext);
+    if (context === undefined) {
+        throw new Error('usePlayerQueueSchedule must be used within a PlayerProvider');
+    }
+    return context;
+}
+
+export function usePlayerPlayback(): PlayerPlaybackContextType {
+    const context = useContext(PlayerPlaybackContext);
+    if (context === undefined) {
+        throw new Error('usePlayerPlayback must be used within a PlayerProvider');
+    }
+    return context;
+}
+
+export function usePlayerActions(): PlayerActionsContextType {
+    const context = useContext(PlayerActionsContext);
+    if (context === undefined) {
+        throw new Error('usePlayerActions must be used within a PlayerProvider');
+    }
+    return context;
+}
+
+/**
+ * Combined hook preserved for backward compatibility.
+ * Prefer `usePlayerPlayback`, `usePlayerQueueSchedule`, `usePlayerActions`, or `usePlayerLogs`
+ * in performance-sensitive components to avoid unnecessary re-renders.
+ */
+export function usePlayer(): PlayerContextType {
+    const actions = usePlayerActions();
+    const playback = usePlayerPlayback();
+    const queueSchedule = usePlayerQueueSchedule();
+    const logs = usePlayerLogs();
+
+    return useMemo<PlayerContextType>(() => ({
+        ...actions,
+        ...playback,
+        ...queueSchedule,
+        ...logs,
+    }), [actions, playback, queueSchedule, logs]);
 }

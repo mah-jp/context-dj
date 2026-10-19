@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { usePlayer } from '../context/PlayerContext';
+import { usePlayerPlayback, usePlayerActions } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
 import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor } from 'lucide-react';
 import { STORAGE_KEYS } from '../lib/constants';
@@ -23,19 +23,23 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
 
     const {
         status,
-        authorized,
         isPlaying,
         currentTrack,
         deviceName,
         devices,
+        currentQuery,
+        currentThought
+    } = usePlayerPlayback();
+
+    const {
+        authorized,
         refreshDevices,
         setDevice,
         handlePrev,
         handleNext,
         handleTogglePlay,
-        currentQuery,
-        currentThought
-    } = usePlayer();
+    } = usePlayerActions();
+
 
     // Local UI state
     const [showCover, setShowCover] = useState(false);

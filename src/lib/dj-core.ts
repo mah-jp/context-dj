@@ -1,12 +1,29 @@
 import SpotifyWebApi from 'spotify-web-api-js';
 import { AIService } from './ai';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULTS } from './constants';
-import { AIProvider, ScheduleItem, Track, DJConfig, TrackEvaluation } from './types';
-import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
-import { generateTrackKey, isScheduleItemActive, getScheduleItemSignature, getScheduleItemQueries, parseTimeToMinutes } from './dj-utils';
-import { extractTargetArtists, deduplicateTracks, filterTracksByPopularityAndArtist, sequenceTracksByStory } from './track-curator';
+import {
+    AIProvider,
+    DJConfig,
+    DJErrorListener,
+    DJLogListener,
+    DJStateListener,
+    DJStateSnapshot,
+    ScheduleItem,
+    SearchPipelineContext,
+    SpotifyApiErrorInfo,
+    Track,
+} from './types';
+import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
+import {
+    generateTrackKey,
+    isScheduleItemActive,
+    getScheduleItemSignature,
+    getScheduleItemQueries,
+    parseTimeToMinutes,
+} from './dj-utils';
 import { TrackSessionCache } from './track-session-cache';
 import { SpotifyPlayerClient } from './spotify-player-client';
+import { TrackSearchPipeline } from './track-search-pipeline';
 
 export type { Track };
 
@@ -14,11 +31,13 @@ export class DJCore {
     private spotify: SpotifyWebApi.SpotifyWebApiJs;
     private playerClient: SpotifyPlayerClient;
     private sessionCache: TrackSessionCache;
+    private searchPipeline: TrackSearchPipeline;
     private ai?: AIService;
     private schedule: ScheduleItem[] = [];
     private processLog: string[] = [];
+    private statusText: string = 'Ready';
+    private lastError: string | null = null;
     private lastQuery: string | null = null;
-    private lastPlayTime: number = 0;
     private config: DJConfig = {
         minPopularity: PLAYBACK_CONSTANTS.PREFERRED_TRACK_POPULARITY,
         trackSearchLimit: PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT,
@@ -27,7 +46,13 @@ export class DJCore {
     };
     private onStatusUpdate?: (status: string) => void;
     private onTracksPlayed?: (tracks: Track[]) => void;
-    private lastPlayingTrack: Track | null = null;
+    private onErrorUpdate?: DJErrorListener;
+    private stateListeners = new Set<DJStateListener>();
+    private logListeners = new Set<DJLogListener>();
+    private errorListeners = new Set<DJErrorListener>();
+
+    private isProcessingLoop = false;
+    private playbackGeneration = 0;
     private isRefilling = false;
     private lastRefillAttemptTime = 0;
     private preloadedResult: { signature: string, tracks: Track[] } | null = null;
@@ -36,14 +61,33 @@ export class DJCore {
     constructor(accessToken: string) {
         this.spotify = new SpotifyWebApi();
         this.spotify.setAccessToken(accessToken);
-        this.playerClient = new SpotifyPlayerClient(this.spotify);
         this.sessionCache = new TrackSessionCache();
+        this.playerClient = new SpotifyPlayerClient(this.spotify, (errInfo) => {
+            this.handleSpotifyApiError(errInfo);
+        });
+        this.searchPipeline = new TrackSearchPipeline({
+            getSpotify: () => this.spotify,
+            getAI: () => this.ai,
+            getConfig: () => this.config,
+            sessionCache: this.sessionCache,
+            addLog: (msg) => this.addLog(msg),
+            updateStatus: (s) => this.updateStatus(s),
+            onSpotifyError: (err, op) => {
+                this.playerClient.reportThrownError(err, op);
+            },
+        });
 
-        // Restore state
+        // Restore persisted state
         this.lastQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null;
         const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
         this.config.aiFiltering = savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
+        const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
+        if (Array.isArray(savedSchedule) && savedSchedule.length > 0) {
+            this.schedule = savedSchedule;
+        }
     }
+
+    // --- Session State Delegates (Consolidated in TrackSessionCache) ---
 
     private get currentSessionTracks(): Track[] {
         return this.sessionCache.getSessionTracks();
@@ -51,6 +95,71 @@ export class DJCore {
 
     private set currentSessionTracks(tracks: Track[]) {
         this.sessionCache.setSessionTracks(tracks, false);
+    }
+
+    private get lastPlayTime(): number {
+        return this.sessionCache.getLastPlayTime();
+    }
+
+    private set lastPlayTime(time: number) {
+        this.sessionCache.setLastPlayTime(time);
+    }
+
+    private get lastPlayingTrack(): Track | null {
+        return this.sessionCache.getLastPlayingTrack();
+    }
+
+    private set lastPlayingTrack(track: Track | null) {
+        this.sessionCache.setLastPlayingTrack(track, false);
+    }
+
+    private get hasConfirmedSessionPlayback(): boolean {
+        return this.sessionCache.getHasConfirmedSessionPlayback();
+    }
+
+    private set hasConfirmedSessionPlayback(confirmed: boolean) {
+        this.sessionCache.setHasConfirmedSessionPlayback(confirmed);
+    }
+
+    private get isExternalContextActive(): boolean {
+        return this.sessionCache.getIsExternalContextActive();
+    }
+
+    private set isExternalContextActive(external: boolean) {
+        this.sessionCache.setIsExternalContextActive(external);
+    }
+
+    isSessionPlaybackActive(): boolean {
+        return this.sessionCache.isSessionPlaybackActive();
+    }
+
+    getSessionCache(): TrackSessionCache {
+        return this.sessionCache;
+    }
+
+    private handleExternalPlaybackDetected(externalTrack: { name?: string; artists?: { name?: string }[] }) {
+        const hadSessionTracks = this.sessionCache.getSessionTracks().length > 0;
+        this.sessionCache.activateExternalContext(true, true);
+        if (!hadSessionTracks) return;
+        const artistName = externalTrack.artists?.[0]?.name || 'Unknown';
+        const trackName = externalTrack.name || 'Unknown Track';
+        this.addLog(`🔄 External playback detected on Spotify: ${trackName} (${artistName}). Prioritizing Spotify queue.`);
+    }
+
+    private handleSpotifyApiError(errInfo: SpotifyApiErrorInfo) {
+        this.lastError = errInfo.message;
+        this.addLog(`⚠️ Spotify API [${errInfo.status || 'ERR'}] (${errInfo.operation}): ${errInfo.message}`);
+        if (this.onErrorUpdate) {
+            this.onErrorUpdate(errInfo.message, errInfo);
+        }
+        this.errorListeners.forEach(listener => {
+            try {
+                listener(errInfo.message, errInfo);
+            } catch (e) {
+                console.error('Error in DJErrorListener:', e);
+            }
+        });
+        this.notifyStateListeners();
     }
 
     enrichTrackWithCachedMetadata(track: Track): Track {
@@ -78,6 +187,65 @@ export class DJCore {
         return this.ai.analyzeImage(base64Image, mimeType);
     }
 
+    // --- Event / Subscription Model ---
+
+    getStateSnapshot(): DJStateSnapshot {
+        const currentItem = this.getCurrentItem() ?? this.getEffectiveItemForPlayback();
+        return {
+            status: this.statusText,
+            schedule: [...this.schedule],
+            currentQuery: this.lastQuery,
+            currentThought: currentItem?.thought || (this.schedule[0]?.thought ?? null),
+            logs: [...this.processLog],
+            lastError: this.lastError,
+        };
+    }
+
+    subscribe(listener: DJStateListener): () => void {
+        this.stateListeners.add(listener);
+        return () => {
+            this.stateListeners.delete(listener);
+        };
+    }
+
+    subscribeLogs(listener: DJLogListener): () => void {
+        this.logListeners.add(listener);
+        return () => {
+            this.logListeners.delete(listener);
+        };
+    }
+
+    subscribeErrors(listener: DJErrorListener): () => void {
+        this.errorListeners.add(listener);
+        return () => {
+            this.errorListeners.delete(listener);
+        };
+    }
+
+    private notifyStateListeners() {
+        if (this.stateListeners.size === 0) return;
+        const snapshot = this.getStateSnapshot();
+        this.stateListeners.forEach(listener => {
+            try {
+                listener(snapshot);
+            } catch (e) {
+                console.error('Error in DJStateListener:', e);
+            }
+        });
+    }
+
+    private notifyLogListeners() {
+        if (this.logListeners.size === 0) return;
+        const logsCopy = [...this.processLog];
+        this.logListeners.forEach(listener => {
+            try {
+                listener(logsCopy);
+            } catch (e) {
+                console.error('Error in DJLogListener:', e);
+            }
+        });
+    }
+
     getProcessLog(): string[] {
         return this.processLog;
     }
@@ -88,6 +256,7 @@ export class DJCore {
         console.log(msg);
         this.processLog.unshift(msg);
         if (this.processLog.length > 100) this.processLog.pop();
+        this.notifyLogListeners();
     }
 
     setStatusCallback(cb: (status: string) => void) {
@@ -98,261 +267,26 @@ export class DJCore {
         this.onTracksPlayed = cb;
     }
 
+    setErrorCallback(cb: DJErrorListener) {
+        this.onErrorUpdate = cb;
+    }
+
     private updateStatus(status: string) {
+        this.statusText = status;
         if (this.onStatusUpdate) {
             this.onStatusUpdate(status);
         }
+        this.notifyStateListeners();
     }
 
-    // --- Search & Filtering ---
+    // --- Search & Filtering (Delegated to TrackSearchPipeline) ---
 
-    async searchTracks(queriesInput: string | string[], priorityQuery?: string, context?: { userRequest?: string, thought?: string, anchorTracks?: string[] }): Promise<Track[]> {
-        const queries = Array.isArray(queriesInput) ? queriesInput : [queriesInput];
-
-        // 0. Resolve Priority Track
-        const priorityTracks = await this.findPriorityTrack(priorityQuery);
-
-        // 1. Resolve Anchor Tracks (Iconic seeds)
-        const anchorTracks = await this.findAnchorTracks(context?.anchorTracks);
-
-        // 2. Parse target artists for strict filtering
-        const targetArtists = extractTargetArtists(queries);
-        if (targetArtists.length > 0) this.addLog(`🎯 Target Artists: ${targetArtists.join(', ')}`);
-
-        // 3. Execute Parallel Search
-        const searchTracks = await this.executeParallelSearch(queries);
-        const allRawTracks = [...anchorTracks, ...searchTracks];
-
-        if (allRawTracks.length === 0 && priorityTracks.length === 0) {
-            this.addLog("❌ No tracks found from Spotify Search");
-            return [];
-        }
-
-        // 4. Deduplicate
-        const uniqueTracks = deduplicateTracks(allRawTracks);
-        this.addLog(`📊 Found ${allRawTracks.length} raw hits -> ${uniqueTracks.length} unique tracks`);
-
-        // 5. Apply Filters (Strict Artist -> Popularity)
-        const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
-
-        // 6. AI Filtering & Multi-axis Scoring
-        const candidates = await this.performAIFiltering(filteredTracks, context);
-
-        // 7. Smart Sequencing (起承転結: Intro -> Build -> Peak -> Outro)
-        const { tracks: sequencedTracks, stageCounts } = sequenceTracksByStory(candidates, targetArtists);
-        let finalTracks = sequencedTracks;
-        if (candidates.length > 2) {
-            this.addLog(`🎼 Smart Sequencing (起承転結): Intro (${stageCounts.intro}) → Build (${stageCounts.build}) → Peak (${stageCounts.peak}) → Outro (${stageCounts.outro})`);
-        }
-
-        // 8. Merge Priority Track
-        if (priorityTracks.length > 0) {
-            const p = priorityTracks[0];
-            const pUri = p.uri;
-            const evaluated = candidates.find(c => c.uri === pUri);
-            if (evaluated) {
-                p.score = evaluated.score;
-                p.vibeTag = evaluated.vibeTag;
-                p.selectionReason = evaluated.selectionReason;
-                p.estimatedBpm = evaluated.estimatedBpm;
-                p.energy = evaluated.energy;
-                p.stage = evaluated.stage || 'intro';
-            } else {
-                p.score = p.score || 100;
-                p.vibeTag = p.vibeTag || '#オープニング';
-                p.selectionReason = p.selectionReason || (context?.thought ? `セッションの幕開けを飾るキートラックとして選曲。` : 'オープニングを飾るキートラックです。');
-                p.energy = 5;
-                p.stage = 'intro';
-            }
-            finalTracks = finalTracks.filter(t => t.uri !== pUri);
-            finalTracks = [p, ...finalTracks];
-            this.addLog(`📌 Priority track applied at the top: ${p.name} [${p.vibeTag}] (Stage: Intro)`);
-        }
-
-        // Cache all metadata so it persists when Spotify queue is polled
-        this.sessionCache.cacheTrackMetadata(finalTracks);
-
-        return finalTracks;
-    }
-
-    private async findPriorityTrack(priorityQuery?: string): Promise<Track[]> {
-        if (!priorityQuery) return [];
-
-        this.addLog(`🌟 Priority Search: ${priorityQuery}`);
-        try {
-            const pRes = await this.spotify.searchTracks(priorityQuery, { limit: 5 });
-            if (pRes.tracks && pRes.tracks.items.length > 0) {
-                const tracks = pRes.tracks.items as Track[];
-
-                let targetArtist = '';
-                const artistMatch = priorityQuery.match(/artist:\s*["']?([^"'\s]+)["']?/i);
-                if (artistMatch) {
-                    targetArtist = artistMatch[1].toLowerCase();
-                } else {
-                    targetArtist = priorityQuery.replace(/["']/g, '').trim().toLowerCase();
-                }
-
-                const matched = tracks.find(t => {
-                    const aName = (t.artists[0]?.name || '').toLowerCase();
-                    return aName.includes(targetArtist) || targetArtist.includes(aName);
-                });
-
-                const bestTrack = matched || tracks[0];
-                this.addLog(`✅ Found Priority Track: ${bestTrack.name} (${bestTrack.artists[0]?.name})`);
-                return [bestTrack];
-            } else {
-                this.addLog(`⚠️ Priority Search returned 0 results for: ${priorityQuery}`);
-                return [];
-            }
-        } catch (e) {
-            console.warn("Priority search failed:", e);
-            this.addLog(`⚠️ Priority Search Error`);
-            return [];
-        }
-    }
-
-    private async findAnchorTracks(anchorTracks?: string[]): Promise<Track[]> {
-        if (!anchorTracks || anchorTracks.length === 0) return [];
-
-        this.addLog(`⚓ Searching Anchor Tracks: ${anchorTracks.join(', ')}`);
-        const found: Track[] = [];
-
-        await Promise.all(anchorTracks.map(async (anchor) => {
-            try {
-                const cleanAnchor = anchor.replace(/["']/g, '');
-                const res = await this.spotify.searchTracks(cleanAnchor, { limit: 2 });
-                if (res.tracks && res.tracks.items.length > 0) {
-                    res.tracks.items.forEach(t => {
-                        const track = t as Track;
-                        const shortName = anchor.split('-')[0].trim();
-                        track.contextName = `Anchor: ${shortName}`;
-                        found.push(track);
-                    });
-                }
-            } catch (e) {
-                console.warn(`Anchor search failed for ${anchor}:`, e);
-            }
-        }));
-
-        if (found.length > 0) {
-            this.addLog(`⚓ Found ${found.length} anchor tracks.`);
-        }
-        return found;
-    }
-
-    private async performAIFiltering(candidates: Track[], context?: { userRequest?: string, thought?: string }): Promise<Track[]> {
-        if (!this.config.aiFiltering || !this.ai || !context || (!context.userRequest && !context.thought)) {
-            return candidates;
-        }
-
-        this.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
-        this.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
-
-        try {
-            const topCandidates = candidates.slice(0, 25);
-            const trackData = topCandidates.map(t => ({
-                name: t.name,
-                artist: t.artists.map(a => a.name).join(', ') || t.artists[0]?.name || 'Unknown',
-                album: t.album?.name || '',
-                id: t.uri
-            }));
-            const request = context.userRequest || 'Follow the DJ mood';
-            const evaluations = await this.ai.filterTracksWithAI(request, trackData, context.thought);
-
-            const evalMap = new Map<string, TrackEvaluation>();
-            evaluations.forEach(ev => evalMap.set(ev.id, ev));
-
-            candidates.forEach(t => {
-                const ev = evalMap.get(t.uri);
-                if (ev) {
-                    t.score = ev.score;
-                    t.vibeTag = ev.vibeTag;
-                    t.selectionReason = ev.selectionReason;
-                    t.estimatedBpm = ev.estimatedBpm;
-                    t.energy = ev.energy;
-                    t.stage = ev.stage;
-                }
-            });
-
-            this.sessionCache.cacheTrackMetadata(candidates);
-
-            let qualified = candidates.filter(t => (t.score ?? 0) >= 60);
-            if (qualified.length < 5 && candidates.some(t => t.score !== undefined)) {
-                qualified = candidates.filter(t => (t.score ?? 0) >= 50);
-            }
-
-            this.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
-            this.updateStatus('Ready');
-
-            if (qualified.length > 0) {
-                qualified.sort((a, b) => (b.score || 0) - (a.score || 0));
-                return qualified;
-            } else {
-                this.addLog(`⚠️ AI Filtering removed ALL tracks. Reverting to original set.`);
-                return candidates;
-            }
-        } catch (e) {
-            this.addLog(`⚠️ AI Filtering failed. Using all candidates.`);
-            console.error(e);
-            this.updateStatus('Ready');
-            return candidates;
-        }
-    }
-
-    private async executeParallelSearch(queries: string[]): Promise<Track[]> {
-        const allRawTracks: Track[] = [];
-        const limit = this.config.trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
-
-        await Promise.all(queries.map(async (query) => {
-            const searchQuery = this.config.onlyOfficial ? `owner:spotify ${query}` : query;
-
-            try {
-                const [trackResPage1, trackResPage2] = await Promise.all([
-                    this.spotify.searchTracks(searchQuery, { limit, offset: 0 }),
-                    this.spotify.searchTracks(searchQuery, { limit, offset: limit }).catch(() => null)
-                ]);
-
-                if (trackResPage1?.tracks?.items) {
-                    allRawTracks.push(...trackResPage1.tracks.items);
-                }
-                if (trackResPage2?.tracks?.items) {
-                    allRawTracks.push(...trackResPage2.tracks.items);
-                }
-            } catch (error) {
-                console.warn(`⚠️ Partial search failed for "${query}":`, error);
-            }
-        }));
-
-        return allRawTracks.sort(() => Math.random() - 0.5);
-    }
-
-    private applyTrackFilters(tracks: Track[], targetArtists: string[] = []): Track[] {
-        const preferredPopularity = this.config.minPopularity;
-        const minPopularity = Math.min(preferredPopularity, PLAYBACK_CONSTANTS.MIN_TRACK_POPULARITY);
-
-        const result = filterTracksByPopularityAndArtist(tracks, targetArtists, preferredPopularity, minPopularity);
-
-        if (result.targetPreservedCount > 0) {
-            this.addLog(`🎯 Preserved ${result.targetPreservedCount} tracks by requested artist(s) without popularity cutoff`);
-        }
-        if (result.relaxedToMin) {
-            this.addLog(`⚠️ Popularity >= ${preferredPopularity} too strict. Relaxing to >= ${minPopularity}...`);
-        }
-        if (result.revertedToAll) {
-            this.addLog('⚠️ No tracks matched popularity criteria. Using all candidates.');
-            return result.tracks;
-        }
-
-        this.addLog(`🔍 Filter: Popularity Check (${result.tracks.length} / ${tracks.length} kept)`);
-        this.logTrackSamples(result.tracks);
-        return result.tracks;
-    }
-
-    private logTrackSamples(tracks: Track[]) {
-        if (tracks.length === 0) return;
-        const samples = tracks.slice(0, 3).map(t => `${t.name} (${t.artists[0].name})`).join(', ');
-        const more = tracks.length > 3 ? `...and ${tracks.length - 3} more` : '';
-        this.addLog(`   👉 [Sample]: ${samples} ${more}`);
+    async searchTracks(
+        queriesInput: string | string[],
+        priorityQuery?: string,
+        context?: SearchPipelineContext
+    ): Promise<Track[]> {
+        return this.searchPipeline.searchTracks(queriesInput, priorityQuery, context);
     }
 
     // --- Device & Playback Control ---
@@ -365,9 +299,10 @@ export class DJCore {
         return this.playerClient.setActiveDevice(deviceId);
     }
 
-    async playTracks(tracks: Track[]) {
+    async playTracks(tracks: Track[], options?: { isDJSession?: boolean }) {
         if (tracks.length === 0) return;
 
+        const isDJSession = options?.isDJSession ?? true;
         const uris = tracks.map(t => t.uri);
 
         try {
@@ -376,8 +311,11 @@ export class DJCore {
 
             await this.playerClient.startPlaybackOnDevice(deviceId, uris);
 
-            this.sessionCache.setSessionTracks(tracks, true);
-            this.lastPlayTime = Date.now();
+            if (isDJSession) {
+                this.sessionCache.activateDJSession(tracks, true);
+            } else {
+                this.sessionCache.activateExternalContext(true, true);
+            }
             if (this.onTracksPlayed) {
                 this.onTracksPlayed(tracks);
             }
@@ -387,7 +325,27 @@ export class DJCore {
         }
     }
 
+    async playFromQueueIndex(index: number, displayedQueue: Track[]) {
+        if (index < 0 || index >= displayedQueue.length) return;
+
+        if (this.isSessionPlaybackActive()) {
+            const targetTrack = displayedQueue[index];
+            const sessionTracks = this.sessionCache.getSessionTracks();
+            const sessionIdx = this.sessionCache.findTrackIndexInSession(targetTrack);
+            const tracksToPlay = sessionIdx >= 0
+                ? sessionTracks.slice(sessionIdx)
+                : displayedQueue.slice(index);
+            await this.playTracks(tracksToPlay, { isDJSession: true });
+        } else {
+            await this.playTracks(displayedQueue.slice(index), { isDJSession: false });
+        }
+    }
+
     // --- Schedule Management ---
+
+    getSchedule(): ScheduleItem[] {
+        return this.schedule;
+    }
 
     async createSchedule(instruction: string, personalContext?: string) {
         if (!this.ai) throw new Error("AI not initialized (AIが初期化されていません)");
@@ -406,17 +364,25 @@ export class DJCore {
             }
         }
 
-        this.schedule = schedule;
+        this.setSchedule(schedule, true);
         return schedule;
     }
 
-    setSchedule(schedule: ScheduleItem[]) {
+    setSchedule(schedule: ScheduleItem[], persist: boolean = false) {
         this.schedule = schedule;
+        if (persist) {
+            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, schedule);
+        }
+        this.notifyStateListeners();
     }
 
-    removeScheduleItem(index: number) {
+    removeScheduleItem(index: number, persist: boolean = false) {
         if (index >= 0 && index < this.schedule.length) {
             this.schedule.splice(index, 1);
+            if (persist) {
+                setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, this.schedule);
+            }
+            this.notifyStateListeners();
             return this.schedule;
         }
         return this.schedule;
@@ -471,109 +437,132 @@ export class DJCore {
     // --- Main DJ Loop & Preloading ---
 
     async processDJLoop(silentWait: boolean = true, force: boolean = false) {
-        const now = new Date();
-        const currentItem = this.getEffectiveItemForPlayback(now);
+        if (this.isProcessingLoop && !force) {
+            return;
+        }
+        this.isProcessingLoop = true;
 
-        // 1. Check if we need to PRELOAD for upcoming schedule (60 seconds ahead)
-        if (this.schedule.length > 1) {
-            const PRELOAD_MS = 60 * 1000;
-            const futureDate = new Date(now.getTime() + PRELOAD_MS);
-            const nextItem = this.getItemForDate(futureDate);
+        try {
+            const now = new Date();
+            const currentItem = this.getEffectiveItemForPlayback(now);
 
-            if (nextItem) {
-                const nextSignature = getScheduleItemSignature(nextItem);
-                const queries = getScheduleItemQueries(nextItem);
+            // 1. Check if we need to PRELOAD for upcoming schedule (60 seconds ahead)
+            if (this.schedule.length > 1) {
+                const PRELOAD_MS = 60 * 1000;
+                const futureDate = new Date(now.getTime() + PRELOAD_MS);
+                const nextItem = this.getItemForDate(futureDate);
 
-                if (nextSignature && nextSignature !== this.lastQuery &&
-                    (!this.preloadedResult || this.preloadedResult.signature !== nextSignature)) {
+                if (nextItem) {
+                    const nextSignature = getScheduleItemSignature(nextItem);
+                    const queries = getScheduleItemQueries(nextItem);
 
-                    if (!this.isPreloading) {
-                        console.log(`⏳ Preloading tracks for upcoming schedule: ${nextSignature} `);
-                        this.isPreloading = true;
+                    if (nextSignature && nextSignature !== this.lastQuery &&
+                        (!this.preloadedResult || this.preloadedResult.signature !== nextSignature)) {
 
-                        this.searchTracks(queries, nextItem.priorityTrack, {
-                            userRequest: nextItem.userRequest,
-                            thought: nextItem.thought,
-                            anchorTracks: nextItem.anchorTracks
-                        }).then(tracks => {
-                            console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
-                            this.preloadedResult = {
-                                signature: nextSignature,
-                                tracks
-                            };
-                            this.isPreloading = false;
-                        }).catch(err => {
-                            console.error("Failed to preload:", err);
-                            this.isPreloading = false;
-                        });
+                        if (!this.isPreloading) {
+                            console.log(`⏳ Preloading tracks for upcoming schedule: ${nextSignature} `);
+                            this.isPreloading = true;
+
+                            this.searchTracks(queries, nextItem.priorityTrack, {
+                                userRequest: nextItem.userRequest,
+                                thought: nextItem.thought,
+                                anchorTracks: nextItem.anchorTracks
+                            }).then(tracks => {
+                                console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
+                                this.preloadedResult = {
+                                    signature: nextSignature,
+                                    tracks
+                                };
+                                this.isPreloading = false;
+                            }).catch(err => {
+                                console.error("Failed to preload:", err);
+                                this.isPreloading = false;
+                            });
+                        }
                     }
                 }
             }
-        }
 
-        if (!currentItem) return;
+            if (!currentItem) return;
 
-        const queriesToUse = getScheduleItemQueries(currentItem);
-        if (queriesToUse.length === 0) return;
+            const queriesToUse = getScheduleItemQueries(currentItem);
+            if (queriesToUse.length === 0) return;
 
-        const querySignature = getScheduleItemSignature(currentItem);
+            const querySignature = getScheduleItemSignature(currentItem);
 
-        // 2. Check if we need to change music
-        if (force || querySignature !== this.lastQuery) {
-            console.log(`🎧 DJ Change${force ? ' (Forced)' : ''}: ${querySignature} `);
-            this.lastQuery = querySignature;
-            setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
+            // 2. Check if we need to change music
+            if (force || querySignature !== this.lastQuery) {
+                const currentGen = ++this.playbackGeneration;
+                console.log(`🎧 DJ Change${force ? ' (Forced)' : ''}: ${querySignature} `);
+                this.lastQuery = querySignature;
+                setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
+                this.notifyStateListeners();
 
-            this.addLog("──────── New Session Started ────────");
-            this.sessionCache.resetSessionPlayedHistory();
+                this.addLog("──────── New Session Started ────────");
+                this.sessionCache.resetSessionPlayedHistory();
 
-            let tracks: Track[] = [];
+                let tracks: Track[] = [];
 
-            const devices = await this.getDevices();
-            if (devices.length === 0) {
-                const msg = "No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)";
-                console.log(`⚠️ DJ Search skipped: ${msg}`);
-                this.updateStatus('⚠️ Please open Spotify (Spotifyを開いてください)');
-                this.addLog(`⚠️ ${msg}`);
-                if (!silentWait) {
-                    throw new Error(msg);
+                this.playerClient.clearLastError();
+                const devices = await this.getDevices();
+                if (devices.length === 0) {
+                    const apiErr = this.playerClient.getLastError();
+                    if (apiErr) {
+                        this.lastQuery = null;
+                        removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+                        this.updateStatus(`⚠️ ${apiErr.message}`);
+                        if (!silentWait) {
+                            throw new Error(apiErr.message);
+                        }
+                        return;
+                    }
+                    const msg = "No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)";
+                    console.log(`⚠️ DJ Search skipped: ${msg}`);
+                    this.updateStatus('⚠️ Please open Spotify (Spotifyを開いてください)');
+                    this.addLog(`⚠️ ${msg}`);
+                    if (!silentWait) {
+                        throw new Error(msg);
+                    }
+                    return;
                 }
-                return;
-            }
 
-            if (this.preloadedResult && this.preloadedResult.signature === querySignature) {
-                console.log(`🚀 Using Preloaded Tracks for ${querySignature}`);
-                tracks = this.preloadedResult.tracks;
-                this.preloadedResult = null;
+                if (this.preloadedResult && this.preloadedResult.signature === querySignature) {
+                    console.log(`🚀 Using Preloaded Tracks for ${querySignature}`);
+                    tracks = this.preloadedResult.tracks;
+                    this.preloadedResult = null;
+                } else {
+                    this.updateStatus(`🔎 Searching: ${queriesToUse[0]}... (選曲中...)`);
+                    console.log(`🔎 Performing immediate search for ${querySignature}`);
+                    tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack, {
+                        userRequest: currentItem.userRequest,
+                        thought: currentItem.thought,
+                        anchorTracks: currentItem.anchorTracks
+                    });
+                }
+
+                if (currentGen !== this.playbackGeneration) {
+                    return;
+                }
+
+                try {
+                    this.sessionCache.markTracksPlayed(tracks);
+
+                    this.updateStatus('▶️ Starting playback... (再生開始中...)');
+                    await this.playTracks(tracks);
+                    this.updateStatus('Ready');
+                } catch (e) {
+                    console.error("Playback failed, reverting DJ state to allow retry on next tick:", e);
+                    this.lastQuery = null;
+                    removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+                    this.notifyStateListeners();
+                    throw e;
+                }
             } else {
-                this.updateStatus(`🔎 Searching: ${queriesToUse[0]}... (選曲中...)`);
-                console.log(`🔎 Performing immediate search for ${querySignature}`);
-                tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack, {
-                    userRequest: currentItem.userRequest,
-                    thought: currentItem.thought,
-                    anchorTracks: currentItem.anchorTracks
-                });
+                // Same context: Check for Auto-Refill (Okawari)
+                await this.checkAndRefillQueue(queriesToUse, currentItem);
             }
-
-            try {
-                this.sessionCache.markTracksPlayed(tracks);
-
-                this.updateStatus('▶️ Starting playback... (再生開始中...)');
-                await this.playTracks(tracks);
-                this.updateStatus('Ready');
-
-                if (this.onTracksPlayed) {
-                    this.onTracksPlayed(tracks);
-                }
-            } catch (e) {
-                console.error("Playback failed, reverting DJ state to allow retry on next tick:", e);
-                this.lastQuery = null;
-                removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
-                throw e;
-            }
-        } else {
-            // Same context: Check for Auto-Refill (Okawari)
-            await this.checkAndRefillQueue(queriesToUse, currentItem);
+        } finally {
+            this.isProcessingLoop = false;
         }
     }
 
@@ -582,6 +571,11 @@ export class DJCore {
     private async checkAndRefillQueue(queries: string[], currentItem: ScheduleItem) {
         if (this.isRefilling) return;
 
+        // Do not auto-refill if there is no active ContextDJ session (e.g. external Spotify playback took over)
+        if (!this.isSessionPlaybackActive()) {
+            return;
+        }
+
         const now = Date.now();
         const REFILL_COOLDOWN_MS = 60 * 1000;
         if (now - this.lastRefillAttemptTime < REFILL_COOLDOWN_MS) {
@@ -589,12 +583,18 @@ export class DJCore {
         }
 
         const playback = await this.getPlaybackState();
-        if (!playback || !playback.device || !playback.device.is_active) {
+        if (!playback || !playback.device || !playback.device.is_active || !playback.is_playing) {
+            return;
+        }
+
+        // Re-verify session is still active after getPlaybackState() checks for external playback takeover
+        if (!this.isSessionPlaybackActive()) {
             return;
         }
 
         try {
-            const queue = await this.getQueue();
+            const activeItem = (playback.item && playback.item.type === 'track') ? (playback.item as Track) : null;
+            const queue = await this.getQueue(activeItem);
             if (queue.length < PLAYBACK_CONSTANTS.MIN_QUEUE_SIZE_FOR_REFILL) {
                 this.isRefilling = true;
                 this.lastRefillAttemptTime = Date.now();
@@ -619,13 +619,21 @@ export class DJCore {
                 if (toAdd.length > 0) {
                     this.addLog(`🥣 Adding ${toAdd.length} fresh tracks to queue...`);
 
+                    const addedTracks: Track[] = [];
                     for (const track of toAdd) {
-                        await this.playerClient.addToQueue(track.uri);
+                        const res = await this.playerClient.addToQueue(track.uri);
+                        if (!res.ok) {
+                            this.addLog(`⚠️ Queue refill interrupted (${res.status || 'ERR'}).`);
+                            break;
+                        }
                         this.sessionCache.markTrackPlayed(track);
+                        addedTracks.push(track);
                         await new Promise(r => setTimeout(r, 200));
                     }
-                    this.sessionCache.appendSessionTracks(toAdd);
-                    this.addLog(`✅ Refill complete.`);
+                    if (addedTracks.length > 0) {
+                        this.sessionCache.appendSessionTracks(addedTracks);
+                        this.addLog(`✅ Refill complete.`);
+                    }
                 } else {
                     this.addLog(`⚠️ Refill found no new unique tracks.`);
                     this.lastRefillAttemptTime = Date.now() + 120 * 1000;
@@ -642,44 +650,48 @@ export class DJCore {
     // --- Queue & Playback State ---
 
     async getQueue(currentTrackOverride?: Track | null): Promise<Track[]> {
-        const activeTrack = currentTrackOverride || this.lastPlayingTrack;
+        const activeTrack = currentTrackOverride ?? this.lastPlayingTrack;
         const sessionTracks = this.sessionCache.getSessionTracks();
+        const now = Date.now();
 
-        if (sessionTracks.length > 0) {
-            let foundIndex = -1;
+        if (sessionTracks.length > 0 && !this.isExternalContextActive) {
             if (activeTrack) {
-                foundIndex = this.sessionCache.findTrackIndexInSession(activeTrack);
-            }
+                const foundIndex = this.sessionCache.findTrackIndexInSession(activeTrack);
+                if (foundIndex >= 0) {
+                    this.hasConfirmedSessionPlayback = true;
+                    return sessionTracks
+                        .slice(foundIndex + 1)
+                        .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
+                }
 
-            if (foundIndex >= 0) {
-                return sessionTracks
-                    .slice(foundIndex + 1)
-                    .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
-            }
+                const isInStartupGrace = !this.hasConfirmedSessionPlayback &&
+                    this.lastPlayTime > 0 &&
+                    (now - this.lastPlayTime < 15000);
 
-            const now = Date.now();
-            if (this.lastPlayTime && now - this.lastPlayTime < 15000) {
+                if (isInStartupGrace) {
+                    return sessionTracks
+                        .slice(1)
+                        .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
+                }
+
+                // Active track is not in sessionTracks and startup grace has passed (or session already started):
+                // User switched playback externally in the Spotify app -> prioritize Spotify's live queue.
+                this.handleExternalPlaybackDetected(activeTrack);
+            } else if (this.lastPlayTime > 0 && now - this.lastPlayTime < 15000) {
                 return sessionTracks
                     .slice(1)
                     .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
             }
-
-            return this.sessionCache.getSessionTracksFromCurrent(activeTrack);
         }
 
         try {
-            const response = await this.spotify.getGeneric('https://api.spotify.com/v1/me/player/queue') as {
-                currently_playing?: Track;
-                queue?: Track[];
-            } | null;
-
-            const queueItems = response?.queue || [];
-            const tracks = queueItems.filter((item: { type?: string }) => item.type === 'track') as Track[];
+            const { currently_playing: currentlyPlaying, queue: tracks } = await this.playerClient.getUserQueue();
             let enriched = tracks.map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
 
-            if (activeTrack && enriched.length > 0) {
-                const activeKey = generateTrackKey(activeTrack);
-                const activeUri = activeTrack.uri;
+            const effectiveActive = activeTrack || currentlyPlaying;
+            if (effectiveActive && enriched.length > 0) {
+                const activeKey = generateTrackKey(effectiveActive);
+                const activeUri = effectiveActive.uri;
                 while (enriched.length > 0) {
                     const first = enriched[0];
                     if (first.uri === activeUri || (activeKey && generateTrackKey(first) === activeKey)) {
@@ -694,15 +706,15 @@ export class DJCore {
                 return enriched;
             }
 
-            if (sessionTracks.length > 0) {
-                return this.sessionCache.getSessionTracksFromCurrent(activeTrack);
+            if (!activeTrack && !this.isExternalContextActive && this.sessionCache.getSessionTracks().length > 0) {
+                return this.sessionCache.getSessionTracksFromCurrent(null);
             }
 
             return [];
         } catch (e) {
             console.warn('Failed to fetch queue:', e);
-            if (sessionTracks.length > 0) {
-                return this.sessionCache.getSessionTracksFromCurrent(activeTrack);
+            if (!activeTrack && !this.isExternalContextActive && this.sessionCache.getSessionTracks().length > 0) {
+                return this.sessionCache.getSessionTracksFromCurrent(null);
             }
             return [];
         }
@@ -714,9 +726,31 @@ export class DJCore {
             const now = Date.now();
             const sessionTracks = this.sessionCache.getSessionTracks();
 
-            if (this.lastPlayTime && now - this.lastPlayTime < 6000 && sessionTracks.length > 0) {
+            if (state?.device?.is_active && state.device.id) {
+                this.playerClient.syncActiveDeviceId(state.device.id);
+            }
+
+            // ContextDJ always initiates playback via `{ uris }` (context === null).
+            // Any non-null context URI (album, playlist, artist, collection) means playback came from Spotify externally.
+            const hasExternalContextUri = Boolean(state?.context?.uri);
+            const isCurrentItemInSession = Boolean(
+                !hasExternalContextUri &&
+                state?.item &&
+                state.item.type === 'track' &&
+                this.sessionCache.findTrackIndexInSession(state.item as Track) >= 0
+            );
+
+            if (isCurrentItemInSession) {
+                this.sessionCache.confirmSessionPlayback();
+            }
+
+            const isInStartupGrace = !this.hasConfirmedSessionPlayback &&
+                this.lastPlayTime > 0 &&
+                (now - this.lastPlayTime < 6000);
+
+            if (isInStartupGrace && sessionTracks.length > 0) {
                 const firstSessionTrack = sessionTracks[0];
-                const isPlayingOldTrack = state?.item && this.sessionCache.findTrackIndexInSession(state.item) === -1;
+                const isPlayingOldTrack = Boolean((state?.item && !isCurrentItemInSession) || hasExternalContextUri);
                 const isNoTrack = !state || !state.item;
 
                 if (isNoTrack || isPlayingOldTrack) {
@@ -735,16 +769,42 @@ export class DJCore {
                         ...(state || {}),
                         is_playing: true,
                         item: enriched,
-                        device: fallbackDevice
+                        device: fallbackDevice,
+                        __optimisticFallback: true,
                     } as SpotifyApi.CurrentPlaybackResponse;
                 }
             }
 
             if (state && state.item && state.item.type === 'track') {
-                const enriched = this.sessionCache.enrichTrackWithCachedMetadata(state.item as Track);
+                const trackItem = state.item as Track;
+                if (
+                    sessionTracks.length > 0 &&
+                    !isCurrentItemInSession &&
+                    (this.hasConfirmedSessionPlayback || !this.lastPlayTime || now - this.lastPlayTime >= 15000)
+                ) {
+                    this.handleExternalPlaybackDetected(trackItem);
+                }
+                const enriched = this.sessionCache.enrichTrackWithCachedMetadata(trackItem);
                 state.item = enriched;
                 this.lastPlayingTrack = enriched;
                 return state;
+            }
+
+            const isNonTrackExternal = Boolean(
+                state &&
+                ((state.item && state.item.type !== 'track') ||
+                    (state.currently_playing_type && state.currently_playing_type !== 'track' && state.currently_playing_type !== 'unknown'))
+            );
+
+            if (
+                isNonTrackExternal &&
+                sessionTracks.length > 0 &&
+                (this.hasConfirmedSessionPlayback || !this.lastPlayTime || now - this.lastPlayTime >= 15000)
+            ) {
+                this.handleExternalPlaybackDetected({
+                    name: state?.item?.name || state?.currently_playing_type || 'External Media',
+                    artists: [{ name: 'Spotify' }]
+                });
             }
 
             if (!state || !state.item) {
@@ -753,6 +813,7 @@ export class DJCore {
 
             return state;
         } catch (e) {
+            this.playerClient.reportThrownError(e, 'get_playback_state', { throttleMs: 10000 });
             console.warn('Failed to fetch playback state:', e);
             return null;
         }
@@ -761,11 +822,11 @@ export class DJCore {
     // --- Status Inspection & Transport Controls ---
 
     getLastPlayTime(): number {
-        return this.lastPlayTime;
+        return this.sessionCache.getLastPlayTime();
     }
 
     getDJStatus() {
-        const currentItem = this.getCurrentItem();
+        const currentItem = this.getCurrentItem() ?? this.getEffectiveItemForPlayback();
         return {
             currentScheduleItem: currentItem,
             currentQuery: this.lastQuery,

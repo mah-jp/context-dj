@@ -1,17 +1,15 @@
 import { X, Terminal } from 'lucide-react';
+import { usePlayerLogs } from '../context/PlayerContext';
 
 interface ProcessLogViewerProps {
-    logs: string[];
+    logs?: string[];
     onClose: () => void;
 }
 
-export default function ProcessLogViewer({ logs, onClose }: ProcessLogViewerProps) {
+export default function ProcessLogViewer({ logs: logsProp, onClose }: ProcessLogViewerProps) {
+    const { logs: contextLogs } = usePlayerLogs();
+    const logs = logsProp ?? contextLogs;
 
-    // Auto scroll to latest check if it's annoying or helpful. 
-    // Usually helpful for logs.
-    // However, logs are unshifted (newest first) in our implementation?
-    // Let's check dj-core.ts: this.processLog.unshift(msg);
-    // So top is newest. No scroll needed.
 
     return (
         <div style={{

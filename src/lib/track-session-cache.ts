@@ -1,6 +1,6 @@
 import { STORAGE_KEYS } from './constants';
 import { Track, TrackMetadata } from './types';
-import { getStoredJSON, setStoredJSON } from './storage';
+import { getStoredJSON, setStoredJSON, removeStorageItem } from './storage';
 import { normalizeTrackName, generateTrackKey } from './dj-utils';
 
 /**
@@ -12,6 +12,10 @@ export class TrackSessionCache {
     private currentSessionTracks: Track[] = [];
     private sessionPlayedUris = new Set<string>();
     private sessionPlayedKeys = new Set<string>();
+    private lastPlayTime = 0;
+    private lastPlayingTrack: Track | null = null;
+    private hasConfirmedSessionPlayback = false;
+    private isExternalContextActive = false;
 
     constructor() {
         // Restore track metadata cache from localStorage
@@ -25,6 +29,9 @@ export class TrackSessionCache {
         if (savedSessionTracks.length > 0) {
             this.currentSessionTracks = savedSessionTracks;
         }
+
+        // Restore last playing track if available
+        this.lastPlayingTrack = getStoredJSON<Track | null>(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, null);
     }
 
     getSessionTracks(): Track[] {
@@ -33,8 +40,17 @@ export class TrackSessionCache {
 
     setSessionTracks(tracks: Track[], persist: boolean = true) {
         this.currentSessionTracks = tracks;
+        this.hasConfirmedSessionPlayback = false;
+        this.isExternalContextActive = false;
         if (persist) {
             setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, tracks);
+        }
+    }
+
+    clearSessionTracks(persist: boolean = true) {
+        this.currentSessionTracks = [];
+        if (persist) {
+            removeStorageItem(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS);
         }
     }
 
@@ -43,10 +59,75 @@ export class TrackSessionCache {
         setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, this.currentSessionTracks);
     }
 
+    isSessionPlaybackActive(): boolean {
+        return !this.isExternalContextActive && this.currentSessionTracks.length > 0;
+    }
+
+    activateDJSession(tracks: Track[], persist: boolean = true) {
+        this.setSessionTracks(tracks, persist);
+        this.lastPlayTime = Date.now();
+        this.hasConfirmedSessionPlayback = false;
+        this.isExternalContextActive = false;
+    }
+
+    activateExternalContext(clearTracks: boolean = true, persist: boolean = true) {
+        this.isExternalContextActive = true;
+        if (clearTracks) {
+            this.clearSessionTracks(persist);
+        }
+        this.hasConfirmedSessionPlayback = false;
+        this.lastPlayTime = 0;
+    }
+
+    confirmSessionPlayback() {
+        this.hasConfirmedSessionPlayback = true;
+        this.isExternalContextActive = false;
+    }
+
+    getLastPlayTime(): number {
+        return this.lastPlayTime;
+    }
+
+    setLastPlayTime(time: number) {
+        this.lastPlayTime = time;
+    }
+
+    getLastPlayingTrack(): Track | null {
+        return this.lastPlayingTrack;
+    }
+
+    setLastPlayingTrack(track: Track | null, persist: boolean = false) {
+        this.lastPlayingTrack = track;
+        if (persist) {
+            if (track) {
+                setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, track);
+            } else {
+                removeStorageItem(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK);
+            }
+        }
+    }
+
+    getHasConfirmedSessionPlayback(): boolean {
+        return this.hasConfirmedSessionPlayback;
+    }
+
+    setHasConfirmedSessionPlayback(confirmed: boolean) {
+        this.hasConfirmedSessionPlayback = confirmed;
+    }
+
+    getIsExternalContextActive(): boolean {
+        return this.isExternalContextActive;
+    }
+
+    setIsExternalContextActive(external: boolean) {
+        this.isExternalContextActive = external;
+    }
+
     resetSessionPlayedHistory() {
         this.sessionPlayedUris.clear();
         this.sessionPlayedKeys.clear();
     }
+
 
     markTrackPlayed(track: Track) {
         if (track.uri) {
@@ -200,13 +281,15 @@ export class TrackSessionCache {
 
     getSessionTracksFromCurrent(activeTrack?: Track | null): Track[] {
         if (this.currentSessionTracks.length === 0) return [];
-        let startIndex = 1;
         if (activeTrack) {
             const foundIndex = this.findTrackIndexInSession(activeTrack);
-            if (foundIndex >= 0) {
-                startIndex = foundIndex + 1;
+            if (foundIndex === -1) {
+                return [];
             }
+            return this.currentSessionTracks
+                .slice(foundIndex + 1)
+                .map(t => this.enrichTrackWithCachedMetadata(t));
         }
-        return this.currentSessionTracks.slice(startIndex).map(t => this.enrichTrackWithCachedMetadata(t));
+        return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
     }
 }
