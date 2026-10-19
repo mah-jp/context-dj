@@ -23,12 +23,14 @@ Unlike standard shuffle or playlists, ContextDJ builds a **context-aware schedul
 
 ## ✨ Key Features
 
-- **📸 Context Vision**: Use your camera to "show" the DJ your environment. The AI analyzes visual context, artistic mood/lighting to suggest perfect soundtracks.
-- **♻️ Context Recall**: Instantly re-summon past moods. Clicking archived schedule items lets you remix and reuse previous contexts.
-- **✨ DJ Insight**: Real-time visibility into the AI's creative "train of thought," explaining why each track and transition was chosen.
-- **🎯 AI Filtering**: An automated verification layer that ensures Spotify search results genuinely match your complex requests.
-- **🥣 Auto-Refill (Okawari)**: An intelligent, endless loop that automatically generates new schedule items before the music stops.
-- **🔒 Privacy First (BYOK)**: Direct client-to-service communication. Your API keys (Spotify, OpenAI, Gemini) never leave your browser.
+- **🎼 Smart Sequencing (Story Arc / 起承転結)**: Evaluates candidate tracks by energy (1–10), estimated BPM, and set role (`Intro` → `Build` → `Peak` → `Outro`), automatically arranging every queue into a cohesive 4-stage DJ progression rather than a random shuffle.
+- **⚓ Anchor Tracks & Multi-Axis AI Filtering**: Seeds each schedule block with iconic "Anchor Tracks" and verifies Spotify search candidates using track, artist, and **album** context—filtering out generic commercial/advertising BGM, karaoke, and music box covers while strictly prioritizing explicitly requested artists.
+- **✨ DJ Insight & Track Notes**: Real-time visibility into the AI's creative "train of thought," plus toggleable per-track **DJ Notes** (Quote icon) showing **Vibe Tags** (e.g., `#夕暮れチル`), stage/energy badges, and one-sentence selection reasons.
+- **📸 Context Vision & 🎤 Voice Input**: Use your camera to "show" the DJ your environment so the AI can translate visual mood and lighting into soundtracks, or use multi-language **Voice Input** to speak requests hands-free.
+- **♻️ Context Recall & Personal Preferences**: Click archived schedule items to instantly re-summon and remix past moods, or set persistent **Personal Preferences** (universal style instructions) in Settings that are automatically applied to every request.
+- **🥣 Auto-Refill (Okawari) & Resilient Sync**: An intelligent, endless loop that automatically generates new schedule items and refills the queue before the music stops, backed by Spotify playback convergence sync, transition guards, and background-optimized polling.
+- **🖥️ Terminal CUI / TUI Dashboard**: Built-in Ink-based terminal UI for controlling playback, inspecting live progress, Vibe/Stage metadata, and DJ thoughts, and submitting requests directly from your terminal or `tmux`.
+- **🔒 Privacy First (BYOK)**: Direct client-to-service communication. Your API keys (Spotify, OpenAI, Gemini) never leave your browser or local CLI config.
 
 ## 🚀 Getting Started
 
@@ -43,16 +45,16 @@ To use ContextDJ (even the hosted version), you need:
         - Web Hosted: `https://contextdj.remoteroom.jp/`
         - CLI / Terminal: `http://127.0.0.1:8888/callback`
         - Local Web Dev: `http://127.0.0.1:3000/`
-3.  **AI API Key**: key from either [OpenAI](https://platform.openai.com) or [Google AI Studio](https://aistudio.google.com/).
+3.  **AI API Key**: An API key from either [OpenAI](https://platform.openai.com) (default model: `gpt-5.4-mini`) or [Google AI Studio](https://aistudio.google.com/) (default model: `gemini-flash-latest`).
 
 ### Setup Guide
 
 1.  Go to [ContextDJ](https://contextdj.remoteroom.jp/). ![ContextDJ: Start Screen](./docs/images/screenshot_start.png)
 2.  Click the **Settings (⚙️)** icon in the top right. ![ContextDJ: Settings Screen](./docs/images/screenshot_settings.png)
 3.  Enter your **Spotify Client ID**.
-4.  Enter your **AI API Key** (OpenAI or Gemini).
+4.  Select your **AI Provider** (OpenAI or Google Gemini) and enter your **AI API Key** (you can also customize the model name, Voice Input language, and Personal Preferences).
 5.  Click **Save Configuration**.
-6.  Return to the home page, type a prompt (e.g., *"Bright jazz for the afternoon, and winter a cappella for the night"*), and hit Send!
+6.  Return to the home page, type (or speak) a prompt (e.g., *"Bright jazz for the afternoon, and winter a cappella for the night"*), and hit Send!
 
 ## 🛠️ Development
 
@@ -66,40 +68,48 @@ If you want to run ContextDJ locally or contribute:
 
 2.  **Install dependencies**
     ```bash
-    npm install
-    # or
     yarn install
     ```
 
 3.  **Run the development server**
     ```bash
-    npm run dev
+    yarn dev
     ```
 
 4.  Open [http://127.0.0.1:3000](http://127.0.0.1:3000) with your browser.
 
+5.  **Run tests and linter**
+    ```bash
+    yarn test
+    yarn lint
+    ```
+
 ## 🖥️ CLI / Terminal Version
 
-A terminal-native CUI (TUI) dashboard is built into ContextDJ, allowing you to control playback and interact with the AI curator directly from your terminal. It provides real-time ASCII visualization of the playback schedule, currently playing track, DJ thoughts, and an interactive prompt.
+A terminal-native CUI (TUI) dashboard is built into ContextDJ, allowing you to control playback and interact with the AI curator directly from your terminal (ideal for `tmux` or headless setups). It provides real-time visualization of the active schedule, anchor tracks, currently playing track with progress bar, AI-curated metadata (`Vibe`, `Energy`, `Stage`, `Reason`), DJ thoughts, and an interactive request prompt.
 
 ### Launching
 
 ```bash
 # Install dependencies (first time only)
-npm install
+yarn install
 
 # Launch interactive TUI dashboard
-npm run cli
+yarn cli
 
 # Launch and submit an initial music request directly
-npm run cli -- "Chill beats for late night coding"
+yarn cli "Chill beats for late night coding"
 
 # Run interactive setup wizard
-npm run cli -- setup
+yarn cli setup
+
+# Show configuration file path or help
+yarn cli --config
+yarn cli --help
 ```
 
 ### Initial Authentication (Copy-Paste Method)
-1. On first run, `npm run cli` displays an authorization URL in your terminal.
+1. On first run, `yarn cli` displays an authorization URL in your terminal.
 2. Open the URL in your local browser and approve the request.
 3. Copy the redirected URL (`http://127.0.0.1:8888/callback?code=...`) from your browser's address bar and paste it into the terminal.
 4. The obtained `refresh_token` is saved in `~/.config/context-dj/config.json` and refreshed silently in the background.
@@ -122,19 +132,23 @@ npm run cli -- setup
 
 ## 📦 Tech Stack
 
-- **Framework**: [Next.js](https://nextjs.org/) (App Router)
+- **Framework**: [Next.js 16](https://nextjs.org/) (App Router, React 19, PWA support via `@ducanh2912/next-pwa`)
 - **Language**: TypeScript
+- **Terminal UI**: [Ink](https://github.com/vadimdemedes/ink) (React for CLI/TUI)
 - **Styling**: CSS Modules (Custom Dark Theme)
-- **State Management**: React Context API
+- **State Management**: React Context API (split playback, queue/schedule, and action contexts)
+- **Testing & Linting**: Node.js Test Runner (`tsx --test`), ESLint 9
+- **Package Manager**: Yarn (`yarn@4.18.1`)
 - **APIs**:
-    - Spotify Web API
+    - Spotify Web API (OAuth 2.0 PKCE)
     - OpenAI API / Google Gemini API
+    - Web Speech API (Voice Input)
 
 ## 📄 Privacy Notice
 
-ContextDJ is a **client-side application**.
-- We allow you to input your sensitive API keys only to communicate directly with the respective services (Spotify, OpenAI, Google) from your browser.
-- **No data is sent to our servers.** All configuration is persisted in your browser's `localStorage`.
+ContextDJ is a **client-side / local application**.
+- Your sensitive API keys are used solely to communicate directly with the respective services (Spotify, OpenAI, Google) from your browser or local terminal.
+- **No data is sent to our servers.** All configuration and history are persisted locally in your browser's `localStorage` (or `~/.config/context-dj/` for the CLI).
 
 ## 🤝 License
 

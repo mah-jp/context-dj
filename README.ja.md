@@ -23,12 +23,14 @@
 
 ## ✨ 主な機能
 
-- **📸 Context Vision**: カメラで今見ている風景をDJに「見せる」ことで、その場の情景や空気感にぴったりの音楽を生成。
-- **♻️ Context Recall**: 過去の予定をワンタップで「召喚」。以前のムードや文脈を瞬時に再演・リミックス。
-- **✨ DJ INSIGHT**: AIが今何を考えてその曲を選んだか、選曲の思考プロセスをリアルタイムに可視化。
-- **🎯 楽曲精査 (AI Filtering)**: Spotifyの検索結果がリクエストに合致しているかをAIが事前判定し、ノイズを排除。
-- **🥣 自動おかわり機能**: 常に「文脈」を維持したまま、曲が少なくなると自動で次を提案する無限選曲。
-- **🔒 プライバシー第一 (BYOK)**: サーバーを介さない設計。APIキーや個人データはすべてブラウザ内に完結。
+- **🎼 スマート・シーケンシング (起承転結)**: 各楽曲のエネルギー (1〜10)・推定BPM・セット内の役割 (`Intro` → `Build` → `Peak` → `Outro`) をAIが判定し、単なるシャッフルではなく本物のDJセットのような4段階のストーリー構成に自動並び替え。
+- **⚓ アンカートラック & 楽曲精査 (AI Filtering)**: スケジュールごとにムードの核となる「象徴曲 (Anchor Tracks)」を設定。さらにSpotify検索結果の曲名・アーティスト名・**アルバム名**までAIが精査し、広告用BGM・カラオケ・オルゴール等のノイズを排除しつつ、指名されたアーティストの原曲を最優先で選曲。
+- **✨ DJ INSIGHT & 選曲ノート**: AIが今何を考えてそのブロックを構成したかの思考プロセスに加え、1曲ごとの **Vibeタグ** (例: `#夕暮れチル`)、ステージ/エネルギー表示、ワンフレーズの**選曲理由**をリアルタイムに可視化 (上部の引用アイコンで表示切替可能)。
+- **📸 Context Vision & 🎤 音声入力**: カメラで今見ている風景をDJに「見せる」ことでその場の情景や空気感に合う音楽を生成。多言語対応の**音声入力**によるハンズフリーのリクエストにも対応。
+- **♻️ Context Recall & 個人の好み設定**: 過去の予定をワンタップで「召喚」してムードを再演・リミックス。さらに設定画面の **Personal Preferences (共通スタイル指示)** に好きなジャンルやこだわりを登録しておけば、毎回のリクエストに最優先の指示として自動反映。
+- **🥣 自動おかわり機能 & 安定した再生同期**: 常に「文脈」を維持したまま、曲が少なくなると自動で次を提案する無限選曲。Spotify実再生状態との収束同期 (Convergence Sync) やトランジション保護、バックグラウンド省電力ポーリングにより安定した再生を実現。
+- **🖥️ CLI / ターミナル版 (TUIダッシュボード)**: ターミナルや `tmux` 上で再生制御・進行状況・Vibeタグ・DJの思考確認・リクエスト送信が完結する対話型CUIを搭載。
+- **🔒 プライバシー第一 (BYOK)**: サーバーを介さない設計。APIキーや履歴データはすべてブラウザ内 (CLI版はローカル設定ファイル) に完結し、外部サーバーへ送信されることはありません。
 
 ## 🚀 はじめ方
 
@@ -43,16 +45,16 @@ ContextDJを利用するには、以下の準備が必要です (公開版・ロ
         - Web 公開版: `https://contextdj.remoteroom.jp/`
         - CLI / ターミナル版: `http://127.0.0.1:8888/callback`
         - ローカル Web 開発: `http://127.0.0.1:3000/`
-3.  **AI APIキー**: [OpenAI](https://platform.openai.com) または [Google AI Studio](https://aistudio.google.com/) のキー。
+3.  **AI APIキー**: [OpenAI](https://platform.openai.com) (デフォルトモデル: `gpt-5.4-mini`) または [Google AI Studio](https://aistudio.google.com/) (デフォルトモデル: `gemini-flash-latest`) のキー。
 
 ### セットアップ手順
 
 1.  [contextdj.remoteroom.jp](https://contextdj.remoteroom.jp) にアクセスします。 ![ContextDJ: 初期画面](./docs/images/screenshot_start.png)
 2.  右上の **設定 (⚙️)** アイコンをクリックします。 ![ContextDJ: 設定画面](./docs/images/screenshot_settings.png)
 3.  **Spotify Client ID** を入力します。
-4.  **AI API Key** (OpenAI または Gemini) を入力します。
+4.  **AI Provider** (OpenAI または Google Gemini) を選択し、**AI API Key** を入力します (必要に応じてモデル名、音声認識言語、個人の好み設定などもカスタマイズ可能です)。
 5.  **Save Configuration** をクリックします。
-6.  ホーム画面に戻り、聴きたい気分のプロンプト（例: *"午後は明るいジャズで、夜は冬に似合うアカペラが聴きたい"*）を入力して送信してください！
+6.  ホーム画面に戻り、聴きたい気分のプロンプト（例: *"午後は明るいジャズで、夜は冬に似合うアカペラが聴きたい"*）をテキストまたは音声で入力して送信してください！
 
 ## 🛠️ 開発者向け
 
@@ -66,40 +68,48 @@ ContextDJを利用するには、以下の準備が必要です (公開版・ロ
 
 2.  **依存関係のインストール**
     ```bash
-    npm install
-    # または
     yarn install
     ```
 
 3.  **開発サーバーの起動**
     ```bash
-    npm run dev
+    yarn dev
     ```
 
 4.  ブラウザで [http://127.0.0.1:3000](http://127.0.0.1:3000) を開きます。
 
+5.  **テスト・Lintの実行**
+    ```bash
+    yarn test
+    yarn lint
+    ```
+
 ## 🖥️ CLI / ターミナル版
 
-ターミナルやヘッドレス環境で手軽に操作・常駐できる CUI (TUI) 版も搭載されています。テキストによる動的なスケジュール・再生状態の可視化と操作パネルを提供します。
+ターミナルやヘッドレス環境 (`tmux` など) で手軽に操作・常駐できる CUI (TUI) 版も搭載されています。再生中の楽曲・プログレスバー・AIが付与したメタデータ (`Vibe` / `Energy` / `Stage` / `Reason`)・DJの思考・アクティブなスケジュールと象徴曲 (Anchors) をリアルタイムに可視化し、そのままリクエスト入力や再生操作が行えます。
 
 ### 起動方法
 
 ```bash
 # 依存関係のインストール (初回のみ)
-npm install
+yarn install
 
 # 対話型ダッシュボードの起動
-npm run cli
+yarn cli
 
 # 起動と同時に音楽リクエストを送信
-npm run cli -- "夜風に当たりながら聴きたいLo-Fiとアンビエント"
+yarn cli "夜風に当たりながら聴きたいLo-Fiとアンビエント"
 
 # 初回セットアップ・対話型設定ウィザードの実行
-npm run cli -- setup
+yarn cli setup
+
+# 設定ファイルのパス表示 / ヘルプの表示
+yarn cli --config
+yarn cli --help
 ```
 
 ### 初回認証 (URL コピペ方式)
-1. `npm run cli` を初回実行すると、ターミナルに Spotify 認可用の URL が表示されます。
+1. `yarn cli` を初回実行すると、ターミナルに Spotify 認可用の URL が表示されます。
 2. ブラウザでその URL を開き、「承認」します。
 3. リダイレクトされた URL (`http://127.0.0.1:8888/callback?code=...`) をアドレスバーからコピーし、ターミナルに貼り付けます。
 4. 取得された `refresh_token` は `~/.config/context-dj/config.json` に安全に保存され、以降は完全自動でサイレント更新されます。
@@ -122,19 +132,23 @@ npm run cli -- setup
 
 ## 📦 技術スタック
 
-- **フレームワーク**: [Next.js](https://nextjs.org/) (App Router)
+- **フレームワーク**: [Next.js 16](https://nextjs.org/) (App Router, React 19, `@ducanh2912/next-pwa` によるPWA対応)
 - **言語**: TypeScript
+- **ターミナルUI**: [Ink](https://github.com/vadimdemedes/ink) (Reactベースの対話型CLI/TUI)
 - **スタイリング**: CSS Modules (カスタムダークテーマ)
-- **状態管理**: React Context API
+- **状態管理**: React Context API (再生状態・キュー/スケジュール・アクションの分割Context構成)
+- **テスト・品質管理**: Node.js Test Runner (`tsx --test`), ESLint 9
+- **パッケージマネージャー**: Yarn (`yarn@4.18.1`)
 - **API**:
-    - Spotify Web API
+    - Spotify Web API (OAuth 2.0 PKCE)
     - OpenAI API / Google Gemini API
+    - Web Speech API (音声入力)
 
 ## 📄 プライバシー通知
 
-ContextDJは **クライアントサイド・アプリケーション** です。
-- 入力された機密性の高いAPIキーは、利用者のブラウザから直接各サービス (Spotify, OpenAI, Google) と通信するためだけに使用されます。
-- **開発者のサーバーに利用者のデータが送信されることはありません。** すべての設定はブラウザの `localStorage` に保存されます。
+ContextDJは **クライアントサイド / ローカル完結型アプリケーション** です。
+- 入力された機密性の高いAPIキーは、利用者のブラウザまたはローカルターミナルから直接各サービス (Spotify, OpenAI, Google) と通信するためだけに使用されます。
+- **開発者のサーバーに利用者のデータが送信されることはありません。** すべての設定や履歴はブラウザの `localStorage` (CLI版は `~/.config/context-dj/`) にローカル保存されます。
 
 ## 🤝 ライセンス
 
