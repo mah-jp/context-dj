@@ -1,6 +1,6 @@
 {
   "name": "context-dj",
-  "version": "2026.10.15",
+  "version": "2026.11.07",
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
