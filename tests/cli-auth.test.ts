@@ -1,7 +1,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { extractCodeFromInput } from '../src/cli/auth';
-import { isConfigured, CLIConfig } from '../src/cli/config';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { extractCodeFromInput, getValidSpotifyToken } from '../src/cli/auth';
+import { isConfigured, CLIConfig, loadConfig } from '../src/cli/config';
 
 describe('CLI Auth - extractCodeFromInput', () => {
     test('extracts code from full redirect URL with query params', () => {
@@ -60,5 +63,64 @@ describe('CLI Config - isConfigured', () => {
             aiApiKey: 'valid-api-key',
         };
         assert.strictEqual(isConfigured(cfg), true);
+    });
+
+    test('getValidSpotifyToken refreshes expired token, persists to disk, and mutates in-memory config', async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'context-dj-cli-test-'));
+        const tmpConfigPath = path.join(tmpDir, 'config.json');
+        const prevEnv = process.env.CONTEXT_DJ_CONFIG;
+        const origFetch = globalThis.fetch;
+        process.env.CONTEXT_DJ_CONFIG = tmpConfigPath;
+
+        try {
+            let fetchCount = 0;
+            globalThis.fetch = (async () => {
+                fetchCount++;
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        access_token: 'fresh_cli_token_999',
+                        token_type: 'Bearer',
+                        scope: 'streaming',
+                        expires_in: 3600,
+                        refresh_token: 'rotated_refresh_token',
+                    }),
+                } as unknown as Response;
+            }) as typeof fetch;
+
+            const config: CLIConfig = {
+                spotifyClientId: 'cli_client',
+                spotifyRefreshToken: 'initial_refresh',
+                spotifyAccessToken: 'expired_token',
+                spotifyExpiresAt: Date.now() - 5000,
+                aiProvider: 'gemini',
+                aiApiKey: 'key_123',
+            };
+
+            const token1 = await getValidSpotifyToken(config);
+            assert.strictEqual(token1, 'fresh_cli_token_999');
+            assert.strictEqual(fetchCount, 1);
+            // In-memory config must also be updated so subsequent calls don't re-fetch unnecessarily
+            assert.strictEqual(config.spotifyAccessToken, 'fresh_cli_token_999');
+            assert.strictEqual(config.spotifyRefreshToken, 'rotated_refresh_token');
+            assert.ok((config.spotifyExpiresAt ?? 0) > Date.now());
+
+            // Second call uses updated in-memory token without hitting network again
+            const token2 = await getValidSpotifyToken(config);
+            assert.strictEqual(token2, 'fresh_cli_token_999');
+            assert.strictEqual(fetchCount, 1);
+
+            const diskConfig = loadConfig();
+            assert.strictEqual(diskConfig?.spotifyAccessToken, 'fresh_cli_token_999');
+        } finally {
+            globalThis.fetch = origFetch;
+            if (prevEnv === undefined) {
+                delete process.env.CONTEXT_DJ_CONFIG;
+            } else {
+                process.env.CONTEXT_DJ_CONFIG = prevEnv;
+            }
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
     });
 });

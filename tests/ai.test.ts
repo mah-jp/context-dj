@@ -200,4 +200,82 @@ describe('AIService', () => {
             assert.strictEqual(description, mockJapaneseDescription);
         });
     });
+
+    describe('OpenAI backend & edge-case normalization', () => {
+        it('supports OpenAI backend for generateSchedule, filterTracksWithAI (custom wrapper key), and analyzeImage', async () => {
+            const service = new AIService('openai', 'sk-test-key', 'gpt-5.4-mini');
+            const capturedRequests: unknown[] = [];
+
+            // Inject mock into internal OpenAI client
+            const internal = service as unknown as {
+                openai: {
+                    chat: {
+                        completions: {
+                            create: (req: unknown) => Promise<{ choices: { message: { content: string } }[] }>;
+                        };
+                    };
+                };
+            };
+
+            let mockContent = '';
+            internal.openai.chat.completions.create = async (req: unknown) => {
+                capturedRequests.push(req);
+                return {
+                    choices: [{ message: { content: mockContent } }],
+                };
+            };
+
+            // 1. generateSchedule with existingSchedule and personalContext
+            mockContent = JSON.stringify({
+                blocks: [
+                    { start: '9:05', end: '11:30', queries: ['artist:"Bill Evans"'], thought: 'Morning jazz' },
+                ],
+            });
+            const schedule = await service.generateSchedule(
+                'Add morning jazz',
+                [{ start: '14:00', end: '16:00', query: 'afternoon chill' }],
+                'Prefer live recordings'
+            );
+            assert.strictEqual(schedule.length, 1);
+            assert.strictEqual(schedule[0].start, '09:05'); // Normalized to HH:mm
+            assert.strictEqual(schedule[0].end, '11:30');
+            assert.strictEqual(schedule[0].query, 'artist:"Bill Evans"');
+
+            // 2. filterTracksWithAI when OpenAI wraps array in an arbitrary key like `evaluated_tracks`
+            mockContent = JSON.stringify({
+                evaluated_tracks: [
+                    {
+                        index: 0,
+                        score: 95,
+                        vibeTag: '都会派グルーヴ', // Missing '#' prefix -> should be auto-prefixed
+                        selectionReason: 'Sophisticated groove',
+                        energy: 15, // Above 10 -> should be clamped to 10
+                        stage: 'peak',
+                    },
+                    {
+                        index: 99, // Out of bounds -> should be filtered out safely
+                        score: 80,
+                        vibeTag: '#InvalidIndex',
+                        selectionReason: 'Out of bounds',
+                    },
+                ],
+            });
+            const evals = await service.filterTracksWithAI(
+                'city pop night',
+                [{ id: 'spotify:track:cp1', name: 'Plastic Love', artist: 'Mariya Takeuchi', album: 'VARIETY' }],
+                'Smooth city pop'
+            );
+            assert.strictEqual(evals.length, 1);
+            assert.strictEqual(evals[0].id, 'spotify:track:cp1');
+            assert.strictEqual(evals[0].vibeTag, '#都会派グルーヴ');
+            assert.strictEqual(evals[0].energy, 10);
+            assert.strictEqual(evals[0].stage, 'peak');
+
+            // 3. analyzeImage via OpenAI vision
+            mockContent = '静かな夜の書斎に似合う柔らかなピアノトリオ。';
+            const visionDesc = await service.analyzeImage('abc123base64', 'image/png');
+            assert.strictEqual(visionDesc, '静かな夜の書斎に似合う柔らかなピアノトリオ。');
+            assert.strictEqual(capturedRequests.length, 3);
+        });
+    });
 });

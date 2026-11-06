@@ -59,6 +59,7 @@ export default function Home() {
 
   // Derived state for AI/DJ active operations
   const isBusy = status.includes('thinking') ||
+    status.includes('Analyzing') ||
     status.includes('Filtering') ||
     status.includes('Curating') ||
     status.includes('Searching') ||
@@ -138,6 +139,7 @@ export default function Home() {
         setToast({ msg: "AI processed the request but returned no schedule. Try a different prompt.\n(AIがスケジュールを作成できませんでした。別の表現で試してください)", type: 'error' });
         setStatus('⚠️ No schedule created. (作成失敗)');
       } else {
+        setInputText('');
         setSchedule(schedule);
         setStatus('🔎 Curating & preparing tracks... (楽曲を選曲・準備中...)');
         setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
@@ -156,7 +158,6 @@ export default function Home() {
       setStatus(`⚠️ ${errorMsg}`);
       setToast({ msg: `Error: ${errorMsg} (エラーが発生しました)`, type: 'error' });
     }
-    setInputText('');
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -167,7 +168,7 @@ export default function Home() {
         handleSend();
       }
     } else if (e.key === 'ArrowUp') {
-      if (!inputText && history.length > 0) {
+      if ((!inputText || historyIndex >= 0) && history.length > 0) {
         e.preventDefault();
         const nextIndex = Math.min(historyIndex + 1, history.length - 1);
         setHistoryIndex(nextIndex);
@@ -274,7 +275,10 @@ export default function Home() {
               placeholder={isListening ? "Listening..." : "Hey DJ, play some music for..."}
               className={styles.input}
               value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
+              onChange={(e) => {
+                setInputText(e.target.value);
+                setHistoryIndex(-1);
+              }}
               onKeyDown={handleKeyDown}
               onFocus={() => setShowHistory(false)} // Auto hide when typing
               disabled={!authorized || isListening}

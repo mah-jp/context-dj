@@ -144,8 +144,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     });
     const [isPlaying, setIsPlaying] = useState(false);
     const [deviceName, setDeviceName] = useState('');
-    const [schedule, setScheduleState] = useState<ScheduleItem[]>([]);
-    const [currentQuery, setCurrentQuery] = useState<string | null>(null);
+    const [schedule, setScheduleState] = useState<ScheduleItem[]>(() => {
+        if (typeof window !== 'undefined') {
+            return getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
+        }
+        return [];
+    });
+    const [currentQuery, setCurrentQuery] = useState<string | null>(() => {
+        if (typeof window !== 'undefined') {
+            return getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null;
+        }
+        return null;
+    });
     const [currentThought, setCurrentThought] = useState<string | null>(() => {
         if (typeof window !== 'undefined') {
             const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
@@ -191,7 +201,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const persistPlayingTrack = useCallback((track: Track | null) => {
         if (djRef.current) {
-            djRef.current.getSessionCache().setLastPlayingTrack(track);
+            djRef.current.getSessionCache().setLastPlayingTrack(track, true);
         }
     }, []);
 
@@ -452,6 +462,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     djRef.current = dj;
                     setDjCore(dj);
+                    const initialSnapshot = dj.getStateSnapshot();
+                    setScheduleState(initialSnapshot.schedule);
+                    setCurrentQuery(initialSnapshot.currentQuery);
+                    setCurrentThought(initialSnapshot.currentThought);
+
                     dj.setStatusCallback(setStatus);
                     dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
                         setError(prev => (prev === errMsg ? prev : errMsg));

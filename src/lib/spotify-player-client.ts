@@ -331,7 +331,7 @@ export class SpotifyPlayerClient {
         console.log('▶️ Playback started successfully (Fetch)');
 
         // Ensure repeat is off after a short delay to let playback context establish
-        setTimeout(async () => {
+        const repeatTimer = setTimeout(async () => {
             const repeatUrl = `https://api.spotify.com/v1/me/player/repeat?state=off&device_id=${deviceId}`;
             try {
                 await fetch(repeatUrl, {
@@ -342,6 +342,9 @@ export class SpotifyPlayerClient {
                 console.warn('Set repeat mode failed (non-critical):', e);
             }
         }, 500);
+        if (typeof repeatTimer === 'object' && repeatTimer !== null && 'unref' in repeatTimer && typeof repeatTimer.unref === 'function') {
+            repeatTimer.unref();
+        }
     }
 
     async safeControlRequest(endpoint: string, method: 'POST' | 'PUT', body?: unknown): Promise<SpotifyControlResult> {

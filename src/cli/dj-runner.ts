@@ -33,20 +33,31 @@ export class DJRunner {
         this.djCore = new DJCore(token);
         this.djCore.initAI(config.aiProvider, config.aiApiKey, config.aiModel);
 
+        const initialSnapshot = this.djCore.getStateSnapshot();
         this.state = {
             status: 'Initialized',
             playbackState: null,
             currentTrack: null,
-            schedule: [],
-            currentThought: null,
-            logs: [],
+            schedule: initialSnapshot.schedule,
+            currentThought: initialSnapshot.currentThought,
+            logs: initialSnapshot.logs,
             devices: [],
             activeDevice: null,
         };
 
-        // Attach DJ status hook if supported
+        // Attach DJ state & log hooks
         this.djCore.setStatusCallback((status) => {
             this.updateState({ status });
+        });
+        this.djCore.subscribe((snapshot) => {
+            this.updateState({
+                status: snapshot.status,
+                schedule: snapshot.schedule,
+                currentThought: snapshot.currentThought || this.state.currentThought,
+            });
+        });
+        this.djCore.subscribeLogs((logs) => {
+            this.updateState({ logs });
         });
     }
 
@@ -88,16 +99,20 @@ export class DJRunner {
     addExternalLog(message: string) {
         const timestamp = new Date().toLocaleTimeString();
         const formatted = `[${timestamp}] ${message}`;
-        const newLogs = [...this.state.logs.slice(-30), formatted];
+        const newLogs = [formatted, ...this.state.logs.slice(0, 99)];
         this.updateState({ logs: newLogs });
     }
 
     async refreshDevices(): Promise<SpotifyApi.UserDevice[]> {
         try {
             const devices = await this.djCore.getDevices();
-            const active = devices.find((d) => d.is_active) || devices[0] || null;
-            if (active && active.id) {
-                this.djCore.setActiveDevice(active.id);
+            const active =
+                devices.find((d) => d.is_active) ||
+                (this.config.defaultDeviceId ? devices.find((d) => d.id === this.config.defaultDeviceId) : undefined) ||
+                devices[0] ||
+                null;
+            if (active && active.id && !active.is_active) {
+                await this.djCore.setActiveDevice(active.id);
             }
             this.updateState({ devices, activeDevice: active });
             return devices;
@@ -108,9 +123,16 @@ export class DJRunner {
     }
 
     async selectDevice(deviceId: string) {
-        this.djCore.setActiveDevice(deviceId);
+        this.config.defaultDeviceId = deviceId;
         saveConfig({ defaultDeviceId: deviceId });
-        await this.refreshDevices();
+        await this.djCore.setActiveDevice(deviceId);
+        const devices = await this.djCore.getDevices();
+        const updatedDevices = devices.length > 0 ? devices : this.state.devices;
+        const selected = updatedDevices.find((d) => d.id === deviceId) || null;
+        this.updateState({
+            devices: updatedDevices,
+            activeDevice: selected,
+        });
     }
 
     async sendRequest(userPrompt: string): Promise<ScheduleItem[]> {
@@ -160,11 +182,18 @@ export class DJRunner {
     async pollPlayback(): Promise<SpotifyApi.CurrentPlaybackResponse | null> {
         try {
             const playback = await this.djCore.getPlaybackState();
-            const track = (playback?.item as Track) || null;
+            const guard = this.convergence.inspectState(playback);
+            const rawTrack = (playback && playback.item && playback.item.type === 'track')
+                ? (playback.item as Track)
+                : null;
+            const track = guard.suppressTrackUpdate ? this.state.currentTrack : rawTrack;
+            const effectivePlayback = guard.suppressPlayStateUpdate && playback && this.state.playbackState
+                ? { ...playback, is_playing: this.state.playbackState.is_playing }
+                : playback;
             const djStatus = this.djCore.getDJStatus();
 
             this.updateState({
-                playbackState: playback,
+                playbackState: effectivePlayback,
                 currentTrack: track,
                 currentThought: djStatus.currentThought || this.state.currentThought,
                 logs: this.djCore.getProcessLog(),

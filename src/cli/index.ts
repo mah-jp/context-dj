@@ -15,11 +15,11 @@ async function main() {
 ContextDJ 🎧 - AI Music Curator (CUI)
 
 Usage:
-  npm run cli                             Launch interactive TUI dashboard (ideal for tmux)
-  npm run cli -- "Music request..."       Launch TUI and immediately curate for request
-  npm run cli -- setup                    Run initial Spotify & AI onboarding setup
-  npm run cli -- --config                 Show configuration file path
-  npm run cli -- --help                   Show this help message
+  yarn cli                             Launch interactive TUI dashboard (ideal for tmux)
+  yarn cli "Music request..."          Launch TUI and immediately curate for request
+  yarn cli setup                       Run initial Spotify & AI onboarding setup
+  yarn cli --config                    Show configuration file path
+  yarn cli --help                      Show this help message
 
 Hotkeys inside TUI (when input is empty):
   [Space]     Play / Pause toggle

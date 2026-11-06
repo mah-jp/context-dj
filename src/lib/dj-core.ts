@@ -20,6 +20,8 @@ import {
     getScheduleItemSignature,
     getScheduleItemQueries,
     parseTimeToMinutes,
+    findActiveScheduleItem,
+    resolveEffectiveScheduleItem,
 } from './dj-utils';
 import { TrackSessionCache } from './track-session-cache';
 import { SpotifyPlayerClient } from './spotify-player-client';
@@ -159,7 +161,6 @@ export class DJCore {
                 console.error('Error in DJErrorListener:', e);
             }
         });
-        this.notifyStateListeners();
     }
 
     enrichTrackWithCachedMetadata(track: Track): Track {
@@ -355,12 +356,15 @@ export class DJCore {
         // If first item starts slightly in the future (within 3 hours), align with now so playback starts immediately
         if (schedule.length > 0) {
             const now = new Date();
-            const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-            const firstStartMins = parseTimeToMinutes(schedule[0].start);
-            const nowMins = now.getHours() * 60 + now.getMinutes();
+            if (!isScheduleItemActive(schedule[0], now)) {
+                const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+                const firstStartMins = parseTimeToMinutes(schedule[0].start);
+                const nowMins = now.getHours() * 60 + now.getMinutes();
+                const forwardDiff = (firstStartMins - nowMins + 1440) % 1440;
 
-            if (firstStartMins > nowMins && (firstStartMins - nowMins <= 180)) {
-                schedule[0].start = nowStr;
+                if (forwardDiff > 0 && forwardDiff <= 180) {
+                    schedule[0].start = nowStr;
+                }
             }
         }
 
@@ -389,17 +393,7 @@ export class DJCore {
     }
 
     getItemForDate(date: Date): ScheduleItem | null {
-        for (const item of this.schedule) {
-            if (isScheduleItemActive(item, date)) {
-                return item;
-            }
-        }
-
-        if (this.schedule.length === 1) {
-            return this.schedule[0];
-        }
-
-        return null;
+        return findActiveScheduleItem(this.schedule, date);
     }
 
     /**
@@ -407,27 +401,7 @@ export class DJCore {
      * Guarantees the DJ will not stall silently if a schedule exists.
      */
     getEffectiveItemForPlayback(date: Date = new Date()): ScheduleItem | null {
-        if (!this.schedule || this.schedule.length === 0) return null;
-
-        const activeItem = this.getItemForDate(date);
-        if (activeItem) return activeItem;
-
-        const currentMins = date.getHours() * 60 + date.getMinutes();
-        const firstItem = this.schedule[0];
-        const firstStartMins = parseTimeToMinutes(firstItem.start);
-
-        if (currentMins < firstStartMins) {
-            return firstItem;
-        }
-
-        let bestItem: ScheduleItem = this.schedule[0];
-        for (const item of this.schedule) {
-            const startMins = parseTimeToMinutes(item.start);
-            if (startMins <= currentMins) {
-                bestItem = item;
-            }
-        }
-        return bestItem;
+        return resolveEffectiveScheduleItem(this.schedule, date);
     }
 
     getCurrentItem(): ScheduleItem | null {
@@ -468,11 +442,13 @@ export class DJCore {
                                 thought: nextItem.thought,
                                 anchorTracks: nextItem.anchorTracks
                             }).then(tracks => {
-                                console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
-                                this.preloadedResult = {
-                                    signature: nextSignature,
-                                    tracks
-                                };
+                                if (tracks.length > 0) {
+                                    console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
+                                    this.preloadedResult = {
+                                        signature: nextSignature,
+                                        tracks
+                                    };
+                                }
                                 this.isPreloading = false;
                             }).catch(err => {
                                 console.error("Failed to preload:", err);
@@ -493,6 +469,32 @@ export class DJCore {
             // 2. Check if we need to change music
             if (force || querySignature !== this.lastQuery) {
                 const currentGen = ++this.playbackGeneration;
+                this.playerClient.clearLastError();
+                const devices = await this.getDevices();
+                if (devices.length === 0) {
+                    this.lastQuery = null;
+                    removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+                    const apiErr = this.playerClient.getLastError();
+                    if (apiErr) {
+                        this.updateStatus(`⚠️ ${apiErr.message}`);
+                        if (!silentWait) {
+                            throw new Error(apiErr.message);
+                        }
+                        return;
+                    }
+                    const msg = "No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)";
+                    const noDeviceStatus = '⚠️ Please open Spotify (Spotifyを開いてください)';
+                    console.log(`⚠️ DJ Search skipped: ${msg}`);
+                    if (!silentWait || this.statusText !== noDeviceStatus) {
+                        this.addLog(`⚠️ ${msg}`);
+                    }
+                    this.updateStatus(noDeviceStatus);
+                    if (!silentWait) {
+                        throw new Error(msg);
+                    }
+                    return;
+                }
+
                 console.log(`🎧 DJ Change${force ? ' (Forced)' : ''}: ${querySignature} `);
                 this.lastQuery = querySignature;
                 setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, querySignature);
@@ -503,30 +505,11 @@ export class DJCore {
 
                 let tracks: Track[] = [];
 
-                this.playerClient.clearLastError();
-                const devices = await this.getDevices();
-                if (devices.length === 0) {
-                    const apiErr = this.playerClient.getLastError();
-                    if (apiErr) {
-                        this.lastQuery = null;
-                        removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
-                        this.updateStatus(`⚠️ ${apiErr.message}`);
-                        if (!silentWait) {
-                            throw new Error(apiErr.message);
-                        }
-                        return;
-                    }
-                    const msg = "No active Spotify device found. Please open Spotify on your device. (再生デバイスが見つかりません。Spotifyを開いてください)";
-                    console.log(`⚠️ DJ Search skipped: ${msg}`);
-                    this.updateStatus('⚠️ Please open Spotify (Spotifyを開いてください)');
-                    this.addLog(`⚠️ ${msg}`);
-                    if (!silentWait) {
-                        throw new Error(msg);
-                    }
-                    return;
-                }
-
-                if (this.preloadedResult && this.preloadedResult.signature === querySignature) {
+                if (
+                    this.preloadedResult &&
+                    this.preloadedResult.signature === querySignature &&
+                    this.preloadedResult.tracks.length > 0
+                ) {
                     console.log(`🚀 Using Preloaded Tracks for ${querySignature}`);
                     tracks = this.preloadedResult.tracks;
                     this.preloadedResult = null;
@@ -541,6 +524,21 @@ export class DJCore {
                 }
 
                 if (currentGen !== this.playbackGeneration) {
+                    return;
+                }
+
+                if (tracks.length === 0) {
+                    this.lastQuery = null;
+                    removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+                    this.notifyStateListeners();
+                    const searchErr = this.playerClient.getLastError();
+                    const noTracksMsg = searchErr
+                        ? searchErr.message
+                        : 'No matching tracks found on Spotify. Try a different prompt. (条件に合う楽曲が見つかりませんでした)';
+                    this.updateStatus(`⚠️ ${noTracksMsg}`);
+                    if (!silentWait) {
+                        throw new Error(noTracksMsg);
+                    }
                     return;
                 }
 

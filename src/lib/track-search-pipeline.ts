@@ -4,6 +4,7 @@ import { PLAYBACK_CONSTANTS } from './constants';
 import { DJConfig, SearchPipelineContext, Track, TrackEvaluation } from './types';
 import {
     extractTargetArtists,
+    isTrackByTargetArtist,
     deduplicateTracks,
     filterTracksByPopularityAndArtist,
     sequenceTracksByStory,
@@ -122,18 +123,18 @@ export class TrackSearchPipeline {
             if (pRes.tracks && pRes.tracks.items.length > 0) {
                 const tracks = pRes.tracks.items as Track[];
 
-                let targetArtist = '';
-                const artistMatch = priorityQuery.match(/artist:\s*["']?([^"'\s]+)["']?/i);
-                if (artistMatch) {
-                    targetArtist = artistMatch[1].toLowerCase();
-                } else {
-                    targetArtist = priorityQuery.replace(/["']/g, '').trim().toLowerCase();
-                }
+                const explicitArtists = extractTargetArtists([priorityQuery]);
+                const fallbackArtist =
+                    explicitArtists.length === 0 && !/track:/i.test(priorityQuery)
+                        ? priorityQuery.replace(/["']/g, '').trim().toLowerCase()
+                        : '';
+                const targetArtists = explicitArtists.length > 0
+                    ? explicitArtists
+                    : (fallbackArtist ? [fallbackArtist] : []);
 
-                const matched = tracks.find(t => {
-                    const aName = (t.artists[0]?.name || '').toLowerCase();
-                    return aName.includes(targetArtist) || targetArtist.includes(aName);
-                });
+                const matched = targetArtists.length > 0
+                    ? tracks.find(t => isTrackByTargetArtist(t, targetArtists))
+                    : undefined;
 
                 const bestTrack = matched || tracks[0];
                 this.deps.addLog(`✅ Found Priority Track: ${bestTrack.name} (${bestTrack.artists[0]?.name})`);
@@ -275,7 +276,13 @@ export class TrackSearchPipeline {
             }
         }));
 
-        return allRawTracks.sort(() => Math.random() - 0.5);
+        for (let i = allRawTracks.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const temp = allRawTracks[i];
+            allRawTracks[i] = allRawTracks[j];
+            allRawTracks[j] = temp;
+        }
+        return allRawTracks;
     }
 
     applyTrackFilters(tracks: Track[], targetArtists: string[] = []): Track[] {

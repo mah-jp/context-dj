@@ -9,6 +9,8 @@ import {
     getScheduleItemQueries,
     parseTimeToMinutes,
     normalizeTimeString,
+    findActiveScheduleItem,
+    resolveEffectiveScheduleItem,
 } from '../src/lib/dj-utils';
 import { ScheduleItem, Track } from '../src/lib/types';
 
@@ -52,6 +54,16 @@ describe('dj-utils', () => {
             assert.strictEqual(normalizeTrackName('Song Title Remastered'), 'song title');
             assert.strictEqual(normalizeTrackName('Song Title Live'), 'song title');
             assert.strictEqual(normalizeTrackName('Song Title Radio Mix'), 'song title');
+        });
+
+        it('should preserve hyphenated titles and words containing live/edit/radio substrings', () => {
+            assert.strictEqual(normalizeTrackName('Anti-Hero'), 'anti-hero');
+            assert.strictEqual(normalizeTrackName('Lo-Fi Groove'), 'lo-fi groove');
+            assert.strictEqual(normalizeTrackName('24/7'), '24/7');
+            assert.strictEqual(normalizeTrackName('Meditation'), 'meditation');
+            assert.strictEqual(normalizeTrackName('Alive'), 'alive');
+            assert.strictEqual(normalizeTrackName('Live Forever'), 'live forever');
+            assert.strictEqual(normalizeTrackName('Radioactive'), 'radioactive');
         });
     });
 
@@ -211,6 +223,26 @@ describe('dj-utils', () => {
                 query: '',
             };
             assert.deepStrictEqual(getScheduleItemQueries(item), []);
+        });
+    });
+
+    describe('findActiveScheduleItem & resolveEffectiveScheduleItem', () => {
+        it('correctly resolves active and effective items across overnight gaps after midnight', () => {
+            const schedule: ScheduleItem[] = [
+                { start: '21:00', end: '23:00', query: 'evening chill' },
+                { start: '23:00', end: '01:00', query: 'midnight jazz' },
+                { start: '02:00', end: '04:00', query: 'late night ambient' },
+            ];
+
+            // At 01:30 (gap between 23:00-01:00 and 02:00-04:00):
+            // Strict active item is null, effective item must be 'midnight jazz' (which ended 30m ago at 01:00)
+            const gapAfterMidnight = new Date(2026, 8, 25, 1, 30, 0, 0);
+            assert.strictEqual(findActiveScheduleItem(schedule, gapAfterMidnight), null);
+            assert.strictEqual(resolveEffectiveScheduleItem(schedule, gapAfterMidnight)?.query, 'midnight jazz');
+
+            // At 04:30 (after 02:00-04:00 ended): effective item is 'late night ambient'
+            const afterAll = new Date(2026, 8, 25, 4, 30, 0, 0);
+            assert.strictEqual(resolveEffectiveScheduleItem(schedule, afterAll)?.query, 'late night ambient');
         });
     });
 });

@@ -29,8 +29,12 @@ export function useVisionInput({ djCore, onPromptGenerated, setStatus, setToast 
         try {
             const reader = new FileReader();
             reader.onload = async () => {
-                const base64Data = (reader.result as string).split(',')[1];
+                const resultStr = typeof reader.result === 'string' ? reader.result : '';
+                const base64Data = resultStr.includes(',') ? resultStr.split(',')[1] : '';
                 try {
+                    if (!base64Data) {
+                        throw new Error('Invalid image data');
+                    }
                     const generatedPrompt = await djCore.analyzeImage(base64Data, file.type);
                     onPromptGenerated(generatedPrompt);
                     setToast({ msg: 'Visual scene description generated! (画像を解釈しました)', type: 'success' });
@@ -43,6 +47,12 @@ export function useVisionInput({ djCore, onPromptGenerated, setStatus, setToast 
                 } finally {
                     if (fileInputRef.current) fileInputRef.current.value = '';
                 }
+            };
+            reader.onerror = () => {
+                console.error('FileReader error:', reader.error);
+                setToast({ msg: 'Failed to read image file. (画像の読み込みに失敗しました)', type: 'error' });
+                setStatus('Ready');
+                if (fileInputRef.current) fileInputRef.current.value = '';
             };
             reader.readAsDataURL(file);
         } catch (err: unknown) {

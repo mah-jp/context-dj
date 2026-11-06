@@ -183,10 +183,15 @@ export async function getValidSpotifyToken(config: CLIConfig): Promise<string> {
     };
 
     const expiresAt = Date.now() + (data.expires_in - 60) * 1000;
+    const nextRefreshToken = data.refresh_token || config.spotifyRefreshToken;
+
+    config.spotifyAccessToken = data.access_token;
+    config.spotifyRefreshToken = nextRefreshToken;
+    config.spotifyExpiresAt = expiresAt;
 
     saveConfig({
         spotifyAccessToken: data.access_token,
-        spotifyRefreshToken: data.refresh_token || config.spotifyRefreshToken,
+        spotifyRefreshToken: nextRefreshToken,
         spotifyExpiresAt: expiresAt
     });
 

@@ -616,6 +616,72 @@ describe('DJCore', () => {
                 ['init1', 'ref1']
             );
         });
+
+        it('reverts lastQuery and reports error when searchTracks returns 0 tracks during processDJLoop', async () => {
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '23:59', query: 'impossible query 12345' }]);
+
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+            djInternal.playerClient.getDevices = async () => [
+                { id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice,
+            ];
+            djInternal.searchTracks = async () => [];
+
+            await assert.rejects(
+                async () => dj.processDJLoop(false, true),
+                /No matching tracks found/
+            );
+
+            // lastQuery must be reverted to null so subsequent ticks or retries can run
+            assert.strictEqual(dj.getDJStatus().currentQuery, null);
+            assert.strictEqual(store['dj_last_query'], undefined);
+        });
+
+        it('automatically starts playback on the next tick after Spotify device comes online', async () => {
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '23:59', query: 'morning jazz' }]);
+
+            let availableDevices: SpotifyApi.UserDevice[] = [];
+            let playedTracksCount = 0;
+
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_deviceId: string, uris: string[]) => Promise<void>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+
+            djInternal.playerClient.getDevices = async () => availableDevices;
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async (_deviceId: string, uris: string[]) => {
+                playedTracksCount = uris.length;
+            };
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.searchTracks = async () => [
+                makeTrack({ id: 'mj1', uri: 'spotify:track:mj1', name: 'Jazz 1', artistName: 'Bill Evans' }),
+            ];
+
+            // Tick 1: No Spotify device open yet -> should not lock in lastQuery
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(playedTracksCount, 0);
+            assert.strictEqual(dj.getDJStatus().currentQuery, null);
+
+            // Tick 2: User opens Spotify -> device appears -> playback starts automatically without force=true!
+            availableDevices = [{ id: 'dev_1', name: 'MacBook', is_active: true } as SpotifyApi.UserDevice];
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(playedTracksCount, 1);
+            assert.strictEqual(dj.getDJStatus().currentQuery, 'morning jazz');
+        });
     });
 });
 

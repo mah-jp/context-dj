@@ -44,8 +44,8 @@ export async function runInteractiveSetup(): Promise<CLIConfig> {
     // 2. AI Provider Selection
     console.log('\n【 Step 2/3: AI Provider (BYOK) 】');
     console.log('Select your AI provider for music curation:');
-    console.log('  1) Google Gemini (Recommended, Default)');
-    console.log('  2) OpenAI (GPT-4o)');
+    console.log(`  1) Google Gemini (Recommended, Default: ${DEFAULT_MODELS.GEMINI})`);
+    console.log(`  2) OpenAI (Default: ${DEFAULT_MODELS.OPENAI})`);
 
     let providerChoice = await promptLine('Choose provider [1 or 2, default: 1]: ');
     if (providerChoice !== '2') {

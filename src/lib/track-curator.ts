@@ -4,23 +4,42 @@ import { generateTrackKey } from './dj-utils';
 
 /**
  * Extracts explicit target artist names from a list of Spotify search queries.
+ * Supports quoted multi-word names (e.g. `artist:"Bill Evans"`) and unquoted tokens (`artist:Nujabes`),
+ * deduplicating across queries.
  */
 export function extractTargetArtists(queries: string[]): string[] {
-    const targetArtists: string[] = [];
-    queries.forEach(q => {
-        if (q.includes('artist:')) {
-            const parts = q.split('artist:');
-            if (parts.length > 1) {
-                let rawName = parts[1].trim().toLowerCase();
-                const quoteMatch = rawName.match(/["']([^"']+)["']/);
-                if (quoteMatch) {
-                    rawName = quoteMatch[1];
-                }
-                targetArtists.push(rawName);
+    const seen = new Set<string>();
+    const artistPattern = /artist:\s*(?:["']([^"']+)["']|([^\s"']+))/gi;
+
+    for (const q of queries) {
+        for (const match of q.matchAll(artistPattern)) {
+            const rawName = (match[1] ?? match[2] ?? '').trim().toLowerCase();
+            if (rawName) {
+                seen.add(rawName);
             }
         }
-    });
-    return targetArtists;
+    }
+    return Array.from(seen);
+}
+
+/**
+ * Checks whether any artist on a track matches one of the target artists.
+ * Guards against empty artist strings so `"".includes("")` never causes false positives.
+ */
+export function isTrackByTargetArtist(track: Track, targetArtists: string[]): boolean {
+    if (!targetArtists || targetArtists.length === 0) return false;
+    const validTargets = targetArtists.map(ta => ta.trim().toLowerCase()).filter(Boolean);
+    if (validTargets.length === 0) return false;
+
+    const artists = Array.isArray(track.artists) ? track.artists : [];
+    for (const artist of artists) {
+        const aName = (artist?.name || '').trim().toLowerCase();
+        if (!aName) continue;
+        if (validTargets.some(ta => aName.includes(ta) || ta.includes(aName))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -62,8 +81,7 @@ export function filterTracksByPopularityAndArtist(
 
     if (targetArtists.length > 0) {
         tracks.forEach(t => {
-            const aName = (t.artists[0]?.name || '').toLowerCase();
-            if (targetArtists.some(ta => aName.includes(ta) || ta.includes(aName))) {
+            if (isTrackByTargetArtist(t, targetArtists)) {
                 targetTracks.push(t);
             } else {
                 nonTargetCandidates.push(t);
@@ -116,8 +134,17 @@ export function sequenceTracksByStory(
     targetArtists: string[] = [],
     maxFinalTracks: number = 40
 ): SequenceResult {
-    if (tracks.length <= 2) {
-        const sliced = tracks.slice(0, maxFinalTracks);
+    const isTarget = (t: Track): boolean => isTrackByTargetArtist(t, targetArtists);
+
+    const cappedInput = tracks.length > maxFinalTracks
+        ? [
+            ...tracks.filter(isTarget),
+            ...tracks.filter(t => !isTarget(t)),
+        ].slice(0, maxFinalTracks)
+        : tracks;
+
+    if (cappedInput.length <= 2) {
+        const sliced = cappedInput.slice(0, maxFinalTracks);
         return {
             tracks: sliced,
             stageCounts: {
@@ -129,17 +156,12 @@ export function sequenceTracksByStory(
         };
     }
 
-    const isTarget = (t: Track): boolean => {
-        if (targetArtists.length === 0) return false;
-        const aName = (t.artists[0]?.name || '').toLowerCase();
-        return targetArtists.some(ta => aName.includes(ta) || ta.includes(aName));
-    };
-
-    const prepared = tracks.map(t => {
+    const prepared = cappedInput.map(t => {
         const energy = typeof t.energy === 'number' ? t.energy : 5;
         let stage = t.stage;
         if (!stage) {
-            if (energy <= 4) stage = 'intro';
+            if (energy <= 3) stage = 'outro';
+            else if (energy <= 5) stage = 'intro';
             else if (energy <= 7) stage = 'build';
             else stage = 'peak';
         }
@@ -152,7 +174,7 @@ export function sequenceTracksByStory(
     let outro = prepared.filter(t => t.stage === 'outro');
 
     const total = prepared.length;
-    const needsRebalancing = total >= 4 && (intro.length === 0 || peak.length === 0 || (build.length === 0 && outro.length === 0));
+    const needsRebalancing = total >= 4 && (intro.length === 0 || build.length === 0 || peak.length === 0 || outro.length === 0);
 
     if (needsRebalancing) {
         const sortedByEnergy = [...prepared].sort((a, b) => {
@@ -166,10 +188,10 @@ export function sequenceTracksByStory(
         const remainingCount = total - introCount - outroCount;
         const buildCount = Math.max(1, Math.floor(remainingCount / 2));
 
-        intro = sortedByEnergy.slice(0, introCount).map(t => ({ ...t, stage: 'intro' as const }));
-        build = sortedByEnergy.slice(introCount, introCount + buildCount).map(t => ({ ...t, stage: 'build' as const }));
-        peak = sortedByEnergy.slice(introCount + buildCount, total - outroCount).map(t => ({ ...t, stage: 'peak' as const }));
-        outro = sortedByEnergy.slice(total - outroCount).map(t => ({ ...t, stage: 'outro' as const }));
+        outro = sortedByEnergy.slice(0, outroCount).map(t => ({ ...t, stage: 'outro' as const }));
+        intro = sortedByEnergy.slice(outroCount, outroCount + introCount).map(t => ({ ...t, stage: 'intro' as const }));
+        build = sortedByEnergy.slice(outroCount + introCount, outroCount + introCount + buildCount).map(t => ({ ...t, stage: 'build' as const }));
+        peak = sortedByEnergy.slice(outroCount + introCount + buildCount).map(t => ({ ...t, stage: 'peak' as const }));
     }
 
     // 1. Intro (起): Target artists first -> High AI score -> Smooth moderate energy

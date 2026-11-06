@@ -170,4 +170,31 @@ describe('TrackSearchPipeline', () => {
         assert.strictEqual(revertedResult.length, 2);
         assert.ok(logs.some(l => l.includes('AI Filtering removed ALL tracks')));
     });
+
+    it('findPriorityTrack matches multi-word quoted artist accurately instead of truncating at whitespace', async () => {
+        const coverByMariyaOther = makeTrack({ id: 'cov1', name: 'Plastic Love', artistName: 'Mariya Cover Band' });
+        const originalByMariyaTakeuchi = makeTrack({ id: 'orig1', name: 'Plastic Love', artistName: 'Mariya Takeuchi' });
+
+        const fakeSpotify = {
+            searchTracks: async () => ({
+                tracks: {
+                    items: [coverByMariyaOther, originalByMariyaTakeuchi],
+                },
+            }),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const pipeline = new TrackSearchPipeline({
+            getSpotify: () => fakeSpotify,
+            getAI: () => undefined,
+            getConfig: () => config,
+            sessionCache: new TrackSessionCache(),
+            addLog: (m) => logs.push(m),
+            updateStatus: (s) => statuses.push(s),
+        });
+
+        const found = await pipeline.findPriorityTrack('track:"Plastic Love" artist:"Mariya Takeuchi"');
+        assert.strictEqual(found.length, 1);
+        assert.strictEqual(found[0].id, 'orig1');
+        assert.strictEqual(found[0].artists[0]?.name, 'Mariya Takeuchi');
+    });
 });

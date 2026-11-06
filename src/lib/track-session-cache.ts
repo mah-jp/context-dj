@@ -163,22 +163,27 @@ export class TrackSessionCache {
                 ...(t.stage ? { stage: t.stage } : {}),
                 ...(t.contextName ? { contextName: t.contextName } : {}),
             };
+            if (Object.keys(meta).length === 0) continue;
 
-            // Register by URI
+            // Register by URI (delete first to refresh Map insertion order for LRU eviction)
             if (t.uri) {
                 const existing = this.trackMetadataCache.get(t.uri) || {};
+                this.trackMetadataCache.delete(t.uri);
                 this.trackMetadataCache.set(t.uri, { ...existing, ...meta });
             }
             // Register by ID
             if (t.id) {
                 const existing = this.trackMetadataCache.get(t.id) || {};
+                this.trackMetadataCache.delete(t.id);
                 this.trackMetadataCache.set(t.id, { ...existing, ...meta });
             }
             // Register by normalized trackKey (title + artist) for robust matching across relinked tracks
             const key = generateTrackKey(t);
             if (key && key !== '|') {
-                const existing = this.trackMetadataCache.get(`key:${key}`) || {};
-                this.trackMetadataCache.set(`key:${key}`, { ...existing, ...meta });
+                const mapKey = `key:${key}`;
+                const existing = this.trackMetadataCache.get(mapKey) || {};
+                this.trackMetadataCache.delete(mapKey);
+                this.trackMetadataCache.set(mapKey, { ...existing, ...meta });
             }
             changed = true;
         }

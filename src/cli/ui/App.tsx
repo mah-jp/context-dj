@@ -28,7 +28,7 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
     const { exit } = useApp();
     const [state, setState] = useState<DJRunnerState>(runner.getState());
     const [queryInput, setQueryInput] = useState('');
-    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(() => Boolean(initialPrompt && initialPrompt.trim().length > 0));
     const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
     const historyRef = useRef<RequestHistory>(RequestHistory.load());
 
@@ -43,7 +43,6 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
         // Process initial prompt if provided via command-line arguments
         if (initialPrompt && initialPrompt.trim().length > 0) {
             historyRef.current.add(initialPrompt.trim());
-            setIsSubmitting(true);
             runner.sendRequest(initialPrompt)
                 .catch((err) => {
                     setFeedbackMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -178,7 +177,7 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
                             <Box marginTop={0}>
                                 <Text color="blue">
                                     [Vibe: {currentTrack.vibeTag || 'N/A'}]
-                                    {currentTrack.energy !== undefined && ` [Energy: ${currentTrack.energy}%]`}
+                                    {currentTrack.energy !== undefined && ` [Energy: ${currentTrack.energy}/10]`}
                                     {currentTrack.stage && ` [Stage: ${currentTrack.stage}]`}
                                 </Text>
                             </Box>
@@ -221,10 +220,10 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
                 </Box>
             )}
 
-            {/* Recent Process Logs (Last 2 items) */}
+            {/* Recent Process Logs (Latest 2 items, newest first in state.logs) */}
             {state.logs.length > 0 && (
                 <Box flexDirection="column" marginY={0} paddingX={1}>
-                    <Text dimColor>Log: {state.logs.slice(-2).join(' | ')}</Text>
+                    <Text dimColor>Log: {state.logs.slice(0, 2).reverse().join(' | ')}</Text>
                 </Box>
             )}
 

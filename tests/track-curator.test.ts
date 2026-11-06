@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     extractTargetArtists,
+    isTrackByTargetArtist,
     deduplicateTracks,
     filterTracksByPopularityAndArtist,
     sequenceTracksByStory,
@@ -35,14 +36,31 @@ function createMockTrack(overrides: {
 
 describe('track-curator', () => {
     describe('extractTargetArtists', () => {
-        it('extracts quoted and unquoted artist names from queries', () => {
+        it('extracts quoted and unquoted artist names from queries and deduplicates without swallowing trailing keywords', () => {
             const queries = [
                 'artist:"Bill Evans" piano',
-                'artist:Nujabes',
+                'artist:Nujabes lofi chill',
+                'artist:"Bill Evans" trio',
                 'genre:jazz chill',
             ];
             const artists = extractTargetArtists(queries);
             assert.deepStrictEqual(artists, ['bill evans', 'nujabes']);
+        });
+    });
+
+    describe('isTrackByTargetArtist', () => {
+        it('matches primary or collaborating artists and does not match empty artist names', () => {
+            const emptyArtistTrack = createMockTrack({ id: 'e1', name: 'No Artist', artistName: '' });
+            const collabTrack = {
+                ...createMockTrack({ id: 'c1', name: 'Battlecry', artistName: 'Shing02' }),
+                artists: [
+                    { name: 'Shing02' } as SpotifyApi.ArtistObjectSimplified,
+                    { name: 'Nujabes' } as SpotifyApi.ArtistObjectSimplified,
+                ],
+            } as Track;
+
+            assert.strictEqual(isTrackByTargetArtist(emptyArtistTrack, ['nujabes']), false);
+            assert.strictEqual(isTrackByTargetArtist(collabTrack, ['nujabes']), true);
         });
     });
 
@@ -112,6 +130,26 @@ describe('track-curator', () => {
                 peak: 1,
                 outro: 1,
             });
+        });
+
+        it('automatically rebalances tracks into 4 stages by energy when stage is missing or uniform', () => {
+            const uncategorized = [
+                createMockTrack({ id: 't1', name: 'High 1', artistName: 'A', energy: 9, score: 85 }),
+                createMockTrack({ id: 't2', name: 'Low 1', artistName: 'B', energy: 2, score: 90 }),
+                createMockTrack({ id: 't3', name: 'Mid 1', artistName: 'C', energy: 5, score: 80 }),
+                createMockTrack({ id: 't4', name: 'High 2', artistName: 'D', energy: 8, score: 88 }),
+                createMockTrack({ id: 't5', name: 'Mid 2', artistName: 'E', energy: 6, score: 75 }),
+                createMockTrack({ id: 't6', name: 'Calm Outro', artistName: 'F', energy: 10, score: 70 }),
+            ];
+
+            const result = sequenceTracksByStory(uncategorized);
+            assert.strictEqual(result.tracks.length, 6);
+            assert.ok(result.stageCounts.intro >= 1);
+            assert.ok(result.stageCounts.build >= 1);
+            assert.ok(result.stageCounts.peak >= 1);
+            assert.ok(result.stageCounts.outro >= 1);
+            assert.strictEqual(result.tracks[0].stage, 'intro');
+            assert.strictEqual(result.tracks[result.tracks.length - 1].stage, 'outro');
         });
     });
 });

@@ -297,7 +297,7 @@ ${trackListStr}
 
         try {
             const cleanJson = await this.requestStructuredText({
-                systemPrompt: "You evaluate music candidates and output JSON containing an array of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage.",
+                systemPrompt: "You evaluate music candidates and output a JSON object { \"evaluations\": [...] } (or JSON array) of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage.",
                 userPrompt: prompt,
                 geminiText: prompt,
                 geminiGenerationConfig: {
@@ -336,7 +336,12 @@ ${trackListStr}
                 rawItems = parsed as RawTrackEvaluation[];
             } else if (parsed && typeof parsed === 'object') {
                 const parsedObj = parsed as Record<string, unknown>;
-                const candidate = parsedObj.evaluations || parsedObj.tracks || parsedObj.matches || parsedObj.items;
+                const candidate =
+                    parsedObj.evaluations ||
+                    parsedObj.tracks ||
+                    parsedObj.matches ||
+                    parsedObj.items ||
+                    Object.values(parsedObj).find(v => Array.isArray(v));
                 if (Array.isArray(candidate)) {
                     rawItems = candidate as RawTrackEvaluation[];
                 }
