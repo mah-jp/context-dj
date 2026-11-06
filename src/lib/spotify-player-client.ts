@@ -287,6 +287,8 @@ export class SpotifyPlayerClient {
         }
 
         if (!deviceId) {
+            const errInfo = classifySpotifyError(404, 'resolve_device');
+            this.notifyError(errInfo);
             throw new Error("No active device found after retries. Please open Spotify. (再生デバイスが見つかりません。スマホまたはPCでSpotifyを開いてください)");
         }
 

@@ -5,10 +5,10 @@ import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
 import { AIProvider, ScheduleItem, SpotifyApiErrorInfo, Track } from '../lib/types';
-import { getStorageItem, getStoredJSON } from '../lib/storage';
+import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
-import { generateTrackKey } from '../lib/dj-utils';
+import { generateTrackKey, resolveEffectiveScheduleItem } from '../lib/dj-utils';
 
 export interface SetupStatus {
     hasClientId: boolean;
@@ -160,7 +160,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (typeof window !== 'undefined') {
             const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
             if (savedSchedule.length > 0) {
-                return savedSchedule[0]?.thought || null;
+                return resolveEffectiveScheduleItem(savedSchedule)?.thought || savedSchedule[0]?.thought || null;
             }
         }
         return null;
@@ -207,8 +207,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const setSchedule = useCallback((nextSchedule: ScheduleItem[]) => {
         setScheduleState(nextSchedule);
-        if (djRef.current && djRef.current.getSchedule() !== nextSchedule) {
-            djRef.current.setSchedule(nextSchedule, false);
+        if (djRef.current) {
+            if (djRef.current.getSchedule() !== nextSchedule) {
+                djRef.current.setSchedule(nextSchedule, true);
+            }
+        } else {
+            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, nextSchedule);
         }
     }, []);
 
@@ -467,7 +471,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     setCurrentQuery(initialSnapshot.currentQuery);
                     setCurrentThought(initialSnapshot.currentThought);
 
-                    dj.setStatusCallback(setStatus);
                     dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
                         setError(prev => (prev === errMsg ? prev : errMsg));
                         if (errInfo?.category === 'auth_expired') {
@@ -652,6 +655,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (djRef.current) {
             const newSchedule = djRef.current.removeScheduleItem(index, true);
             setScheduleState([...newSchedule]);
+        } else {
+            setScheduleState(prev => {
+                if (index < 0 || index >= prev.length) return prev;
+                const next = prev.filter((_, i) => i !== index);
+                setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, next);
+                return next;
+            });
         }
     }, []);
 

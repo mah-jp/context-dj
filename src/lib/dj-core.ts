@@ -53,7 +53,7 @@ export class DJCore {
     private logListeners = new Set<DJLogListener>();
     private errorListeners = new Set<DJErrorListener>();
 
-    private isProcessingLoop = false;
+    private activeLoopCount = 0;
     private playbackGeneration = 0;
     private isRefilling = false;
     private lastRefillAttemptTime = 0;
@@ -374,6 +374,7 @@ export class DJCore {
 
     setSchedule(schedule: ScheduleItem[], persist: boolean = false) {
         this.schedule = schedule;
+        this.preloadedResult = null;
         if (persist) {
             setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, schedule);
         }
@@ -411,17 +412,24 @@ export class DJCore {
     // --- Main DJ Loop & Preloading ---
 
     async processDJLoop(silentWait: boolean = true, force: boolean = false) {
-        if (this.isProcessingLoop && !force) {
+        if (this.activeLoopCount > 0 && !force) {
             return;
         }
-        this.isProcessingLoop = true;
+        this.activeLoopCount++;
 
         try {
             const now = new Date();
             const currentItem = this.getEffectiveItemForPlayback(now);
 
-            // 1. Check if we need to PRELOAD for upcoming schedule (60 seconds ahead)
-            if (this.schedule.length > 1) {
+            if (!currentItem) return;
+
+            const queriesToUse = getScheduleItemQueries(currentItem);
+            if (queriesToUse.length === 0) return;
+
+            const querySignature = getScheduleItemSignature(currentItem);
+
+            // 1. Check if we need to PRELOAD for upcoming schedule (60 seconds ahead) while current block is active
+            if (!force && querySignature === this.lastQuery && this.schedule.length > 1) {
                 const PRELOAD_MS = 60 * 1000;
                 const futureDate = new Date(now.getTime() + PRELOAD_MS);
                 const nextItem = this.getItemForDate(futureDate);
@@ -458,13 +466,6 @@ export class DJCore {
                     }
                 }
             }
-
-            if (!currentItem) return;
-
-            const queriesToUse = getScheduleItemQueries(currentItem);
-            if (queriesToUse.length === 0) return;
-
-            const querySignature = getScheduleItemSignature(currentItem);
 
             // 2. Check if we need to change music
             if (force || querySignature !== this.lastQuery) {
@@ -560,7 +561,7 @@ export class DJCore {
                 await this.checkAndRefillQueue(queriesToUse, currentItem);
             }
         } finally {
-            this.isProcessingLoop = false;
+            this.activeLoopCount = Math.max(0, this.activeLoopCount - 1);
         }
     }
 
@@ -580,19 +581,23 @@ export class DJCore {
             return;
         }
 
+        const refillGen = this.playbackGeneration;
         const playback = await this.getPlaybackState();
         if (!playback || !playback.device || !playback.device.is_active || !playback.is_playing) {
             return;
         }
 
-        // Re-verify session is still active after getPlaybackState() checks for external playback takeover
-        if (!this.isSessionPlaybackActive()) {
+        // Re-verify session and generation are still active after getPlaybackState()
+        if (refillGen !== this.playbackGeneration || !this.isSessionPlaybackActive()) {
             return;
         }
 
         try {
             const activeItem = (playback.item && playback.item.type === 'track') ? (playback.item as Track) : null;
             const queue = await this.getQueue(activeItem);
+            if (refillGen !== this.playbackGeneration || !this.isSessionPlaybackActive()) {
+                return;
+            }
             if (queue.length < PLAYBACK_CONSTANTS.MIN_QUEUE_SIZE_FOR_REFILL) {
                 this.isRefilling = true;
                 this.lastRefillAttemptTime = Date.now();
@@ -603,6 +608,11 @@ export class DJCore {
                     thought: currentItem.thought,
                     anchorTracks: currentItem.anchorTracks
                 });
+
+                if (refillGen !== this.playbackGeneration || !this.isSessionPlaybackActive()) {
+                    this.isRefilling = false;
+                    return;
+                }
 
                 const queueKeys = new Set(queue.map(item => generateTrackKey(item as Track)));
 
@@ -619,6 +629,9 @@ export class DJCore {
 
                     const addedTracks: Track[] = [];
                     for (const track of toAdd) {
+                        if (refillGen !== this.playbackGeneration || !this.isSessionPlaybackActive()) {
+                            break;
+                        }
                         const res = await this.playerClient.addToQueue(track.uri);
                         if (!res.ok) {
                             this.addLog(`⚠️ Queue refill interrupted (${res.status || 'ERR'}).`);
@@ -628,7 +641,7 @@ export class DJCore {
                         addedTracks.push(track);
                         await new Promise(r => setTimeout(r, 200));
                     }
-                    if (addedTracks.length > 0) {
+                    if (addedTracks.length > 0 && refillGen === this.playbackGeneration && this.isSessionPlaybackActive()) {
                         this.sessionCache.appendSessionTracks(addedTracks);
                         this.addLog(`✅ Refill complete.`);
                     }

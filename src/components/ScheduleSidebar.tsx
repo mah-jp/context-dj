@@ -1,7 +1,7 @@
 import styles from '../app/page.module.css';
 import { Trash2 } from 'lucide-react';
 import { ScheduleItem } from '../lib/types';
-import { isScheduleItemActive, isScheduleItemPast, getScheduleItemSignature, resolveEffectiveScheduleItem } from '../lib/dj-utils';
+import { isScheduleItemActive, isScheduleItemPastInTimeline, getScheduleItemSignature, resolveEffectiveScheduleItem } from '../lib/dj-utils';
 
 interface ScheduleSidebarProps {
     schedule: ScheduleItem[];
@@ -18,7 +18,7 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
             {schedule.length > 0 ? schedule.map((item, i) => {
                 const signature = getScheduleItemSignature(item);
                 const isActive = item === effectiveItem && (currentQuery === signature || isScheduleItemActive(item));
-                const past = !isActive && isScheduleItemPast(item);
+                const past = !isActive && isScheduleItemPastInTimeline(schedule, i);
 
                 return (
                     <div

@@ -45,8 +45,12 @@ export class TrackSearchPipeline {
         // 1. Resolve Anchor Tracks (Iconic seeds)
         const anchorTracks = await this.findAnchorTracks(context?.anchorTracks);
 
-        // 2. Parse target artists for strict filtering
-        const targetArtists = extractTargetArtists(queries);
+        // 2. Parse target artists for strict filtering (include priorityQuery when it targets an artist rather than a single track)
+        const artistQuerySources =
+            priorityQuery && !/track:/i.test(priorityQuery)
+                ? [...queries, priorityQuery]
+                : queries;
+        const targetArtists = extractTargetArtists(artistQuerySources);
         if (targetArtists.length > 0) {
             this.deps.addLog(`🎯 Target Artists: ${targetArtists.join(', ')}`);
         }

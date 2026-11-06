@@ -682,6 +682,75 @@ describe('DJCore', () => {
             assert.strictEqual(playedTracksCount, 1);
             assert.strictEqual(dj.getDJStatus().currentQuery, 'morning jazz');
         });
+
+        it('aborts in-flight auto-refill if a new schedule session starts while refill search is awaiting', async () => {
+            const initialTracks = [
+                makeTrack({ id: 'old1', uri: 'spotify:track:old1', name: 'Old 1', artistName: 'Old Artist' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(initialTracks);
+            store['dj_last_query'] = 'old query';
+
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '23:59', query: 'old query' }]);
+
+            const queuedUris: string[] = [];
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_deviceId: string, uris: string[]) => Promise<void>;
+                    getUserQueue: () => Promise<{ currently_playing: Track | null; queue: Track[] }>;
+                    addToQueue: (uri: string) => Promise<{ ok: boolean }>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: (q: string | string[]) => Promise<Track[]>;
+            };
+
+            djInternal.playerClient.getDevices = async () => [
+                { id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice,
+            ];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {};
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: true,
+                item: initialTracks[0],
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            });
+            djInternal.playerClient.getUserQueue = async () => ({
+                currently_playing: initialTracks[0],
+                queue: [],
+            });
+            djInternal.playerClient.addToQueue = async (uri: string) => {
+                queuedUris.push(uri);
+                return { ok: true };
+            };
+
+            djInternal.searchTracks = async (q: string | string[]) => {
+                const firstQ = Array.isArray(q) ? q[0] : q;
+                if (firstQ === 'old query') {
+                    // Simulate user starting a new schedule while refill search is in flight
+                    dj.setSchedule([{ start: '00:00', end: '23:59', query: 'new query' }]);
+                    await dj.processDJLoop(false, true);
+                    return [makeTrack({ id: 'stale_refill', uri: 'spotify:track:stale_refill', name: 'Stale', artistName: 'Old' })];
+                }
+                return [makeTrack({ id: 'new_session_1', uri: 'spotify:track:new_session_1', name: 'New 1', artistName: 'New' })];
+            };
+
+            await dj.processDJLoop(true, false);
+
+            // Stale refill track must NOT have been added to Spotify queue or appended to the new session
+            assert.deepStrictEqual(queuedUris, []);
+            assert.deepStrictEqual(
+                dj.getSessionCache().getSessionTracks().map(t => t.id),
+                ['new_session_1']
+            );
+        });
     });
 });
 

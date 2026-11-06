@@ -323,13 +323,7 @@ ${trackListStr}
                 }
             });
 
-            let parsed: unknown;
-            try {
-                parsed = JSON.parse(cleanJson);
-            } catch (pe) {
-                console.error('Failed to parse AI evaluation JSON:', pe, cleanJson);
-                parsed = [];
-            }
+            const parsed: unknown = JSON.parse(cleanJson);
 
             let rawItems: RawTrackEvaluation[] = [];
             if (Array.isArray(parsed)) {

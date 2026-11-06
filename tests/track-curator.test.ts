@@ -36,20 +36,23 @@ function createMockTrack(overrides: {
 
 describe('track-curator', () => {
     describe('extractTargetArtists', () => {
-        it('extracts quoted and unquoted artist names from queries and deduplicates without swallowing trailing keywords', () => {
+        it('extracts quoted and unquoted artist names (including apostrophes) from queries and deduplicates without swallowing trailing keywords', () => {
             const queries = [
                 'artist:"Bill Evans" piano',
                 'artist:Nujabes lofi chill',
                 'artist:"Bill Evans" trio',
+                'artist:"B\'z" rock',
+                'artist:"Guns N\' Roses" hard rock',
+                'artist:B\'z live',
                 'genre:jazz chill',
             ];
             const artists = extractTargetArtists(queries);
-            assert.deepStrictEqual(artists, ['bill evans', 'nujabes']);
+            assert.deepStrictEqual(artists, ['bill evans', 'nujabes', "b'z", "guns n' roses"]);
         });
     });
 
     describe('isTrackByTargetArtist', () => {
-        it('matches primary or collaborating artists and does not match empty artist names', () => {
+        it('matches primary or collaborating artists at word boundaries and avoids partial-word or empty-artist false positives', () => {
             const emptyArtistTrack = createMockTrack({ id: 'e1', name: 'No Artist', artistName: '' });
             const collabTrack = {
                 ...createMockTrack({ id: 'c1', name: 'Battlecry', artistName: 'Shing02' }),
@@ -58,9 +61,17 @@ describe('track-curator', () => {
                     { name: 'Nujabes' } as SpotifyApi.ArtistObjectSimplified,
                 ],
             } as Track;
+            const steveAokiTrack = createMockTrack({ id: 's1', name: 'Party', artistName: 'Steve Aoki' });
+            const eveFeatTrack = createMockTrack({ id: 'ev1', name: 'Dramaturgy', artistName: 'Eve feat. Suis' });
+            const billOnlyTrack = createMockTrack({ id: 'b1', name: 'Lovely Day', artistName: 'Bill' });
+            const billEvansTrioTrack = createMockTrack({ id: 'be1', name: 'Waltz for Debby', artistName: 'Bill Evans Trio' });
 
             assert.strictEqual(isTrackByTargetArtist(emptyArtistTrack, ['nujabes']), false);
             assert.strictEqual(isTrackByTargetArtist(collabTrack, ['nujabes']), true);
+            assert.strictEqual(isTrackByTargetArtist(steveAokiTrack, ['eve']), false);
+            assert.strictEqual(isTrackByTargetArtist(eveFeatTrack, ['eve']), true);
+            assert.strictEqual(isTrackByTargetArtist(billOnlyTrack, ['bill evans']), false);
+            assert.strictEqual(isTrackByTargetArtist(billEvansTrioTrack, ['bill evans']), true);
         });
     });
 
@@ -149,6 +160,22 @@ describe('track-curator', () => {
             assert.ok(result.stageCounts.peak >= 1);
             assert.ok(result.stageCounts.outro >= 1);
             assert.strictEqual(result.tracks[0].stage, 'intro');
+            assert.strictEqual(result.tracks[result.tracks.length - 1].stage, 'outro');
+        });
+
+        it('preserves explicit AI intro assignment when only outro is missing, borrowing from the largest populated bucket', () => {
+            const aiLabeled = [
+                createMockTrack({ id: 'intro_calm', name: 'Ambient Opening', artistName: 'A', stage: 'intro', energy: 2, score: 95 }),
+                createMockTrack({ id: 'build_1', name: 'Groove 1', artistName: 'B', stage: 'build', energy: 5, score: 85 }),
+                createMockTrack({ id: 'build_2', name: 'Groove 2', artistName: 'C', stage: 'build', energy: 6, score: 88 }),
+                createMockTrack({ id: 'peak_1', name: 'Anthem 1', artistName: 'D', stage: 'peak', energy: 9, score: 92 }),
+                createMockTrack({ id: 'peak_2', name: 'Anthem 2', artistName: 'E', stage: 'peak', energy: 8, score: 90 }),
+            ];
+
+            const result = sequenceTracksByStory(aiLabeled);
+            assert.strictEqual(result.tracks[0].id, 'intro_calm');
+            assert.strictEqual(result.tracks[0].stage, 'intro');
+            assert.strictEqual(result.stageCounts.outro, 1);
             assert.strictEqual(result.tracks[result.tracks.length - 1].stage, 'outro');
         });
     });

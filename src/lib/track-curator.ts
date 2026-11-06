@@ -4,16 +4,16 @@ import { generateTrackKey } from './dj-utils';
 
 /**
  * Extracts explicit target artist names from a list of Spotify search queries.
- * Supports quoted multi-word names (e.g. `artist:"Bill Evans"`) and unquoted tokens (`artist:Nujabes`),
- * deduplicating across queries.
+ * Supports quoted multi-word names (e.g. `artist:"Bill Evans"`, `artist:"B'z"`, `artist:'Guns N' Roses'`)
+ * and unquoted tokens (`artist:Nujabes`, `artist:B'z`), deduplicating across queries.
  */
 export function extractTargetArtists(queries: string[]): string[] {
     const seen = new Set<string>();
-    const artistPattern = /artist:\s*(?:["']([^"']+)["']|([^\s"']+))/gi;
+    const artistPattern = /artist:\s*(?:"([^"]+)"|'([^']+)'|([^\s"]+))/gi;
 
     for (const q of queries) {
         for (const match of q.matchAll(artistPattern)) {
-            const rawName = (match[1] ?? match[2] ?? '').trim().toLowerCase();
+            const rawName = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
             if (rawName) {
                 seen.add(rawName);
             }
@@ -22,9 +22,28 @@ export function extractTargetArtists(queries: string[]): string[] {
     return Array.from(seen);
 }
 
+function escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function matchesArtistTarget(artistName: string, targetName: string): boolean {
+    if (!artistName || !targetName) return false;
+    if (artistName === targetName) return true;
+    // Prevent single-character false positives
+    if (targetName.length < 2) return false;
+
+    const isAsciiTarget = /^[\x00-\x7F]+$/.test(targetName);
+    if (isAsciiTarget) {
+        const boundaryPattern = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(targetName)}(?:$|[^a-z0-9])`, 'i');
+        return boundaryPattern.test(artistName);
+    }
+
+    return artistName.includes(targetName);
+}
+
 /**
  * Checks whether any artist on a track matches one of the target artists.
- * Guards against empty artist strings so `"".includes("")` never causes false positives.
+ * Guards against empty artist strings and partial-word false positives (e.g. "Eve" inside "Steve Aoki").
  */
 export function isTrackByTargetArtist(track: Track, targetArtists: string[]): boolean {
     if (!targetArtists || targetArtists.length === 0) return false;
@@ -35,7 +54,7 @@ export function isTrackByTargetArtist(track: Track, targetArtists: string[]): bo
     for (const artist of artists) {
         const aName = (artist?.name || '').trim().toLowerCase();
         if (!aName) continue;
-        if (validTargets.some(ta => aName.includes(ta) || ta.includes(aName))) {
+        if (validTargets.some(ta => matchesArtistTarget(aName, ta))) {
             return true;
         }
     }
@@ -144,7 +163,11 @@ export function sequenceTracksByStory(
         : tracks;
 
     if (cappedInput.length <= 2) {
-        const sliced = cappedInput.slice(0, maxFinalTracks);
+        const sliced = cappedInput.slice(0, maxFinalTracks).map((t, idx) => ({
+            ...t,
+            energy: typeof t.energy === 'number' ? t.energy : 5,
+            stage: t.stage || (idx === 0 ? ('intro' as const) : ('outro' as const)),
+        }));
         return {
             tracks: sliced,
             stageCounts: {
@@ -174,24 +197,58 @@ export function sequenceTracksByStory(
     let outro = prepared.filter(t => t.stage === 'outro');
 
     const total = prepared.length;
-    const needsRebalancing = total >= 4 && (intro.length === 0 || build.length === 0 || peak.length === 0 || outro.length === 0);
+    const populatedStageCount = [intro, build, peak, outro].filter(b => b.length > 0).length;
 
-    if (needsRebalancing) {
-        const sortedByEnergy = [...prepared].sort((a, b) => {
-            const diff = (a.energy ?? 5) - (b.energy ?? 5);
-            if (diff !== 0) return diff;
-            return (b.score ?? 0) - (a.score ?? 0);
-        });
+    if (total === 3 && populatedStageCount <= 2) {
+        const sortedByEnergy = [...prepared].sort((a, b) => (a.energy ?? 5) - (b.energy ?? 5));
+        outro = [{ ...sortedByEnergy[0], stage: 'outro' as const }];
+        intro = [{ ...sortedByEnergy[1], stage: 'intro' as const }];
+        build = [];
+        peak = [{ ...sortedByEnergy[2], stage: 'peak' as const }];
+    } else if (total >= 4 && populatedStageCount < 4) {
+        const hasExplicitStageVariety =
+            cappedInput.filter(t => Boolean(t.stage)).length >= Math.ceil(total * 0.5) &&
+            populatedStageCount >= 2;
 
-        const introCount = Math.max(1, Math.round(total * 0.15));
-        const outroCount = Math.max(1, Math.round(total * 0.15));
-        const remainingCount = total - introCount - outroCount;
-        const buildCount = Math.max(1, Math.floor(remainingCount / 2));
+        if (!hasExplicitStageVariety) {
+            // Uncategorized or uniform-stage tracks: distribute across all 4 stages by energy
+            const sortedByEnergy = [...prepared].sort((a, b) => {
+                const diff = (a.energy ?? 5) - (b.energy ?? 5);
+                if (diff !== 0) return diff;
+                return (b.score ?? 0) - (a.score ?? 0);
+            });
 
-        outro = sortedByEnergy.slice(0, outroCount).map(t => ({ ...t, stage: 'outro' as const }));
-        intro = sortedByEnergy.slice(outroCount, outroCount + introCount).map(t => ({ ...t, stage: 'intro' as const }));
-        build = sortedByEnergy.slice(outroCount + introCount, outroCount + introCount + buildCount).map(t => ({ ...t, stage: 'build' as const }));
-        peak = sortedByEnergy.slice(outroCount + introCount + buildCount).map(t => ({ ...t, stage: 'peak' as const }));
+            const introCount = Math.max(1, Math.round(total * 0.15));
+            const outroCount = Math.max(1, Math.round(total * 0.15));
+            const remainingCount = total - introCount - outroCount;
+            const buildCount = Math.max(1, Math.floor(remainingCount / 2));
+
+            outro = sortedByEnergy.slice(0, outroCount).map(t => ({ ...t, stage: 'outro' as const }));
+            intro = sortedByEnergy.slice(outroCount, outroCount + introCount).map(t => ({ ...t, stage: 'intro' as const }));
+            build = sortedByEnergy.slice(outroCount + introCount, outroCount + introCount + buildCount).map(t => ({ ...t, stage: 'build' as const }));
+            peak = sortedByEnergy.slice(outroCount + introCount + buildCount).map(t => ({ ...t, stage: 'peak' as const }));
+        } else {
+            // Preserve explicit AI stage assignments and borrow only for missing stage(s) from the largest bucket
+            const buckets: { name: 'intro' | 'build' | 'peak' | 'outro'; list: typeof prepared }[] = [
+                { name: 'intro', list: intro },
+                { name: 'build', list: build },
+                { name: 'peak', list: peak },
+                { name: 'outro', list: outro },
+            ];
+            for (const targetBucket of buckets) {
+                if (targetBucket.list.length === 0) {
+                    const donor = [...buckets]
+                        .filter(b => b.list.length > 1)
+                        .sort((a, b) => b.list.length - a.list.length)[0];
+                    if (donor) {
+                        donor.list.sort((a, b) => (a.energy ?? 5) - (b.energy ?? 5));
+                        const takeLowest = targetBucket.name === 'outro' || targetBucket.name === 'intro';
+                        const borrowed = takeLowest ? donor.list.shift()! : donor.list.pop()!;
+                        targetBucket.list.push({ ...borrowed, stage: targetBucket.name });
+                    }
+                }
+            }
+        }
     }
 
     // 1. Intro (起): Target artists first -> High AI score -> Smooth moderate energy

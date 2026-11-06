@@ -5,6 +5,7 @@ import {
     generateTrackKey,
     isScheduleItemActive,
     isScheduleItemPast,
+    isScheduleItemPastInTimeline,
     getScheduleItemSignature,
     getScheduleItemQueries,
     parseTimeToMinutes,
@@ -63,7 +64,11 @@ describe('dj-utils', () => {
             assert.strictEqual(normalizeTrackName('Meditation'), 'meditation');
             assert.strictEqual(normalizeTrackName('Alive'), 'alive');
             assert.strictEqual(normalizeTrackName('Live Forever'), 'live forever');
+            assert.strictEqual(normalizeTrackName('I Want to Live'), 'i want to live');
             assert.strictEqual(normalizeTrackName('Radioactive'), 'radioactive');
+            assert.strictEqual(normalizeTrackName('Video Killed the Radio Star'), 'video killed the radio star');
+            assert.strictEqual(normalizeTrackName('On the Radio'), 'on the radio');
+            assert.strictEqual(normalizeTrackName('Plastic Love – 2021 Remaster'), 'plastic love');
         });
     });
 
@@ -226,23 +231,57 @@ describe('dj-utils', () => {
         });
     });
 
-    describe('findActiveScheduleItem & resolveEffectiveScheduleItem', () => {
-        it('correctly resolves active and effective items across overnight gaps after midnight', () => {
+    describe('findActiveScheduleItem, resolveEffectiveScheduleItem & isScheduleItemPastInTimeline', () => {
+        it('correctly resolves active and effective items across overnight gaps after midnight and before schedule start', () => {
             const schedule: ScheduleItem[] = [
                 { start: '21:00', end: '23:00', query: 'evening chill' },
                 { start: '23:00', end: '01:00', query: 'midnight jazz' },
                 { start: '02:00', end: '04:00', query: 'late night ambient' },
             ];
 
+            // At 20:30 (30m before schedule starts at 21:00):
+            // Effective item must be 'evening chill' (schedule[0]), NOT 'midnight jazz' or 'late night ambient'
+            const beforeStart = new Date(2026, 8, 24, 20, 30, 0, 0);
+            assert.strictEqual(findActiveScheduleItem(schedule, beforeStart), null);
+            assert.strictEqual(resolveEffectiveScheduleItem(schedule, beforeStart)?.query, 'evening chill');
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 0, beforeStart), false);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 1, beforeStart), false);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 2, beforeStart), false);
+
             // At 01:30 (gap between 23:00-01:00 and 02:00-04:00):
             // Strict active item is null, effective item must be 'midnight jazz' (which ended 30m ago at 01:00)
             const gapAfterMidnight = new Date(2026, 8, 25, 1, 30, 0, 0);
             assert.strictEqual(findActiveScheduleItem(schedule, gapAfterMidnight), null);
             assert.strictEqual(resolveEffectiveScheduleItem(schedule, gapAfterMidnight)?.query, 'midnight jazz');
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 0, gapAfterMidnight), true);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 2, gapAfterMidnight), false);
 
             // At 04:30 (after 02:00-04:00 ended): effective item is 'late night ambient'
             const afterAll = new Date(2026, 8, 25, 4, 30, 0, 0);
             assert.strictEqual(resolveEffectiveScheduleItem(schedule, afterAll)?.query, 'late night ambient');
+        });
+
+        it('marks upcoming overnight slot as not past during daytime and marks daytime slot as past after midnight', () => {
+            const schedule: ScheduleItem[] = [
+                { start: '14:00', end: '23:00', query: 'beach walk' },
+                { start: '23:00', end: '01:00', query: 'piano jazz' },
+            ];
+
+            // At 15:00 (during 14:00-23:00): 23:00-01:00 is upcoming, NOT past
+            const afternoon = new Date(2026, 8, 24, 15, 0, 0, 0);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 0, afternoon), false);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 1, afternoon), false);
+
+            // At 00:30 (during 23:00-01:00 after midnight): 14:00-23:00 is past, 23:00-01:00 is active
+            const afterMidnight = new Date(2026, 8, 25, 0, 30, 0, 0);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 0, afterMidnight), true);
+            assert.strictEqual(isScheduleItemPastInTimeline(schedule, 1, afterMidnight), false);
+        });
+
+        it('treats full-day 00:00 - 00:00 (or 00:00 - 24:00 normalized) slot as active at any time', () => {
+            const fullDayItem: ScheduleItem = { start: '00:00', end: '00:00', query: 'all day radio' };
+            assert.strictEqual(isScheduleItemActive(fullDayItem, new Date(2026, 8, 24, 0, 0)), true);
+            assert.strictEqual(isScheduleItemActive(fullDayItem, new Date(2026, 8, 24, 14, 30)), true);
         });
     });
 });

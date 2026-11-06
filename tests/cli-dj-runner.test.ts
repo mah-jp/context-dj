@@ -130,5 +130,10 @@ describe('CLI DJRunner', () => {
         // Calling next() polls until Track B arrives
         await runner.next();
         assert.strictEqual(runner.getState().currentTrack?.uri, 'spotify:track:tB');
+
+        // Transient null playback response preserves currentTrack instead of wiping it
+        internal.djCore.getPlaybackState = async () => null;
+        await runner.pollPlayback();
+        assert.strictEqual(runner.getState().currentTrack?.uri, 'spotify:track:tB');
     });
 });

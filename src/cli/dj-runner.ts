@@ -4,6 +4,7 @@ import { ScheduleItem } from '../lib/types';
 import { CLIConfig, loadConfig, saveConfig } from './config';
 import { getValidSpotifyToken } from './auth';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
+import { generateTrackKey } from '../lib/dj-utils';
 
 export interface DJRunnerState {
     status: string;
@@ -45,10 +46,7 @@ export class DJRunner {
             activeDevice: null,
         };
 
-        // Attach DJ state & log hooks
-        this.djCore.setStatusCallback((status) => {
-            this.updateState({ status });
-        });
+        // Attach DJ state, log, and playback hooks
         this.djCore.subscribe((snapshot) => {
             this.updateState({
                 status: snapshot.status,
@@ -58,6 +56,27 @@ export class DJRunner {
         });
         this.djCore.subscribeLogs((logs) => {
             this.updateState({ logs });
+        });
+        this.djCore.setOnTracksPlayedCallback((tracks) => {
+            if (tracks.length > 0) {
+                const first = tracks[0];
+                this.updateState({
+                    currentTrack: first,
+                    playbackState: {
+                        ...(this.state.playbackState || {}),
+                        is_playing: true,
+                        item: first,
+                    } as SpotifyApi.CurrentPlaybackResponse,
+                });
+                void this.convergence.syncUntilConverged(
+                    {
+                        expectedTrackUri: first.uri,
+                        expectedTrackKey: generateTrackKey(first),
+                        expectedIsPlaying: true,
+                    },
+                    () => this.pollPlayback()
+                );
+            }
         });
     }
 
@@ -186,15 +205,29 @@ export class DJRunner {
             const rawTrack = (playback && playback.item && playback.item.type === 'track')
                 ? (playback.item as Track)
                 : null;
-            const track = guard.suppressTrackUpdate ? this.state.currentTrack : rawTrack;
+            const isNonTrackMedia = Boolean(
+                playback &&
+                ((playback.item && playback.item.type !== 'track') ||
+                    (playback.currently_playing_type &&
+                        playback.currently_playing_type !== 'track' &&
+                        playback.currently_playing_type !== 'unknown'))
+            );
+            const track = guard.suppressTrackUpdate
+                ? this.state.currentTrack
+                : (rawTrack ?? (isNonTrackMedia ? null : this.state.currentTrack));
             const effectivePlayback = guard.suppressPlayStateUpdate && playback && this.state.playbackState
                 ? { ...playback, is_playing: this.state.playbackState.is_playing }
                 : playback;
+            const nextActiveDevice =
+                !guard.suppressDeviceUpdate && playback?.device && !playback.__optimisticFallback
+                    ? playback.device
+                    : this.state.activeDevice;
             const djStatus = this.djCore.getDJStatus();
 
             this.updateState({
                 playbackState: effectivePlayback,
                 currentTrack: track,
+                activeDevice: nextActiveDevice,
                 currentThought: djStatus.currentThought || this.state.currentThought,
                 logs: this.djCore.getProcessLog(),
             });

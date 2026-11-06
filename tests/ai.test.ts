@@ -175,6 +175,28 @@ describe('AIService', () => {
             const result = await service.filterTracksWithAI('some prompt', tracks);
             assert.deepStrictEqual(result.map(r => r.id), ['spotify:track:a', 'spotify:track:b']);
         });
+
+        it('falls back to default metadata when AI returns malformed/truncated JSON during filterTracksWithAI', async () => {
+            const tracks = [
+                { name: 'Track A', artist: 'Artist A', id: 'spotify:track:a' },
+            ];
+
+            globalThis.fetch = (async () => ({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{ content: { parts: [{ text: '[{"index": 0, "score": 90, "vibeTag": "#BrokenJSON' }] } }],
+                }),
+            } as unknown as Response)) as typeof globalThis.fetch;
+
+            const service = new AIService('gemini', 'test_key');
+            const result = await service.filterTracksWithAI('夕暮れの海辺', tracks, '穏やかな潮風を感じる選曲');
+            assert.strictEqual(result.length, 1);
+            assert.strictEqual(result[0].id, 'spotify:track:a');
+            assert.strictEqual(result[0].score, 70);
+            assert.strictEqual(result[0].vibeTag, '#夕暮れの海辺');
+            assert.strictEqual(result[0].selectionReason, '穏やかな潮風を感じる選曲');
+        });
     });
 
     describe('analyzeImage', () => {
