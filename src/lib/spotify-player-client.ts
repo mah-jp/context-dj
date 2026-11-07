@@ -114,6 +114,7 @@ export function classifyThrownSpotifyError(
 export class SpotifyPlayerClient {
     private spotify: SpotifyWebApi.SpotifyWebApiJs;
     private activeDeviceId: string | null = null;
+    private postPlayTimer: ReturnType<typeof setTimeout> | null = null;
     private onError?: (error: SpotifyApiErrorInfo) => void;
     private lastError: SpotifyApiErrorInfo | null = null;
     private lastNotifiedErrorMap = new Map<string, number>();
@@ -261,11 +262,9 @@ export class SpotifyPlayerClient {
     }
 
     async resolveTargetDevice(): Promise<string> {
-        let deviceId: string | null = this.activeDeviceId;
+        let deviceId: string | null = null;
 
         for (let attempt = 0; attempt < 3; attempt++) {
-            if (deviceId) break;
-
             let devices: SpotifyApi.UserDevicesResponse;
             try {
                 devices = await this.spotify.getMyDevices();
@@ -273,10 +272,18 @@ export class SpotifyPlayerClient {
                 this.reportThrownError(e, 'resolve_device');
                 throw e;
             }
-            console.log(`📱 Devices found (attempt ${attempt + 1}):`, devices.devices.map(d => `${d.name} (${d.type}, ${d.is_active ? 'Active' : 'Inactive'})`));
+            const list = Array.isArray(devices?.devices) ? devices.devices : [];
+            console.log(`📱 Devices found (attempt ${attempt + 1}):`, list.map(d => `${d.name} (${d.type}, ${d.is_active ? 'Active' : 'Inactive'})`));
 
-            const activeDevice = devices.devices.find(d => d.is_active);
-            deviceId = activeDevice?.id || devices.devices[0]?.id || null;
+            const cachedActive = this.activeDeviceId
+                ? list.find(d => d.id === this.activeDeviceId && d.is_active)
+                : undefined;
+            const activeDevice = cachedActive || list.find(d => d.is_active);
+            const cachedAvailable = this.activeDeviceId
+                ? list.find(d => d.id === this.activeDeviceId)
+                : undefined;
+
+            deviceId = activeDevice?.id || cachedAvailable?.id || list[0]?.id || null;
 
             if (deviceId) {
                 this.activeDeviceId = deviceId;
@@ -287,6 +294,7 @@ export class SpotifyPlayerClient {
         }
 
         if (!deviceId) {
+            this.activeDeviceId = null;
             const errInfo = classifySpotifyError(404, 'resolve_device');
             this.notifyError(errInfo);
             throw new Error("No active device found after retries. Please open Spotify. (再生デバイスが見つかりません。スマホまたはPCでSpotifyを開いてください)");
@@ -311,7 +319,7 @@ export class SpotifyPlayerClient {
         }
 
         const playUrl = `https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`;
-        const playBody = JSON.stringify({ uris });
+        const playBody = JSON.stringify(uris.length > 0 ? { uris, offset: { position: 0 } } : { uris });
 
         const res = await fetch(playUrl, {
             method: 'PUT',
@@ -332,8 +340,21 @@ export class SpotifyPlayerClient {
         }
         console.log('▶️ Playback started successfully (Fetch)');
 
-        // Ensure repeat is off after a short delay to let playback context establish
+        // Ensure shuffle and repeat are off after a short delay once playback context is established on the device
+        if (this.postPlayTimer) {
+            clearTimeout(this.postPlayTimer);
+            this.postPlayTimer = null;
+        }
         const repeatTimer = setTimeout(async () => {
+            this.postPlayTimer = null;
+            try {
+                await fetch(`https://api.spotify.com/v1/me/player/shuffle?state=false&device_id=${deviceId}`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+            } catch (e) {
+                console.warn('Post-play disable shuffle failed (non-critical):', e);
+            }
             const repeatUrl = `https://api.spotify.com/v1/me/player/repeat?state=off&device_id=${deviceId}`;
             try {
                 await fetch(repeatUrl, {
@@ -344,6 +365,7 @@ export class SpotifyPlayerClient {
                 console.warn('Set repeat mode failed (non-critical):', e);
             }
         }, 500);
+        this.postPlayTimer = repeatTimer;
         if (typeof repeatTimer === 'object' && repeatTimer !== null && 'unref' in repeatTimer && typeof repeatTimer.unref === 'function') {
             repeatTimer.unref();
         }
@@ -384,6 +406,9 @@ export class SpotifyPlayerClient {
     async next() { return this.safeControlRequest('next', 'POST'); }
     async previous() { return this.safeControlRequest('previous', 'POST'); }
     async pause() { return this.safeControlRequest('pause', 'PUT'); }
-    async resume() { return this.safeControlRequest('play', 'PUT'); }
+    async resume(deviceId?: string) {
+        const endpoint = deviceId ? `play?device_id=${encodeURIComponent(deviceId)}` : 'play';
+        return this.safeControlRequest(endpoint, 'PUT');
+    }
 }
 

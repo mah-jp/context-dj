@@ -75,18 +75,57 @@ describe('playback-sync', () => {
             assert.strictEqual(guardConverged.nextPending, null);
         });
 
-        it('rejects synthetic __optimisticFallback playback states as non-converged', () => {
+        it('rejects synthetic __optimisticFallback playback states as non-converged and suppresses track/play-state updates', () => {
+            const now = 10000;
             const syntheticState = makePlaybackState({
                 uri: 'spotify:track:first',
                 isPlaying: true,
                 optimisticFallback: true,
             });
+            const pending = {
+                id: 1,
+                expectedTrackUri: 'spotify:track:first',
+                expectedIsPlaying: true,
+                createdAt: now,
+                expiresAt: now + 5000,
+            };
             assert.strictEqual(
-                isPlaybackStateConverged(syntheticState, {
-                    expectedTrackUri: 'spotify:track:first',
-                    expectedIsPlaying: true,
-                }),
+                isPlaybackStateConverged(syntheticState, pending),
                 false
+            );
+            const guard = evaluateTransitionGuard(syntheticState, pending, now + 350);
+            assert.strictEqual(guard.converged, false);
+            assert.strictEqual(guard.suppressTrackUpdate, true);
+            assert.strictEqual(guard.suppressPlayStateUpdate, true);
+            assert.strictEqual(guard.suppressDeviceUpdate, true);
+        });
+
+        it('converges via linked_from.uri when Spotify relinks a track with a localized title', () => {
+            const relinkedLocalizedState = {
+                ...makePlaybackState({
+                    uri: 'spotify:track:jp_relinked_uri',
+                    name: '海辺の散歩 (日本語タイトル)',
+                    artistName: '別名義アーティスト',
+                }),
+                item: {
+                    uri: 'spotify:track:jp_relinked_uri',
+                    id: 'jp_relinked_uri',
+                    type: 'track',
+                    name: '海辺の散歩 (日本語タイトル)',
+                    artists: [{ name: '別名義アーティスト' }],
+                    linked_from: {
+                        uri: 'spotify:track:orig_global_uri',
+                        id: 'orig_global_uri',
+                    },
+                } as unknown as SpotifyApi.TrackObjectFull,
+            } as SpotifyApi.CurrentPlaybackResponse;
+
+            assert.strictEqual(
+                isPlaybackStateConverged(relinkedLocalizedState, {
+                    expectedTrackUri: 'spotify:track:orig_global_uri',
+                    expectedTrackKey: 'ocean walk|english artist',
+                }),
+                true
             );
         });
 

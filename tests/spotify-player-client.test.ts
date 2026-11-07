@@ -201,4 +201,26 @@ describe('SpotifyPlayerClient', () => {
         assert.strictEqual(captured[1].category, 'rate_limited');
         assert.strictEqual(captured[1].retryAfterSeconds, 7);
     });
+
+    it('re-resolves target device when cached activeDeviceId goes offline or becomes inactive while another device is active', async () => {
+        let currentDevices: SpotifyApi.UserDevice[] = [
+            { id: 'dev_old', name: 'Old Laptop', type: 'Computer', is_active: true } as SpotifyApi.UserDevice,
+        ];
+        const fakeSpotify = {
+            getAccessToken: () => 'token_123',
+            getMyDevices: async () => ({ devices: currentDevices }),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const client = new SpotifyPlayerClient(fakeSpotify);
+        const firstResolved = await client.resolveTargetDevice();
+        assert.strictEqual(firstResolved, 'dev_old');
+
+        // Now dev_old disconnects and dev_phone is available
+        currentDevices = [
+            { id: 'dev_phone', name: 'Smartphone', type: 'Smartphone', is_active: false } as SpotifyApi.UserDevice,
+        ];
+        const secondResolved = await client.resolveTargetDevice();
+        assert.strictEqual(secondResolved, 'dev_phone');
+        assert.strictEqual(client.getActiveDeviceId(), 'dev_phone');
+    });
 });

@@ -64,15 +64,61 @@ export class TrackSearchPipeline {
             return [];
         }
 
-        // 4. Deduplicate
-        const uniqueTracks = deduplicateTracks(allRawTracks);
-        this.deps.addLog(`📊 Found ${allRawTracks.length} raw hits -> ${uniqueTracks.length} unique tracks`);
+        // 4. Deduplicate & Exclude Already-Played Session Tracks
+        let uniqueTracks = deduplicateTracks(allRawTracks);
+        let unplayedTracks = uniqueTracks.filter(t => !this.deps.sessionCache.isTrackPlayedInSession(t));
 
-        // 5. Apply Filters (Strict Artist -> Popularity)
-        const filteredTracks = this.applyTrackFilters(uniqueTracks, targetArtists);
+        const countViableUnplayed = (tracks: Track[]): number => {
+            if (tracks.length === 0) return 0;
+            const cfg = this.deps.getConfig();
+            const prefPop = cfg.minPopularity;
+            const minPop = Math.min(prefPop, PLAYBACK_CONSTANTS.MIN_TRACK_POPULARITY);
+            const popRes = filterTracksByPopularityAndArtist(tracks, targetArtists, prefPop, minPop);
+            if (popRes.revertedToAll) return 0;
+            return popRes.tracks.length;
+        };
+
+        // If session history filtered out most hits (e.g. during Auto-Refill), fetch deeper pages for fresh tracks
+        if (
+            unplayedTracks.length < uniqueTracks.length &&
+            (unplayedTracks.length < 5 || countViableUnplayed(unplayedTracks) < 5)
+        ) {
+            const limit = this.deps.getConfig().trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
+            for (const multiplier of [2, 4]) {
+                const deeperTracks = await this.executeParallelSearch(queries, limit * multiplier);
+                if (deeperTracks.length > 0) {
+                    uniqueTracks = deduplicateTracks([...uniqueTracks, ...deeperTracks]);
+                    unplayedTracks = uniqueTracks.filter(t => !this.deps.sessionCache.isTrackPlayedInSession(t));
+                }
+                if (unplayedTracks.length >= 5 && countViableUnplayed(unplayedTracks) >= 5) {
+                    break;
+                }
+            }
+        }
+
+        const excludedCount = uniqueTracks.length - unplayedTracks.length;
+        if (excludedCount > 0) {
+            this.deps.addLog(
+                `📊 Found ${allRawTracks.length} raw hits -> ${uniqueTracks.length} unique (${excludedCount} already played excluded -> ${unplayedTracks.length} fresh)`
+            );
+        } else {
+            this.deps.addLog(`📊 Found ${allRawTracks.length} raw hits -> ${uniqueTracks.length} unique tracks`);
+        }
+
+        if (unplayedTracks.length === 0 && priorityTracks.length === 0) {
+            this.deps.addLog("⚠️ No unplayed tracks remaining from search results");
+            return [];
+        }
+
+        // 5. Apply Filters (Strict Artist -> Popularity) on unplayed tracks
+        const filteredTracks = unplayedTracks.length > 0
+            ? this.applyTrackFilters(unplayedTracks, targetArtists)
+            : [];
 
         // 6. AI Filtering & Multi-axis Scoring
-        const candidates = await this.performAIFiltering(filteredTracks, context);
+        const candidates = filteredTracks.length > 0
+            ? await this.performAIFiltering(filteredTracks, context)
+            : [];
 
         // 7. Smart Sequencing (起承転結: Intro -> Build -> Peak -> Outro)
         const { tracks: sequencedTracks, stageCounts } = sequenceTracksByStory(candidates, targetArtists);
@@ -252,7 +298,7 @@ export class TrackSearchPipeline {
         }
     }
 
-    async executeParallelSearch(queries: string[]): Promise<Track[]> {
+    async executeParallelSearch(queries: string[], baseOffset: number = 0): Promise<Track[]> {
         const allRawTracks: Track[] = [];
         const config = this.deps.getConfig();
         const spotify = this.deps.getSpotify();
@@ -264,8 +310,8 @@ export class TrackSearchPipeline {
 
             try {
                 const [trackResPage1, trackResPage2] = await Promise.all([
-                    spotify.searchTracks(searchQuery, { limit, offset: 0 }),
-                    spotify.searchTracks(searchQuery, { limit, offset: limit }).catch(() => null)
+                    spotify.searchTracks(searchQuery, { limit, offset: baseOffset }),
+                    spotify.searchTracks(searchQuery, { limit, offset: baseOffset + limit }).catch(() => null)
                 ]);
 
                 if (trackResPage1?.tracks?.items) {

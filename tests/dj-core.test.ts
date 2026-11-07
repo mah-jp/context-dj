@@ -751,6 +751,341 @@ describe('DJCore', () => {
                 ['new_session_1']
             );
         });
+
+        it('does not prematurely confirm session playback during startup grace when getQueue is called with synthetic fallback item', async () => {
+            const dj = new DJCore('fake_token');
+            const oldTrack = makeTrack({ id: 'old_sp', uri: 'spotify:track:old_sp', name: 'Old Song', artistName: 'Old Artist' });
+            const sessionTracks = [
+                makeTrack({ id: 'dj1', uri: 'spotify:track:dj1', name: 'DJ 1', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj2', uri: 'spotify:track:dj2', name: 'DJ 2', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj3', uri: 'spotify:track:dj3', name: 'DJ 3', artistName: 'DJ Artist' }),
+            ];
+
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                };
+            };
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {};
+            // Spotify Connect lags behind and still reports oldTrack
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: true,
+                item: oldTrack,
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            });
+
+            await dj.playTracks(sessionTracks);
+
+            // Poll 1: getPlaybackState returns synthetic fallback for dj1, and UI calls getQueue(state.item)
+            const state1 = await dj.getPlaybackState();
+            assert.strictEqual(state1?.__optimisticFallback, true);
+            assert.strictEqual(state1?.item?.id, 'dj1');
+            const queue1 = await dj.getQueue(state1?.item as Track);
+            assert.deepStrictEqual(queue1.map(t => t.id), ['dj2', 'dj3']);
+
+            // hasConfirmedSessionPlayback MUST remain false so Poll 2 does NOT wipe the session!
+            assert.strictEqual(dj.getSessionCache().getHasConfirmedSessionPlayback(), false);
+
+            // Poll 2 (still lagging on oldTrack): must stay in startup grace and keep sessionTracks intact!
+            const state2 = await dj.getPlaybackState();
+            assert.strictEqual(state2?.__optimisticFallback, true);
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+            assert.strictEqual(dj.getSessionCache().getSessionTracks().length, 3);
+        });
+
+        it('preserves earlier tracks in sessionCache during playFromQueueIndex so previous() and pre-switch polls do not destroy the session', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 'dj1', uri: 'spotify:track:dj1', name: 'DJ 1', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj2', uri: 'spotify:track:dj2', name: 'DJ 2', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj3', uri: 'spotify:track:dj3', name: 'DJ 3', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj4', uri: 'spotify:track:dj4', name: 'DJ 4', artistName: 'DJ Artist' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            let currentSpotifyItem = sessionTracks[0];
+
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                    previous: () => Promise<{ ok: boolean }>;
+                };
+            };
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {};
+            djInternal.playerClient.previous = async () => {
+                currentSpotifyItem = sessionTracks[1];
+                return { ok: true };
+            };
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: true,
+                item: currentSpotifyItem,
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            });
+
+            // User clicks index 1 in Up Next [dj2, dj3, dj4] -> jumps to dj3 (index 2 in sessionTracks)
+            await dj.playFromQueueIndex(1, sessionTracks.slice(1));
+
+            // Full sessionTracks [dj1, dj2, dj3, dj4] must remain in sessionCache with sessionStartIndex = 2
+            assert.deepStrictEqual(dj.getSessionCache().getSessionTracks().map(t => t.id), ['dj1', 'dj2', 'dj3', 'dj4']);
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 2);
+
+            // While Spotify is still playing dj1 (index 0 < sessionStartIndex 2), startup grace returns dj3 and does NOT confirm playback early
+            const stateBeforeSwitch = await dj.getPlaybackState();
+            assert.strictEqual(stateBeforeSwitch?.__optimisticFallback, true);
+            assert.strictEqual(stateBeforeSwitch?.item?.id, 'dj3');
+            assert.strictEqual(dj.getSessionCache().getHasConfirmedSessionPlayback(), false);
+            const queueDuringGrace = await dj.getQueue(sessionTracks[0]);
+            assert.deepStrictEqual(queueDuringGrace.map(t => t.id), ['dj4']);
+
+            // Spotify switches to dj3 -> playback is confirmed
+            currentSpotifyItem = sessionTracks[2];
+            const stateAtDj3 = await dj.getPlaybackState();
+            assert.strictEqual(stateAtDj3?.item?.id, 'dj3');
+            assert.strictEqual(dj.getSessionCache().getHasConfirmedSessionPlayback(), true);
+
+            // User clicks Previous -> Spotify steps back to dj2 (index 1); session must remain active with Up Next [dj3, dj4]
+            await dj.previous();
+            const stateAtDj2 = await dj.getPlaybackState();
+            assert.strictEqual(stateAtDj2?.item?.id, 'dj2');
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+            const queueAtDj2 = await dj.getQueue(stateAtDj2?.item as Track);
+            assert.deepStrictEqual(queueAtDj2.map(t => t.id), ['dj3', 'dj4']);
+        });
+
+        it('does not treat a paused external track (is_playing: false) as external playback takeover', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 'dj1', uri: 'spotify:track:dj1', name: 'DJ 1', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj2', uri: 'spotify:track:dj2', name: 'DJ 2', artistName: 'DJ Artist' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            const pausedLeftoverTrack = makeTrack({
+                id: 'leftover_1',
+                uri: 'spotify:track:leftover_1',
+                name: 'Yesterday Song',
+                artistName: 'Other Artist',
+            });
+
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+            };
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: false,
+                item: pausedLeftoverTrack,
+                context: { type: 'playlist', uri: 'spotify:playlist:yesterday' },
+                device: { id: 'dev_1', name: 'Spotify App', is_active: true },
+            });
+
+            const state = await dj.getPlaybackState();
+            assert.strictEqual(state?.is_playing, false);
+            // Session must NOT be wiped when Spotify is merely paused on a leftover track
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+            assert.strictEqual(dj.getSessionCache().getSessionTracks().length, 2);
+
+            const queue = await dj.getQueue(pausedLeftoverTrack);
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+            assert.deepStrictEqual(queue.map(t => t.id), ['dj2']);
+        });
+
+        it('starts playback in processDJLoop when lastQuery matches current schedule but sessionTracks is empty', async () => {
+            store['dj_last_query'] = 'chill jazz';
+            // Note: dj_current_session_tracks is empty!
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '23:59', query: 'chill jazz' }]);
+
+            let playedUris: string[] = [];
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_deviceId: string, uris: string[]) => Promise<void>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+            djInternal.playerClient.getDevices = async () => [
+                { id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice,
+            ];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async (_id, uris) => {
+                playedUris = uris;
+            };
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.searchTracks = async () => [
+                makeTrack({ id: 'cj1', uri: 'spotify:track:cj1', name: 'Jazz 1', artistName: 'Artist' }),
+            ];
+
+            await dj.processDJLoop(true, false);
+            assert.deepStrictEqual(playedUris, ['spotify:track:cj1']);
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+        });
+
+        it('starts playing ContextDJ session tracks on resume() when session playback was not yet confirmed on Spotify', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 'dj1', uri: 'spotify:track:dj1', name: 'DJ 1', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj2', uri: 'spotify:track:dj2', name: 'DJ 2', artistName: 'DJ Artist' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            let playedUris: string[] = [];
+
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_deviceId: string, uris: string[]) => Promise<void>;
+                };
+            };
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: false,
+                item: makeTrack({ id: 'other', uri: 'spotify:track:other', name: 'Other', artistName: 'Other' }),
+                device: { id: 'dev_1', name: 'Speaker', is_active: false },
+            });
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async (_id, uris) => {
+                playedUris = uris;
+            };
+
+            const res = await dj.resume();
+            assert.strictEqual(res.ok, true);
+            assert.deepStrictEqual(playedUris, ['spotify:track:dj1', 'spotify:track:dj2']);
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+        });
+
+        it('restarts ContextDJ session tracks from current track on resume() even if hasConfirmedSessionPlayback was true when Spotify is now paused on an external track', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 'dj1', uri: 'spotify:track:dj1', name: 'DJ 1', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj2', uri: 'spotify:track:dj2', name: 'DJ 2', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj3', uri: 'spotify:track:dj3', name: 'DJ 3', artistName: 'DJ Artist' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            let playedUris: string[] = [];
+            let bareResumeCalled = false;
+            let currentSpotifyState: unknown = {
+                is_playing: true,
+                item: sessionTracks[1],
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            };
+
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_deviceId: string, uris: string[]) => Promise<void>;
+                    resume: () => Promise<{ ok: boolean }>;
+                };
+            };
+            djInternal.spotify.getMyCurrentPlaybackState = async () => currentSpotifyState;
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async (_id, uris) => {
+                playedUris = uris;
+            };
+            djInternal.playerClient.resume = async () => {
+                bareResumeCalled = true;
+                return { ok: true };
+            };
+
+            // Step 1: DJ 2 is confirmed playing on Spotify
+            await dj.getPlaybackState();
+            assert.strictEqual(dj.getSessionCache().getHasConfirmedSessionPlayback(), true);
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 1);
+
+            // Step 2: Spotify is now paused on an unrelated external song (or device went idle returning null)
+            currentSpotifyState = {
+                is_playing: false,
+                item: makeTrack({ id: 'ext_paused', uri: 'spotify:track:ext_paused', name: 'External Paused', artistName: 'Other' }),
+                context: { type: 'playlist', uri: 'spotify:playlist:other' },
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            };
+            await dj.getPlaybackState();
+
+            // Step 3: User clicks Play in ContextDJ -> must NOT bare-resume the external track; must start [dj2, dj3]!
+            const res = await dj.resume();
+            assert.strictEqual(res.ok, true);
+            assert.strictEqual(bareResumeCalled, false);
+            assert.deepStrictEqual(playedUris, ['spotify:track:dj2', 'spotify:track:dj3']);
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+        });
+
+        it('preserves lastPlayingTrack and sessionStartIndex when Spotify returns 204/null state during an active session, and handles rapid playFromQueueIndex + previous()', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 'dj1', uri: 'spotify:track:dj1', name: 'DJ 1', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj2', uri: 'spotify:track:dj2', name: 'DJ 2', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj3', uri: 'spotify:track:dj3', name: 'DJ 3', artistName: 'DJ Artist' }),
+                makeTrack({ id: 'dj4', uri: 'spotify:track:dj4', name: 'DJ 4', artistName: 'DJ Artist' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            let currentSpotifyState: unknown = {
+                is_playing: true,
+                item: sessionTracks[2],
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            };
+
+            const djInternal = dj as unknown as {
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                    previous: () => Promise<{ ok: boolean }>;
+                };
+            };
+            djInternal.spotify.getMyCurrentPlaybackState = async () => currentSpotifyState;
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {};
+            djInternal.playerClient.previous = async () => ({ ok: true });
+
+            // Confirmed playing dj3 (index 2)
+            await dj.getPlaybackState();
+            assert.strictEqual(dj.getSessionCache().getLastPlayingTrack()?.id, 'dj3');
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 2);
+
+            // Spotify device temporarily returns null (HTTP 204) -> lastPlayingTrack must remain dj3
+            currentSpotifyState = null;
+            await dj.getPlaybackState();
+            assert.strictEqual(dj.getSessionCache().getLastPlayingTrack()?.id, 'dj3');
+            const queueWhileIdle = await dj.getQueue();
+            assert.deepStrictEqual(queueWhileIdle.map(t => t.id), ['dj4']);
+
+            // Rapid queue jump to dj4 followed immediately by previous() while Spotify is still on dj1
+            currentSpotifyState = {
+                is_playing: true,
+                item: sessionTracks[0],
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            };
+            await dj.playFromQueueIndex(0, [sessionTracks[3]]);
+            await dj.previous();
+
+            const stateAfterRapidPrev = await dj.getPlaybackState();
+            assert.strictEqual(stateAfterRapidPrev?.__optimisticFallback, undefined);
+            assert.strictEqual(stateAfterRapidPrev?.item?.id, 'dj1');
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+        });
     });
 });
 

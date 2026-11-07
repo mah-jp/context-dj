@@ -197,4 +197,100 @@ describe('TrackSearchPipeline', () => {
         assert.strictEqual(found[0].id, 'orig1');
         assert.strictEqual(found[0].artists[0]?.name, 'Mariya Takeuchi');
     });
+
+    it('excludes already-played session tracks before AI filtering and fetches deeper offsets when initial pages are exhausted', async () => {
+        const playedTrack1 = makeTrack({ id: 'played_1', name: 'Played One', artistName: 'Artist A', popularity: 80 });
+        const playedTrack2 = makeTrack({ id: 'played_2', name: 'Played Two', artistName: 'Artist B', popularity: 80 });
+        const freshDeepTrack = makeTrack({ id: 'fresh_deep_1', name: 'Fresh Deep Song', artistName: 'Artist C', popularity: 70 });
+
+        const searchedOffsets: number[] = [];
+        const fakeSpotify = {
+            searchTracks: async (_query: string, opts?: { offset?: number }) => {
+                const offset = opts?.offset ?? 0;
+                searchedOffsets.push(offset);
+                if (offset < 10) {
+                    return { tracks: { items: [playedTrack1, playedTrack2] } };
+                }
+                return { tracks: { items: [freshDeepTrack] } };
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        let aiCandidateIds: string[] = [];
+        const fakeAI = {
+            filterTracksWithAI: async (_req: string, tracks: { id: string }[]): Promise<TrackEvaluation[]> => {
+                aiCandidateIds = tracks.map(t => t.id);
+                return tracks.map(t => ({
+                    id: t.id,
+                    score: 88,
+                    vibeTag: '#Fresh',
+                    selectionReason: 'Fresh refill track',
+                    energy: 5,
+                    stage: 'build',
+                }));
+            },
+        } as unknown as AIService;
+
+        const sessionCache = new TrackSessionCache();
+        sessionCache.markTracksPlayed([playedTrack1, playedTrack2]);
+
+        const pipeline = new TrackSearchPipeline({
+            getSpotify: () => fakeSpotify,
+            getAI: () => fakeAI,
+            getConfig: () => config,
+            sessionCache,
+            addLog: (m) => logs.push(m),
+            updateStatus: (s) => statuses.push(s),
+        });
+
+        const result = await pipeline.searchTracks(['city pop'], undefined, {
+            userRequest: 'Play city pop',
+            thought: 'Refill fresh tracks',
+        });
+
+        // AI filtering only received the fresh unplayed track, not the already-played tracks
+        assert.deepStrictEqual(aiCandidateIds, ['spotify:track:fresh_deep_1']);
+        assert.strictEqual(result.length, 1);
+        assert.strictEqual(result[0].id, 'fresh_deep_1');
+        // Deeper offset (limit * 2 = 10) was queried because initial pages had < 5 unplayed tracks
+        assert.ok(searchedOffsets.includes(10));
+    });
+
+    it('fetches deeper offsets during refill even when >= 5 low-popularity leftover tracks remain from initial pages', async () => {
+        const playedTrack = makeTrack({ id: 'played_top', name: 'Played Top', artistName: 'Artist A', popularity: 85 });
+        const lowPopLeftovers = Array.from({ length: 6 }, (_, i) =>
+            makeTrack({ id: `low_${i}`, name: `Low Pop ${i}`, artistName: `Artist L${i}`, popularity: 1 })
+        );
+        const deepPopularTracks = Array.from({ length: 5 }, (_, i) =>
+            makeTrack({ id: `deep_pop_${i}`, name: `Deep Popular ${i}`, artistName: `Artist D${i}`, popularity: 75 })
+        );
+
+        const searchedOffsets: number[] = [];
+        const fakeSpotify = {
+            searchTracks: async (_query: string, opts?: { offset?: number }) => {
+                const offset = opts?.offset ?? 0;
+                searchedOffsets.push(offset);
+                if (offset < 10) {
+                    return { tracks: { items: [playedTrack, ...lowPopLeftovers] } };
+                }
+                return { tracks: { items: deepPopularTracks } };
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const sessionCache = new TrackSessionCache();
+        sessionCache.markTrackPlayed(playedTrack);
+
+        const pipeline = new TrackSearchPipeline({
+            getSpotify: () => fakeSpotify,
+            getAI: () => undefined,
+            getConfig: () => config,
+            sessionCache,
+            addLog: (m) => logs.push(m),
+            updateStatus: (s) => statuses.push(s),
+        });
+
+        const result = await pipeline.searchTracks(['jazz']);
+        assert.ok(searchedOffsets.includes(10));
+        assert.ok(result.some(t => t.id.startsWith('deep_pop_')));
+        assert.ok(result.every(t => !t.id.startsWith('low_')));
+    });
 });

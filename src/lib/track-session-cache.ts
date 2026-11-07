@@ -10,6 +10,8 @@ import { normalizeTrackName, generateTrackKey } from './dj-utils';
 export class TrackSessionCache {
     private trackMetadataCache = new Map<string, TrackMetadata>();
     private currentSessionTracks: Track[] = [];
+    private sessionStartIndex = 0;
+    private sessionVersion = 0;
     private sessionPlayedUris = new Set<string>();
     private sessionPlayedKeys = new Set<string>();
     private lastPlayTime = 0;
@@ -32,16 +34,42 @@ export class TrackSessionCache {
 
         // Restore last playing track if available
         this.lastPlayingTrack = getStoredJSON<Track | null>(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, null);
+        if (this.lastPlayingTrack && this.currentSessionTracks.length > 0) {
+            const restoredIdx = this.findTrackIndexInSession(this.lastPlayingTrack);
+            if (restoredIdx >= 0) {
+                this.sessionStartIndex = restoredIdx;
+            }
+        }
     }
 
     getSessionTracks(): Track[] {
         return this.currentSessionTracks;
     }
 
-    setSessionTracks(tracks: Track[], persist: boolean = true) {
+    getSessionStartIndex(): number {
+        return this.sessionStartIndex;
+    }
+
+    setSessionStartIndex(index: number) {
+        if (this.currentSessionTracks.length === 0) {
+            this.sessionStartIndex = 0;
+            return;
+        }
+        this.sessionStartIndex = Math.max(0, Math.min(index, this.currentSessionTracks.length - 1));
+    }
+
+    getSessionVersion(): number {
+        return this.sessionVersion;
+    }
+
+    setSessionTracks(tracks: Track[], persist: boolean = true, startIndex: number = 0) {
         this.currentSessionTracks = tracks;
+        this.sessionStartIndex = tracks.length > 0
+            ? Math.max(0, Math.min(startIndex, tracks.length - 1))
+            : 0;
         this.hasConfirmedSessionPlayback = false;
         this.isExternalContextActive = false;
+        this.sessionVersion++;
         if (persist) {
             setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, tracks);
         }
@@ -49,6 +77,8 @@ export class TrackSessionCache {
 
     clearSessionTracks(persist: boolean = true) {
         this.currentSessionTracks = [];
+        this.sessionStartIndex = 0;
+        this.sessionVersion++;
         if (persist) {
             removeStorageItem(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS);
         }
@@ -56,6 +86,7 @@ export class TrackSessionCache {
 
     appendSessionTracks(tracks: Track[]) {
         this.currentSessionTracks.push(...tracks);
+        this.sessionVersion++;
         setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, this.currentSessionTracks);
     }
 
@@ -63,9 +94,10 @@ export class TrackSessionCache {
         return !this.isExternalContextActive && this.currentSessionTracks.length > 0;
     }
 
-    activateDJSession(tracks: Track[], persist: boolean = true) {
-        this.setSessionTracks(tracks, persist);
+    activateDJSession(tracks: Track[], persist: boolean = true, startIndex: number = 0) {
+        this.setSessionTracks(tracks, persist, startIndex);
         this.lastPlayTime = Date.now();
+        this.lastPlayingTrack = null;
         this.hasConfirmedSessionPlayback = false;
         this.isExternalContextActive = false;
     }
@@ -74,6 +106,8 @@ export class TrackSessionCache {
         this.isExternalContextActive = true;
         if (clearTracks) {
             this.clearSessionTracks(persist);
+        } else {
+            this.sessionVersion++;
         }
         this.hasConfirmedSessionPlayback = false;
         this.lastPlayTime = 0;
@@ -133,6 +167,10 @@ export class TrackSessionCache {
         if (track.uri) {
             this.sessionPlayedUris.add(track.uri);
         }
+        const linkedUri = (track as { linked_from?: { uri?: string } }).linked_from?.uri;
+        if (linkedUri) {
+            this.sessionPlayedUris.add(linkedUri);
+        }
         const key = generateTrackKey(track);
         if (key) {
             this.sessionPlayedKeys.add(key);
@@ -147,7 +185,12 @@ export class TrackSessionCache {
 
     isTrackPlayedInSession(track: Track): boolean {
         const key = generateTrackKey(track);
-        return this.sessionPlayedUris.has(track.uri) || (Boolean(key) && this.sessionPlayedKeys.has(key));
+        const linkedUri = (track as { linked_from?: { uri?: string } }).linked_from?.uri;
+        return (
+            this.sessionPlayedUris.has(track.uri) ||
+            (Boolean(linkedUri) && this.sessionPlayedUris.has(linkedUri!)) ||
+            (Boolean(key) && this.sessionPlayedKeys.has(key))
+        );
     }
 
     cacheTrackMetadata(tracks: Track[]) {
@@ -201,8 +244,12 @@ export class TrackSessionCache {
     enrichTrackWithCachedMetadata(track: Track): Track {
         if (!track) return track;
         const key = generateTrackKey(track);
+        const linkedUri = (track as { linked_from?: { uri?: string; id?: string } }).linked_from?.uri;
+        const linkedId = (track as { linked_from?: { uri?: string; id?: string } }).linked_from?.id;
         let cached: TrackMetadata | undefined = (track.uri ? this.trackMetadataCache.get(track.uri) : undefined)
             || (track.id ? this.trackMetadataCache.get(track.id) : undefined)
+            || (linkedUri ? this.trackMetadataCache.get(linkedUri) : undefined)
+            || (linkedId ? this.trackMetadataCache.get(linkedId) : undefined)
             || (key ? this.trackMetadataCache.get(`key:${key}`) : undefined);
 
         // Fallback: Check currentSessionTracks using robust index finder
@@ -246,20 +293,29 @@ export class TrackSessionCache {
     }
 
     /**
-     * Resolves the index of a track within the current session using URI, ID, TrackKey, and fuzzy title match.
+     * Resolves the index of a track within the current session using URI, ID, linked_from (Spotify Track Relinking), TrackKey, and fuzzy title match.
      */
     findTrackIndexInSession(track: Track | SpotifyApi.TrackObjectFull): number {
         if (!track || this.currentSessionTracks.length === 0) return -1;
 
         const uri = track.uri;
         const id = track.id;
+        const linkedUri = (track as { linked_from?: { uri?: string; id?: string } }).linked_from?.uri;
+        const linkedId = (track as { linked_from?: { uri?: string; id?: string } }).linked_from?.id;
         const trackKey = generateTrackKey(track);
         const normName = normalizeTrackName(track.name);
 
-        // 1. Exact URI or ID match
-        let idx = this.currentSessionTracks.findIndex(t =>
-            (uri && t.uri === uri) || (id && t.id === id)
-        );
+        // 1. Exact URI, ID, or Spotify Track Relinking (linked_from) match
+        let idx = this.currentSessionTracks.findIndex(t => {
+            const tLinkedUri = (t as { linked_from?: { uri?: string; id?: string } }).linked_from?.uri;
+            const tLinkedId = (t as { linked_from?: { uri?: string; id?: string } }).linked_from?.id;
+            return Boolean(
+                (uri && (t.uri === uri || tLinkedUri === uri)) ||
+                (id && (t.id === id || tLinkedId === id)) ||
+                (linkedUri && (t.uri === linkedUri || tLinkedUri === linkedUri)) ||
+                (linkedId && (t.id === linkedId || tLinkedId === linkedId))
+            );
+        });
         if (idx >= 0) return idx;
 
         // 2. TrackKey match (Title + Main Artist)
@@ -295,6 +351,8 @@ export class TrackSessionCache {
                 .slice(foundIndex + 1)
                 .map(t => this.enrichTrackWithCachedMetadata(t));
         }
-        return this.currentSessionTracks.slice(1).map(t => this.enrichTrackWithCachedMetadata(t));
+        return this.currentSessionTracks
+            .slice(this.sessionStartIndex + 1)
+            .map(t => this.enrichTrackWithCachedMetadata(t));
     }
 }

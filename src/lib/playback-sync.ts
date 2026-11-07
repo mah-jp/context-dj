@@ -34,12 +34,16 @@ function isTrackMatchingExpectation(
     if (!state) return false;
     const currentUri = state.item?.uri || null;
     const currentItem = state.item?.type === 'track' ? (state.item as Track) : null;
+    const linkedFromUri = (currentItem as { linked_from?: { uri?: string } } | null)?.linked_from?.uri || null;
 
     const hasTrackExpectation = Boolean(expectation.expectedTrackUri || expectation.expectedTrackKey);
     const hasDepartedExpectation = Boolean(expectation.departedTrackUri);
 
     if (hasTrackExpectation) {
-        if (expectation.expectedTrackUri && currentUri === expectation.expectedTrackUri) {
+        if (
+            expectation.expectedTrackUri &&
+            (currentUri === expectation.expectedTrackUri || linkedFromUri === expectation.expectedTrackUri)
+        ) {
             return true;
         }
         if (
@@ -51,7 +55,12 @@ function isTrackMatchingExpectation(
         }
         // If we also know the track we departed from (e.g. handleNext) and Spotify has already
         // moved to a different track (such as a relinked URI or user-queued track), treat as transitioned.
-        if (hasDepartedExpectation && currentUri && currentUri !== expectation.departedTrackUri) {
+        if (
+            hasDepartedExpectation &&
+            currentUri &&
+            currentUri !== expectation.departedTrackUri &&
+            linkedFromUri !== expectation.departedTrackUri
+        ) {
             return true;
         }
         return false;
@@ -59,7 +68,7 @@ function isTrackMatchingExpectation(
 
     if (hasDepartedExpectation) {
         if (!currentUri) return false;
-        if (currentUri !== expectation.departedTrackUri) {
+        if (currentUri !== expectation.departedTrackUri && linkedFromUri !== expectation.departedTrackUri) {
             return true;
         }
         if (expectation.allowSameTrackRewind && typeof state.progress_ms === 'number') {
@@ -157,10 +166,11 @@ export function evaluateTransitionGuard(
         pending.expectedTrackUri || pending.expectedTrackKey || pending.departedTrackUri
     );
     const suppressTrackUpdate = Boolean(
-        hasTrackOrDeparted && !isTrackMatchingExpectation(state, pending)
+        hasTrackOrDeparted && (state?.__optimisticFallback || !isTrackMatchingExpectation(state, pending))
     );
     const suppressPlayStateUpdate = Boolean(
-        pending.expectedIsPlaying !== undefined && state?.is_playing !== pending.expectedIsPlaying
+        pending.expectedIsPlaying !== undefined &&
+        (state?.__optimisticFallback || state?.is_playing !== pending.expectedIsPlaying)
     );
     const suppressDeviceUpdate = Boolean(
         (pending.expectedDeviceId !== undefined && state?.device?.id !== pending.expectedDeviceId) ||

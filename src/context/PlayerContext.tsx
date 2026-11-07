@@ -184,6 +184,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const lastSessionActiveRef = useRef<boolean | null>(null);
     const lastDevicesFetchRef = useRef<number>(0);
     const lastQueueSyncPlayTimeRef = useRef<number>(0);
+    const lastSyncedSessionVersionRef = useRef<number>(0);
     const queueLengthRef = useRef<number>(0);
     const queueRef = useRef<Track[]>([]);
     const hasInitialQueueSyncRef = useRef<boolean>(false);
@@ -199,9 +200,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setDeviceName(next);
     }, []);
 
-    const persistPlayingTrack = useCallback((track: Track | null) => {
-        if (djRef.current) {
+    const persistPlayingTrack = useCallback((track: Track | null, updateSessionCache: boolean = true) => {
+        if (updateSessionCache && djRef.current) {
             djRef.current.getSessionCache().setLastPlayingTrack(track, true);
+        } else if (track) {
+            setStoredJSON(STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, track);
         }
     }, []);
 
@@ -273,9 +276,26 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastProgressMsRef.current = playbackState.progress_ms;
             }
 
-            const currentTrackItem = (playbackState && playbackState.item && playbackState.item.type === 'track')
+            const rawTrackItem = (playbackState && playbackState.item && playbackState.item.type === 'track')
                 ? (playbackState.item as Track)
                 : null;
+
+            const isSessionActive = typeof djRef.current.isSessionPlaybackActive === 'function'
+                ? djRef.current.isSessionPlaybackActive()
+                : false;
+
+            // If ContextDJ has an active session and Spotify is merely paused/idle on a leftover external track or non-track media,
+            // do not overwrite ContextDJ's current session track with the paused external state.
+            const isPausedForeignTrackInSession = Boolean(
+                isSessionActive &&
+                !playbackState?.is_playing &&
+                (!rawTrackItem || djRef.current.findTrackIndexInSession(rawTrackItem) === -1)
+            );
+            const currentTrackItem = isPausedForeignTrackInSession
+                ? (currentTrackRef.current && djRef.current.findTrackIndexInSession(currentTrackRef.current) >= 0
+                    ? currentTrackRef.current
+                    : (djRef.current.getSessionCache().getSessionTracks()[djRef.current.getSessionCache().getSessionStartIndex()] ?? null))
+                : rawTrackItem;
 
             const currentTrackUri = currentTrackItem?.uri || null;
             const trackChanged = !guard.suppressTrackUpdate && currentTrackUri !== lastTrackUriRef.current;
@@ -283,17 +303,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastTrackUriRef.current = currentTrackUri;
             }
 
-            const isSessionActive = typeof djRef.current.isSessionPlaybackActive === 'function'
-                ? djRef.current.isSessionPlaybackActive()
-                : false;
-            const sessionModeChanged = lastSessionActiveRef.current !== null && isSessionActive !== lastSessionActiveRef.current;
-            lastSessionActiveRef.current = isSessionActive;
+            const sessionModeChanged = !guard.suppressTrackUpdate &&
+                lastSessionActiveRef.current !== null &&
+                isSessionActive !== lastSessionActiveRef.current;
+            if (!guard.suppressTrackUpdate) {
+                lastSessionActiveRef.current = isSessionActive;
+            }
 
             // 2. Conditionally fetch Queue (skip overwriting optimistic queue if track is still in stale transition)
             const lastPlayTime = typeof djRef.current.getLastPlayTime === 'function' ? djRef.current.getLastPlayTime() : 0;
             const newPlayOccurred = lastPlayTime > lastQueueSyncPlayTimeRef.current;
+            const currentSessionVersion = typeof djRef.current.getSessionCache === 'function'
+                ? djRef.current.getSessionCache().getSessionVersion()
+                : 0;
+            const sessionTracksChanged = currentSessionVersion !== lastSyncedSessionVersionRef.current;
             const shouldFetchQueue = !guard.suppressTrackUpdate && (
-                forceAll || trackChanged || sessionModeChanged || !hasInitialQueueSyncRef.current || newPlayOccurred
+                forceAll || trackChanged || sessionModeChanged || !hasInitialQueueSyncRef.current || newPlayOccurred || sessionTracksChanged
             );
             let queuePromise: Promise<Track[]> | null = null;
             if (shouldFetchQueue) {
@@ -315,6 +340,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 hasInitialQueueSyncRef.current = true;
                 updateQueueState(currentQ.slice(0, 20));
                 lastQueueSyncPlayTimeRef.current = lastPlayTime;
+                lastSyncedSessionVersionRef.current = currentSessionVersion;
             }
             let latestDevices = devicesRef.current;
             if (devicesPromise) {
@@ -345,16 +371,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (!guard.suppressTrackUpdate) {
                     const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
                     currentTrackRef.current = finalTrack;
+                    const shouldUpdateSessionCache = Boolean(playbackState && !playbackState.__optimisticFallback && !isPausedForeignTrackInSession);
                     setCurrentTrack(prev => {
                         if (isSameTrackDisplay(prev, finalTrack)) {
                             return prev;
                         }
-                        persistPlayingTrack(finalTrack);
+                        persistPlayingTrack(finalTrack, shouldUpdateSessionCache);
                         return finalTrack;
                     });
                 }
                 if (!guard.suppressPlayStateUpdate) {
-                    updateIsPlaying(playbackState!.is_playing);
+                    updateIsPlaying(Boolean(playbackState?.is_playing));
                 }
             } else if (!guard.suppressTrackUpdate) {
                 const isNonTrackMedia = Boolean(
@@ -364,10 +391,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             playbackState.currently_playing_type !== 'track' &&
                             playbackState.currently_playing_type !== 'unknown'))
                 );
-                if (isNonTrackMedia) {
+                if (isNonTrackMedia && (!isSessionActive || playbackState?.is_playing)) {
                     currentTrackRef.current = null;
                     setCurrentTrack(null);
-                    persistPlayingTrack(null);
+                    persistPlayingTrack(null, true);
                 }
                 if (!guard.suppressPlayStateUpdate) {
                     updateIsPlaying(false);
@@ -496,11 +523,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             const first = tracks[0];
                             currentTrackRef.current = first;
                             setCurrentTrack(first);
-                            persistPlayingTrack(first);
+                            persistPlayingTrack(first, false);
                             updateQueueState(tracks.slice(1, 21));
                             updateIsPlaying(true);
                             lastTrackUriRef.current = first.uri;
                             lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
+                            lastSyncedSessionVersionRef.current = dj.getSessionCache().getSessionVersion();
                             void convergenceRef.current.syncUntilConverged(
                                 {
                                     expectedTrackUri: first.uri,
@@ -514,7 +542,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                     const savedSessionTracks = dj.getSessionCache().getSessionTracks();
                     if (savedSessionTracks.length > 0) {
-                        updateQueueState(savedSessionTracks.slice(1, 21));
+                        const startIdx = dj.getSessionCache().getSessionStartIndex();
+                        updateQueueState(savedSessionTracks.slice(startIdx + 1, startIdx + 21));
                     }
                 }
             } catch (initError: unknown) {
@@ -585,7 +614,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 expectedNextKey = generateTrackKey(nextTrack);
                 currentTrackRef.current = nextTrack;
                 setCurrentTrack(nextTrack);
-                persistPlayingTrack(nextTrack);
+                persistPlayingTrack(nextTrack, false);
                 lastTrackUriRef.current = expectedNextUri;
                 updateQueueState(remaining);
             }
@@ -605,7 +634,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 // Revert optimistic track & queue shift if skip failed
                 currentTrackRef.current = previousTrack;
                 setCurrentTrack(previousTrack);
-                persistPlayingTrack(previousTrack);
+                persistPlayingTrack(previousTrack, false);
                 lastTrackUriRef.current = previousUri;
                 updateQueueState(currentQueue);
             }
@@ -635,15 +664,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         startBackgroundKeepAlive();
         if (djRef.current) {
             const targetIsPlaying = !isPlayingRef.current;
+            const playTimeBefore = djRef.current.getLastPlayTime();
             updateIsPlaying(targetIsPlaying);
             const res = targetIsPlaying
                 ? await djRef.current.resume()
                 : await djRef.current.pause();
             if (res.ok) {
-                void convergenceRef.current.syncUntilConverged(
-                    { expectedIsPlaying: targetIsPlaying },
-                    syncUIState
-                );
+                // If resume() initiated playTracks(), setOnTracksPlayedCallback has already
+                // registered a full expectedTrackUri + expectedIsPlaying convergence guard.
+                if (djRef.current.getLastPlayTime() === playTimeBefore) {
+                    void convergenceRef.current.syncUntilConverged(
+                        { expectedIsPlaying: targetIsPlaying },
+                        syncUIState
+                    );
+                }
             } else {
                 // Revert optimistic toggle if request failed immediately
                 updateIsPlaying(!targetIsPlaying);

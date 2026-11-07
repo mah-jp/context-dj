@@ -108,4 +108,83 @@ describe('TrackSessionCache', () => {
         assert.deepStrictEqual(cache.getSessionTracks(), []);
         assert.strictEqual(store['dj_current_session_tracks'], undefined);
     });
+
+    it('resolves relinked tracks via linked_from.uri and linked_from.id even when title and artist differ', () => {
+        const cache = new TrackSessionCache();
+        const sessionTrack = makeTrack({
+            id: 'orig_id_1',
+            uri: 'spotify:track:orig_id_1',
+            name: 'English Title',
+            artistName: 'English Artist',
+            selectionReason: 'Matched via linked_from',
+            vibeTag: '#Relinked',
+            stage: 'build',
+        });
+        cache.setSessionTracks([sessionTrack], true);
+        cache.cacheTrackMetadata([sessionTrack]);
+        cache.markTrackPlayed(sessionTrack);
+
+        const relinkedFromSpotify = {
+            ...makeTrack({
+                id: 'market_jp_999',
+                uri: 'spotify:track:market_jp_999',
+                name: '邦題タイトル',
+                artistName: '日本語アーティスト表記',
+            }),
+            linked_from: {
+                id: 'orig_id_1',
+                uri: 'spotify:track:orig_id_1',
+            },
+        } as unknown as Track;
+
+        assert.strictEqual(cache.findTrackIndexInSession(relinkedFromSpotify), 0);
+        assert.strictEqual(cache.isTrackPlayedInSession(relinkedFromSpotify), true);
+
+        const enriched = cache.enrichTrackWithCachedMetadata(relinkedFromSpotify);
+        assert.strictEqual(enriched.selectionReason, 'Matched via linked_from');
+        assert.strictEqual(enriched.vibeTag, '#Relinked');
+        assert.strictEqual(enriched.stage, 'build');
+    });
+
+    it('increments sessionVersion on session mutations and respects sessionStartIndex in getSessionTracksFromCurrent', () => {
+        const cache = new TrackSessionCache();
+        const initialVersion = cache.getSessionVersion();
+        const tracks = [
+            makeTrack({ id: '1', uri: 'spotify:track:1', name: 'Song 1', artistName: 'A1' }),
+            makeTrack({ id: '2', uri: 'spotify:track:2', name: 'Song 2', artistName: 'A2' }),
+            makeTrack({ id: '3', uri: 'spotify:track:3', name: 'Song 3', artistName: 'A3' }),
+            makeTrack({ id: '4', uri: 'spotify:track:4', name: 'Song 4', artistName: 'A4' }),
+        ];
+
+        cache.activateDJSession(tracks, true, 2);
+        assert.ok(cache.getSessionVersion() > initialVersion);
+        assert.strictEqual(cache.getSessionStartIndex(), 2);
+        assert.deepStrictEqual(
+            cache.getSessionTracksFromCurrent(null).map(t => t.id),
+            ['4']
+        );
+
+        const vBeforeAppend = cache.getSessionVersion();
+        cache.appendSessionTracks([
+            makeTrack({ id: '5', uri: 'spotify:track:5', name: 'Song 5', artistName: 'A5' }),
+        ]);
+        assert.strictEqual(cache.getSessionVersion(), vBeforeAppend + 1);
+    });
+
+    it('restores sessionStartIndex from persisted DJ_CURRENT_PLAYING_TRACK on initialization', () => {
+        const tracks = [
+            makeTrack({ id: '1', uri: 'spotify:track:1', name: 'Song 1', artistName: 'A1' }),
+            makeTrack({ id: '2', uri: 'spotify:track:2', name: 'Song 2', artistName: 'A2' }),
+            makeTrack({ id: '3', uri: 'spotify:track:3', name: 'Song 3', artistName: 'A3' }),
+        ];
+        store['dj_current_session_tracks'] = JSON.stringify(tracks);
+        store['dj_current_playing_track'] = JSON.stringify(tracks[1]);
+
+        const restoredCache = new TrackSessionCache();
+        assert.strictEqual(restoredCache.getSessionStartIndex(), 1);
+        assert.deepStrictEqual(
+            restoredCache.getSessionTracksFromCurrent(null).map(t => t.id),
+            ['3']
+        );
+    });
 });
