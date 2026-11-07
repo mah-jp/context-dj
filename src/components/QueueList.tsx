@@ -72,7 +72,7 @@ export default function QueueList({
                     <div className={styles.queueList}>
                         {queue.length > 0 ? queue.map((track, i) => (
                             <div
-                                key={track.uri || track.id || `queue-${i}`}
+                                key={`${track.uri || track.id || 'queue'}-${i}`}
                                 className={styles.queueItem}
                                 onClick={() => {
                                     if (!djCore) return;

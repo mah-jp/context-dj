@@ -256,9 +256,9 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                             <div className={styles.deviceDropdownHeader}>
                                 Select Device
                             </div>
-                            {devices.length > 0 ? devices.map((device) => (
+                            {devices.length > 0 ? devices.map((device, i) => (
                                 <div
-                                    key={device.id || device.name}
+                                    key={`${device.id || device.name || 'device'}-${i}`}
                                     onClick={() => {
                                         if (device.id) setDevice(device.id);
                                         setShowDevices(false);
