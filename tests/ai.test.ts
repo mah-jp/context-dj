@@ -181,6 +181,7 @@ describe('AIService', () => {
             const service = new AIService('gemini', 'test_key');
             const result = await service.filterTracksWithAI('some prompt', tracks);
             assert.deepStrictEqual(result.map(r => r.id), ['spotify:track:a', 'spotify:track:b']);
+            assert.match(service.getLastFilterError() || '', /Gemini API Error: 500/);
         });
 
         it('falls back to default metadata when AI returns malformed/truncated JSON during filterTracksWithAI', async () => {

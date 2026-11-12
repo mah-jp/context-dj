@@ -1,7 +1,13 @@
 import styles from '../app/page.module.css';
 import { Trash2 } from 'lucide-react';
 import { ScheduleItem } from '../lib/types';
-import { isScheduleItemActive, isScheduleItemPastInTimeline, getScheduleItemSignature, resolveEffectiveScheduleItem } from '../lib/dj-utils';
+import {
+    isScheduleItemActive,
+    isScheduleItemPastInTimeline,
+    isWaitingForScheduleStart,
+    getScheduleItemSignature,
+    resolveEffectiveScheduleItem,
+} from '../lib/dj-utils';
 
 interface ScheduleSidebarProps {
     schedule: ScheduleItem[];
@@ -11,7 +17,8 @@ interface ScheduleSidebarProps {
 }
 
 export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
-    const effectiveItem = resolveEffectiveScheduleItem(schedule);
+    const waitingForStart = isWaitingForScheduleStart(schedule);
+    const effectiveItem = waitingForStart ? null : resolveEffectiveScheduleItem(schedule);
     const hasMatchingCurrentQuery = Boolean(
         currentQuery && schedule.some(s => getScheduleItemSignature(s) === currentQuery)
     );
@@ -20,9 +27,11 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
         <div className={styles.sidebar}>
             {schedule.length > 0 ? schedule.map((item, i) => {
                 const signature = getScheduleItemSignature(item);
-                const isActive = hasMatchingCurrentQuery
-                    ? currentQuery === signature && (item === effectiveItem || isScheduleItemActive(item))
-                    : item === effectiveItem;
+                const isActive = !waitingForStart && (
+                    hasMatchingCurrentQuery
+                        ? currentQuery === signature && (item === effectiveItem || isScheduleItemActive(item))
+                        : item === effectiveItem
+                );
                 const past = !isActive && isScheduleItemPastInTimeline(schedule, i);
 
                 return (
@@ -43,13 +52,27 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
                         }}
                         title="Click to recall this context / クリックでこの文脈を再利用"
                     >
-                        <div style={{ flex: 1, marginRight: '8px' }}>
+                        <div
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Recall schedule ${item.start} - ${item.end}`}
+                            className={styles.scheduleRecallArea}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    onRecallItem(item);
+                                }
+                            }}
+                            style={{ flex: 1, marginRight: '8px', borderRadius: '4px' }}
+                        >
                             <div className={styles.scheduleTime} style={{ color: isActive ? 'var(--primary)' : undefined }}>{item.start} - {item.end}</div>
                             <div className={styles.scheduleQuery}>
                                 {item.queries ? item.queries.join(', ') : item.query}
                             </div>
                         </div>
                         <button
+                            type="button"
+                            aria-label={`Remove schedule ${item.start} - ${item.end}`}
                             onClick={(e) => {
                                 e.stopPropagation();
                                 onRemoveItem(i);

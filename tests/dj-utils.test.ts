@@ -11,6 +11,8 @@ import {
     parseTimeToMinutes,
     normalizeTimeString,
     findActiveScheduleItem,
+    findStrictlyActiveScheduleItem,
+    isWaitingForScheduleStart,
     resolveEffectiveScheduleItem,
 } from '../src/lib/dj-utils';
 import { ScheduleItem, Track } from '../src/lib/types';
@@ -290,6 +292,33 @@ describe('dj-utils', () => {
             const fullDayItem: ScheduleItem = { start: '00:00', end: '00:00', query: 'all day radio' };
             assert.strictEqual(isScheduleItemActive(fullDayItem, new Date(2026, 8, 24, 0, 0)), true);
             assert.strictEqual(isScheduleItemActive(fullDayItem, new Date(2026, 8, 24, 14, 30)), true);
+        });
+
+        it('handles single-item future overnight schedule (23:00 - 01:00 at 21:00) as waiting & not past, then past after 01:00', () => {
+            const singleFutureOvernight: ScheduleItem[] = [
+                { start: '23:00', end: '01:00', query: 'piano jazz' },
+            ];
+
+            // At 21:00 (2h before 23:00): strictly inactive, waiting for start, and NOT marked past!
+            const at21 = new Date(2026, 8, 24, 21, 0, 0, 0);
+            assert.strictEqual(findStrictlyActiveScheduleItem(singleFutureOvernight, at21), null);
+            assert.strictEqual(isWaitingForScheduleStart(singleFutureOvernight, at21), true);
+            assert.strictEqual(isScheduleItemPastInTimeline(singleFutureOvernight, 0, at21), false);
+
+            // At 23:00 and 00:30: strictly active, no longer waiting, not past
+            const at23 = new Date(2026, 8, 24, 23, 0, 0, 0);
+            const at0030 = new Date(2026, 8, 25, 0, 30, 0, 0);
+            assert.strictEqual(findStrictlyActiveScheduleItem(singleFutureOvernight, at23)?.query, 'piano jazz');
+            assert.strictEqual(isWaitingForScheduleStart(singleFutureOvernight, at23), false);
+            assert.strictEqual(isWaitingForScheduleStart(singleFutureOvernight, at0030), false);
+            assert.strictEqual(isScheduleItemPastInTimeline(singleFutureOvernight, 0, at0030), false);
+
+            // At 01:30 (after 01:00 end): no longer waiting for start, marked past in timeline, effective fallback continues
+            const at0130 = new Date(2026, 8, 25, 1, 30, 0, 0);
+            assert.strictEqual(findStrictlyActiveScheduleItem(singleFutureOvernight, at0130), null);
+            assert.strictEqual(isWaitingForScheduleStart(singleFutureOvernight, at0130), false);
+            assert.strictEqual(isScheduleItemPastInTimeline(singleFutureOvernight, 0, at0130), true);
+            assert.strictEqual(resolveEffectiveScheduleItem(singleFutureOvernight, at0130)?.query, 'piano jazz');
         });
     });
 });

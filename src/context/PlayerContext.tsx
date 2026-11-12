@@ -146,6 +146,35 @@ export function isSameTrackDisplay(a: Track | null, b: Track | null): boolean {
     );
 }
 
+export type CrossTabStorageAction = 'reload_config' | 'sync_schedule' | 'sync_query' | 'ignore';
+
+const CONFIG_AND_AUTH_STORAGE_KEYS = new Set<string>([
+    STORAGE_KEYS.SPOTIFY_CLIENT_ID,
+    STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN,
+    STORAGE_KEYS.SPOTIFY_EXPIRES_AT,
+    STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN,
+    STORAGE_KEYS.OPENAI_API_KEY,
+    STORAGE_KEYS.OPENAI_MODEL,
+    STORAGE_KEYS.GEMINI_API_KEY,
+    STORAGE_KEYS.GEMINI_MODEL,
+    STORAGE_KEYS.SELECTED_AI_PROVIDER,
+    STORAGE_KEYS.AI_FILTERING_ENABLED,
+    STORAGE_KEYS.BACKGROUND_KEEP_ALIVE,
+]);
+
+export function classifyStorageEventAction(key: string | null): CrossTabStorageAction {
+    if (key === null || CONFIG_AND_AUTH_STORAGE_KEYS.has(key)) {
+        return 'reload_config';
+    }
+    if (key === STORAGE_KEYS.DJ_SCHEDULE) {
+        return 'sync_schedule';
+    }
+    if (key === STORAGE_KEYS.DJ_LAST_QUERY) {
+        return 'sync_query';
+    }
+    return 'ignore';
+}
+
 export function isSameDeviceList(a: SpotifyApi.UserDevice[], b: SpotifyApi.UserDevice[]): boolean {
     if (a === b) return true;
     if (a.length !== b.length) return false;
@@ -271,7 +300,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setDevices(prev => (isSameDeviceList(prev, nextDevices) ? prev : nextDevices));
     }, []);
 
+    const stopBackgroundKeepAlive = useCallback(() => {
+        if (backgroundAudioRef.current) {
+            try {
+                backgroundAudioRef.current.pause();
+                backgroundAudioRef.current.currentTime = 0;
+            } catch {
+                // Ignore audio cleanup errors
+            }
+            backgroundAudioRef.current = null;
+            console.log("🔇 Background Keep-Alive Audio Stopped");
+        }
+    }, []);
+
     const resetLoggedOutState = useCallback((nextSetup: SetupStatus, nextStatus: string) => {
+        stopBackgroundKeepAlive();
         convergenceRef.current.cancel();
         if (detachDJSubscriptionsRef.current) {
             detachDJSubscriptionsRef.current();
@@ -293,7 +336,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             authorized: false,
             isAuthPending: false,
         }));
-    }, [updateIsPlaying, updateDeviceName, updateDevicesState, updateQueueState]);
+    }, [stopBackgroundKeepAlive, updateIsPlaying, updateDeviceName, updateDevicesState, updateQueueState]);
 
     const handleAuthExpired = useCallback(() => {
         if (isRefreshingTokenRef.current) return;
@@ -547,6 +590,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }, [handleAuthExpired, persistPlayingTrack, syncUIState, updateIsPlaying, updateQueueState]);
 
     const reloadConfig = useCallback(() => {
+        if (getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) !== 'true') {
+            stopBackgroundKeepAlive();
+        }
         const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
         const nextSetup = computeSetupStatus();
         setSetupStatus(nextSetup);
@@ -598,7 +644,30 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
 
         resetLoggedOutState(nextSetup, 'connect_needed');
-    }, [attachDJInstance, resetLoggedOutState]);
+    }, [attachDJInstance, resetLoggedOutState, stopBackgroundKeepAlive]);
+
+    // Synchronize auth, settings, and schedule changes across browser tabs
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+            return;
+        }
+        const handleStorageChange = (e: StorageEvent) => {
+            const action = classifyStorageEventAction(e.key);
+            if (action === 'reload_config') {
+                reloadConfig();
+            } else if (action === 'sync_schedule') {
+                const nextSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
+                setScheduleState(nextSchedule);
+                djRef.current?.setSchedule(nextSchedule, false);
+            } else if (action === 'sync_query') {
+                setCurrentQuery(getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null);
+            }
+        };
+        window.addEventListener('storage', handleStorageChange);
+        return () => {
+            window.removeEventListener('storage', handleStorageChange);
+        };
+    }, [reloadConfig]);
 
     // Initialize Auth & DJCore
     useEffect(() => {
@@ -705,13 +774,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         return () => {
             isCancelled = true;
+            stopBackgroundKeepAlive();
             convergenceController.cancel();
             if (detachDJSubscriptionsRef.current) {
                 detachDJSubscriptionsRef.current();
                 detachDJSubscriptionsRef.current = null;
             }
         };
-    }, [attachDJInstance]);
+    }, [attachDJInstance, stopBackgroundKeepAlive]);
 
     const handleLoopError = useCallback((msg: string) => {
         setError(prev => (prev === msg ? prev : msg));
@@ -888,8 +958,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (targetDevice?.name) {
                 updateDeviceName(targetDevice.name);
             }
+            const hadPendingStart = typeof djRef.current.hasPendingStartRetry === 'function'
+                ? djRef.current.hasPendingStartRetry()
+                : false;
             const res = await djRef.current.setActiveDevice(deviceId);
             if (res.ok) {
+                if (hadPendingStart) {
+                    void djRef.current.processDJLoop(true, false).catch((err) => {
+                        console.warn('Immediate playback retry after device switch failed:', err);
+                    });
+                }
                 void convergenceRef.current.syncUntilConverged(
                     { expectedDeviceId: deviceId },
                     syncUIState

@@ -126,9 +126,9 @@ export function getScheduleItemSignature(item: ScheduleItem): string {
 }
 
 /**
- * Finds the schedule item strictly active at the given date, or falls back to the sole item if only one exists.
+ * Finds the schedule item strictly active at the given date without any single-item fallback.
  */
-export function findActiveScheduleItem(schedule: ScheduleItem[], date: Date = new Date()): ScheduleItem | null {
+export function findStrictlyActiveScheduleItem(schedule: ScheduleItem[], date: Date = new Date()): ScheduleItem | null {
     if (!schedule || schedule.length === 0) return null;
 
     for (const item of schedule) {
@@ -137,7 +137,17 @@ export function findActiveScheduleItem(schedule: ScheduleItem[], date: Date = ne
         }
     }
 
-    if (schedule.length === 1) {
+    return null;
+}
+
+/**
+ * Finds the schedule item strictly active at the given date, or falls back to the sole item if only one exists.
+ */
+export function findActiveScheduleItem(schedule: ScheduleItem[], date: Date = new Date()): ScheduleItem | null {
+    const strict = findStrictlyActiveScheduleItem(schedule, date);
+    if (strict) return strict;
+
+    if (schedule && schedule.length === 1) {
         return schedule[0];
     }
 
@@ -179,6 +189,16 @@ function buildScheduleTimeline(schedule: ScheduleItem[], date: Date) {
 }
 
 /**
+ * Returns true when no schedule slot is currently active and the current time is prior to
+ * the first slot's scheduled start time on the 24h timeline (e.g. 21:00 waiting for a 23:00 show).
+ */
+export function isWaitingForScheduleStart(schedule: ScheduleItem[], date: Date = new Date()): boolean {
+    if (!schedule || schedule.length === 0) return false;
+    if (findStrictlyActiveScheduleItem(schedule, date)) return false;
+    return buildScheduleTimeline(schedule, date).isBeforeScheduleStart;
+}
+
+/**
  * Checks whether a schedule item at a given index in an ordered schedule timeline has already passed.
  * Preserves chronological order across midnight boundaries so upcoming overnight slots are not marked past.
  */
@@ -190,7 +210,6 @@ export function isScheduleItemPastInTimeline(
     if (!schedule || index < 0 || index >= schedule.length) return false;
     const item = schedule[index];
     if (isScheduleItemActive(item, date)) return false;
-    if (schedule.length === 1) return isScheduleItemPast(item, date);
 
     const { entries, relNow, isBeforeScheduleStart } = buildScheduleTimeline(schedule, date);
     if (isBeforeScheduleStart) return false;

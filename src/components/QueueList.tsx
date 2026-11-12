@@ -50,7 +50,16 @@ export default function QueueList({
                     {currentQuery && (
                         <div
                             className={styles.aiStatus}
+                            role="button"
+                            tabIndex={0}
+                            aria-label="View DJ Process Log"
                             onClick={showLogs}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    showLogs();
+                                }
+                            }}
                             style={{ cursor: 'pointer' }}
                             title="Click to view process log"
                         >
@@ -73,7 +82,16 @@ export default function QueueList({
                             <div
                                 key={`${track.uri || track.id || 'queue'}-${i}`}
                                 className={styles.queueItem}
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`Play ${track.name} by ${track.artists[0]?.name || 'Unknown'}`}
                                 onClick={() => onSelectTrack(i)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault();
+                                        onSelectTrack(i);
+                                    }
+                                }}
                             >
                                 <div className={styles.queueIndex}>{i + 1}</div>
                                 {track.album?.images?.[0]?.url ? (

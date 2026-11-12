@@ -1104,15 +1104,17 @@ describe('DJCore', () => {
             assert.strictEqual(dj.isSessionPlaybackActive(), true);
         });
 
-        it('snaps minor LLM clock-rounding drift (<= 15m) in createSchedule while preserving future start times', async () => {
+        it('snaps LLM clock-rounding drift (<= 60m) for immediate mood prompts while preserving explicit future start times', async () => {
             const dj = new DJCore('fake_token');
             const now = new Date();
             const plus5 = new Date(now.getTime() + 5 * 60_000);
+            const plus40 = new Date(now.getTime() + 40 * 60_000);
             const plus90 = new Date(now.getTime() + 90 * 60_000);
             const plus180 = new Date(now.getTime() + 180 * 60_000);
             const fmt = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
             const nowStr = fmt(now);
             const plus5Str = fmt(plus5);
+            const plus40Str = fmt(plus40);
             const plus90Str = fmt(plus90);
             const plus180Str = fmt(plus180);
 
@@ -1121,20 +1123,154 @@ describe('DJCore', () => {
                 generateSchedule: async () => mockGenerated.map(item => ({ ...item })),
             };
 
-            // Case 1: AI rounds current time 5 minutes ahead for an immediate mood request -> snaps to nowStr
-            mockGenerated = [{ start: plus5Str, end: plus180Str, query: 'ocean walk', queries: ['ocean walk'] }];
+            // Case 1: AI rounds current time 40 minutes ahead (e.g. 14:20 -> 15:00) for an immediate mood request -> snaps to nowStr
+            mockGenerated = [{ start: plus40Str, end: plus180Str, query: 'ocean walk', queries: ['ocean walk'] }];
             const snapped = await dj.createSchedule('海を散歩したい気分に合う音楽を');
             assert.strictEqual(snapped[0].start, nowStr);
 
-            // Case 2: User explicitly requested that start time (even within 15m) -> preserved!
+            // Case 2: User explicitly requested that start time (even within 5m) -> preserved!
             mockGenerated = [{ start: plus5Str, end: plus180Str, query: 'piano jazz', queries: ['piano jazz'] }];
             const explicitNear = await dj.createSchedule(`${plus5Str}からピアノのJazzを聴きたい`);
             assert.strictEqual(explicitNear[0].start, plus5Str);
 
-            // Case 3: Future schedule block 90 minutes ahead -> preserved (NOT overwritten by old <= 180m bug!)
+            // Case 3: Deferred keyword ("今夜") 40m ahead -> preserved!
+            mockGenerated = [{ start: plus40Str, end: plus180Str, query: 'night jazz', queries: ['night jazz'] }];
+            const deferredTonight = await dj.createSchedule('今夜はピアノのJazzを聴きたい');
+            assert.strictEqual(deferredTonight[0].start, plus40Str);
+
+            // Case 4: Future schedule block 90 minutes ahead -> preserved!
             mockGenerated = [{ start: plus90Str, end: plus180Str, query: 'late night jazz', queries: ['late night jazz'] }];
-            const futurePreserved = await dj.createSchedule('今夜はピアノのJazzを聴きたい');
+            const futurePreserved = await dj.createSchedule('23時からはピアノのJazzを聴きたい');
             assert.strictEqual(futurePreserved[0].start, plus90Str);
+        });
+
+        it('stands by without premature playback for future-start schedules, preloads 60s before start, and plays on time', async () => {
+            const dj = new DJCore('fake_token');
+            const now = new Date();
+            const fmt = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+            const plus10 = new Date(now.getTime() + 10 * 60_000);
+            const plus120 = new Date(now.getTime() + 120 * 60_000);
+
+            let searchCalls = 0;
+            let playedUris: string[] = [];
+
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_id: string, uris: string[]) => Promise<void>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+            djInternal.playerClient.getDevices = async () => [{ id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async (_id, uris) => {
+                playedUris = uris;
+            };
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.searchTracks = async () => {
+                searchCalls++;
+                return [makeTrack({ id: 'pj1', uri: 'spotify:track:pj1', name: 'Midnight Waltz', artistName: 'Bill Evans' })];
+            };
+
+            // 1. Schedule starts 10 minutes in the future: processDJLoop(false, true) must stand by, NOT play early or throw
+            dj.setSchedule([{ start: fmt(plus10), end: fmt(plus120), query: 'piano jazz', queries: ['piano jazz'] }]);
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(searchCalls, 0);
+            assert.strictEqual(playedUris.length, 0);
+            assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for /);
+
+            // 2. 60 seconds before start (next minute): background tick preloads silently while still waiting!
+            const nextMinute = new Date(now.getTime() + 60_000);
+            (dj as unknown as { schedule: ScheduleItem[] }).schedule = [
+                { start: fmt(nextMinute), end: fmt(plus120), query: 'piano jazz', queries: ['piano jazz'] },
+            ];
+            await dj.processDJLoop(true, false);
+            // Allow microtask queue to settle preloadedResult
+            await new Promise((r) => setTimeout(r, 10));
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(playedUris.length, 0);
+
+            // 3. Start time arrives: consumes preloaded tracks and starts playback without calling searchTracks again!
+            (dj as unknown as { schedule: ScheduleItem[] }).schedule = [
+                { start: fmt(now), end: fmt(plus120), query: 'piano jazz', queries: ['piano jazz'] },
+            ];
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(searchCalls, 1);
+            assert.deepStrictEqual(playedUris, ['spotify:track:pj1']);
+            assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+        });
+
+        it('backs off after playTracks 403/404 failure without burning AI search credits every 5s, and reuses cached tracks after device switch', async () => {
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '00:00', query: 'city pop', queries: ['city pop'] }]);
+
+            let searchCalls = 0;
+            let playCalls = 0;
+            let shouldFailPlay = true;
+
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_id: string, uris: string[]) => Promise<void>;
+                    setActiveDevice: (id: string) => Promise<{ ok: boolean }>;
+                    clearLastError: () => void;
+                    getLastError: () => { status: number; category: string; operation: string; message: string } | null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+
+            djInternal.playerClient.getDevices = async () => [{ id: 'dev_restricted', name: 'Restricted Speaker', is_active: true } as SpotifyApi.UserDevice];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_restricted';
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () =>
+                shouldFailPlay
+                    ? {
+                        status: 403,
+                        category: 'forbidden',
+                        operation: 'play',
+                        message: 'Spotify Premium is required (403).',
+                    }
+                    : null;
+            djInternal.playerClient.setActiveDevice = async () => ({ ok: true });
+            djInternal.searchTracks = async () => {
+                searchCalls++;
+                return [makeTrack({ id: 'cp1', uri: 'spotify:track:cp1', name: 'Plastic Love', artistName: 'Mariya Takeuchi' })];
+            };
+            djInternal.playerClient.startPlaybackOnDevice = async () => {
+                playCalls++;
+                if (shouldFailPlay) {
+                    throw new Error('Spotify Play Failed: Forbidden');
+                }
+            };
+
+            // 1. Initial forced play throws concrete error and sets non-Starting warning status (never locking UI isBusy!)
+            await assert.rejects(
+                async () => dj.processDJLoop(false, true),
+                /Spotify Play Failed/
+            );
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(playCalls, 1);
+            assert.match(dj.getStateSnapshot().status, /^⚠️ Spotify Premium is required/);
+            assert.strictEqual(dj.getStateSnapshot().status.includes('Starting'), false);
+
+            // 2. Subsequent 5-second background ticks MUST back off without calling searchTracks or startPlaybackOnDevice!
+            await dj.processDJLoop(true, false);
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(playCalls, 1);
+
+            // 3. User switches to a working device via setActiveDevice -> next tick retries immediately using cached tracks (searchCalls stays 1!)
+            shouldFailPlay = false;
+            await dj.setActiveDevice('dev_working');
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(playCalls, 2);
+            assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
         });
 
         it('keeps schedule immutable on setSchedule/removeScheduleItem and clears lastQuery when last item is removed', () => {
@@ -1327,6 +1463,54 @@ describe('DJCore', () => {
             // Immediate second background tick respects 60s cooldown instead of spamming playTracks again
             await dj.processDJLoop(true, false);
             assert.strictEqual(playAttempts, 1);
+        });
+
+        it('backs off background 5s polling when searchTracks returns 0 tracks, while allowing immediate forced retry', async () => {
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '23:59', query: 'impossible_query_xyz' }]);
+
+            let searchCalls = 0;
+            let searchResult: Track[] = [];
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+            djInternal.playerClient.getDevices = async () => [
+                { id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice,
+            ];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {};
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.searchTracks = async () => {
+                searchCalls++;
+                return searchResult;
+            };
+
+            // 1. User-initiated run finds 0 tracks -> throws concrete error and sets warning status
+            await assert.rejects(
+                () => dj.processDJLoop(false, true),
+                /No matching tracks found/
+            );
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(dj.hasPendingStartRetry(), false);
+
+            // 2. Subsequent 5s background polls must NOT hammer searchTracks again during cooldown
+            await dj.processDJLoop(true, false);
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(searchCalls, 1);
+
+            // 3. Explicit forced retry (force=true) bypasses cooldown immediately and plays when tracks exist
+            searchResult = [makeTrack({ id: 'ok1', uri: 'spotify:track:ok1', name: 'Found', artistName: 'Art' })];
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(searchCalls, 2);
+            assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
         });
     });
 });

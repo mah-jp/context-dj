@@ -21,6 +21,18 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
         setStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT, String(newVal));
     };
 
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+        const handleStorage = (e: StorageEvent) => {
+            if (e.key === null || e.key === STORAGE_KEYS.SHOW_AI_THOUGHT) {
+                const stored = getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT, '');
+                setShowAiThought(stored === '' ? true : stored === 'true');
+            }
+        };
+        window.addEventListener('storage', handleStorage);
+        return () => window.removeEventListener('storage', handleStorage);
+    }, []);
+
     const {
         status,
         isPlaying,
@@ -121,7 +133,20 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
             )}
             {/* DJ Insight Pop-up */}
             {showAiThought && (currentThought || currentTrack?.selectionReason) && (
-                <div className={styles.djInsight} onClick={() => toggleAiThought()} title="Click to hide insight">
+                <div
+                    className={styles.djInsight}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Hide DJ Insight"
+                    onClick={() => toggleAiThought()}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            toggleAiThought();
+                        }
+                    }}
+                    title="Click to hide insight"
+                >
                     <div className={styles.djInsightIcon}>
                         <Sparkles size={20} />
                     </div>
@@ -298,9 +323,19 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                             {devices.length > 0 ? devices.map((device, i) => (
                                 <div
                                     key={`${device.id || device.name || 'device'}-${i}`}
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label={`Switch playback to ${device.name}`}
                                     onClick={() => {
                                         if (device.id) setDevice(device.id);
                                         setShowDevices(false);
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                            e.preventDefault();
+                                            if (device.id) setDevice(device.id);
+                                            setShowDevices(false);
+                                        }
                                     }}
                                     className={`${styles.deviceDropdownItem} ${device.is_active ? styles.deviceDropdownItemActive : ''}`}
                                 >

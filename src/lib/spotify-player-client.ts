@@ -347,10 +347,11 @@ export class SpotifyPlayerClient {
         }
         const repeatTimer = setTimeout(async () => {
             this.postPlayTimer = null;
+            const latestToken = this.spotify.getAccessToken() || token;
             try {
                 await fetch(`https://api.spotify.com/v1/me/player/shuffle?state=false&device_id=${deviceId}`, {
                     method: 'PUT',
-                    headers: { 'Authorization': `Bearer ${token}` }
+                    headers: { 'Authorization': `Bearer ${latestToken}` }
                 });
             } catch (e) {
                 console.warn('Post-play disable shuffle failed (non-critical):', e);
@@ -359,7 +360,7 @@ export class SpotifyPlayerClient {
             try {
                 await fetch(repeatUrl, {
                     method: 'PUT',
-                    headers: { 'Authorization': `Bearer ${token}` }
+                    headers: { 'Authorization': `Bearer ${latestToken}` }
                 });
             } catch (e) {
                 console.warn('Set repeat mode failed (non-critical):', e);

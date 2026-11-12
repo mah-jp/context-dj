@@ -1187,3 +1187,19 @@
 .scheduleDeleteBtn:hover {
   color: #ef4444;
 }
+
+.queueItem:focus-visible,
+.aiStatus:focus-visible,
+.historyItem:focus-visible,
+.deviceDropdownItem:focus-visible,
+.djInsight:focus-visible,
+.sendBtn:focus-visible,
+.iconBtn:focus-visible,
+.controlBtn:focus-visible,
+.deviceLabel:focus-visible,
+.settingsLink:focus-visible,
+.scheduleRecallArea:focus-visible,
+.scheduleDeleteBtn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}

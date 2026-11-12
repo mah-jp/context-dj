@@ -181,12 +181,13 @@ export class DJRunner {
                 logs: this.djCore.getProcessLog(),
             });
 
-            // Trigger immediate playback for newly calculated schedule
+            // Trigger immediate playback for newly calculated schedule (or stand by if scheduled in the future)
             this.updateState({ status: 'Searching tracks & starting playback... (再生準備中...)' });
             await this.djCore.processDJLoop(false, true);
 
+            const latestStatus = this.djCore.getStateSnapshot().status;
             this.updateState({
-                status: 'Playing',
+                status: latestStatus.startsWith('⏰') ? latestStatus : 'Playing',
                 logs: this.djCore.getProcessLog(),
             });
 

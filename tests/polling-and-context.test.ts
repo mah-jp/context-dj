@@ -8,8 +8,10 @@ import {
     computeSetupStatus,
     shouldShowOnboarding,
     applyStoredConfigToDJ,
+    classifyStorageEventAction,
 } from '../src/context/PlayerContext';
 import { classifySpeechRecognitionError } from '../src/hooks/useVoiceInput';
+import { validateVisionImageFile, MAX_VISION_IMAGE_BYTES } from '../src/hooks/useVisionInput';
 import { DEFAULT_MODELS, STORAGE_KEYS } from '../src/lib/constants';
 import { computeNextUIPollDelay, createDJPollingController } from '../src/hooks/useDJPollingLoops';
 import { SpotifyAuth } from '../src/lib/spotify-auth';
@@ -340,5 +342,89 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
         assert.match(classifySpeechRecognitionError('network') || '', /ネットワークエラー/);
         assert.match(classifySpeechRecognitionError('language-not-supported') || '', /サポートされていません/);
         assert.match(classifySpeechRecognitionError('bad-grammar') || '', /bad-grammar/);
+    });
+
+    it('classifies cross-tab localStorage events into reload_config, sync_schedule, sync_query, or ignore', () => {
+        // localStorage.clear() emits key === null -> must reload config & auth state
+        assert.strictEqual(classifyStorageEventAction(null), 'reload_config');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN), 'reload_config');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.SPOTIFY_CLIENT_ID), 'reload_config');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.OPENAI_API_KEY), 'reload_config');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.GEMINI_API_KEY), 'reload_config');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.SELECTED_AI_PROVIDER), 'reload_config');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE), 'reload_config');
+
+        // Schedule and query updates from sibling tabs
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.DJ_SCHEDULE), 'sync_schedule');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.DJ_LAST_QUERY), 'sync_query');
+
+        // UI-local or transient keys should not trigger full config reload in PlayerContext
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.PROMPT_HISTORY), 'ignore');
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.SHOW_NOTES), 'ignore');
+        assert.strictEqual(classifyStorageEventAction('unrelated_third_party_key'), 'ignore');
+    });
+
+    it('validates Vision API image files for MIME support, extension fallback, empty files, and 20MB ceiling', () => {
+        // Supported formats & image/jpg normalization
+        assert.deepStrictEqual(
+            validateVisionImageFile({ type: 'image/jpeg', size: 512_000, name: 'photo.jpg' }),
+            { ok: true, normalizedMimeType: 'image/jpeg' }
+        );
+        assert.deepStrictEqual(
+            validateVisionImageFile({ type: 'IMAGE/JPG', size: 1024, name: 'cam.JPG' }),
+            { ok: true, normalizedMimeType: 'image/jpeg' }
+        );
+        assert.deepStrictEqual(
+            validateVisionImageFile({ type: 'image/png', size: 2048, name: 'shot.png' }),
+            { ok: true, normalizedMimeType: 'image/png' }
+        );
+        assert.deepStrictEqual(
+            validateVisionImageFile({ type: 'image/webp', size: 4096, name: 'scene.webp' }),
+            { ok: true, normalizedMimeType: 'image/webp' }
+        );
+        assert.deepStrictEqual(
+            validateVisionImageFile({ type: 'image/gif', size: 4096, name: 'anim.gif' }),
+            { ok: true, normalizedMimeType: 'image/gif' }
+        );
+
+        // Fallback to file extension when browser provides empty MIME type
+        assert.deepStrictEqual(
+            validateVisionImageFile({ type: '', size: 12_000, name: 'camera_upload.jpeg' }),
+            { ok: true, normalizedMimeType: 'image/jpeg' }
+        );
+
+        // Empty file rejected
+        const emptyRes = validateVisionImageFile({ type: 'image/png', size: 0, name: 'empty.png' });
+        assert.strictEqual(emptyRes.ok, false);
+        assert.match(emptyRes.errorMessage || '', /empty|空/);
+
+        // > 20MB rejected with concrete MB display
+        const hugeRes = validateVisionImageFile({
+            type: 'image/jpeg',
+            size: MAX_VISION_IMAGE_BYTES + 2 * 1024 * 1024,
+            name: 'raw.jpg',
+        });
+        assert.strictEqual(hugeRes.ok, false);
+        assert.match(hugeRes.errorMessage || '', /22\.0MB/);
+        assert.match(hugeRes.errorMessage || '', /20MB/);
+
+        // Unsupported image formats (HEIC, SVG) rejected with format hint
+        const heicRes = validateVisionImageFile({ type: 'image/heic', size: 500_000, name: 'IMG_0001.HEIC' });
+        assert.strictEqual(heicRes.ok, false);
+        assert.match(heicRes.errorMessage || '', /image\/heic/);
+        assert.match(heicRes.errorMessage || '', /JPEG, PNG, WebP, or GIF/);
+
+        const heicNoMimeRes = validateVisionImageFile({ type: '', size: 500_000, name: 'IMG_0002.heic' });
+        assert.strictEqual(heicNoMimeRes.ok, false);
+        assert.match(heicNoMimeRes.errorMessage || '', /\.heic/);
+
+        const svgRes = validateVisionImageFile({ type: 'image/svg+xml', size: 1000, name: 'icon.svg' });
+        assert.strictEqual(svgRes.ok, false);
+        assert.match(svgRes.errorMessage || '', /image\/svg\+xml/);
+
+        // Non-image file rejected
+        const pdfRes = validateVisionImageFile({ type: 'application/pdf', size: 10_000, name: 'doc.pdf' });
+        assert.strictEqual(pdfRes.ok, false);
+        assert.match(pdfRes.errorMessage || '', /画像ファイルを選択/);
     });
 });

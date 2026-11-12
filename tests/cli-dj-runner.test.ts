@@ -190,4 +190,32 @@ describe('CLI DJRunner', () => {
         assert.strictEqual(syncTargets.length, 1);
         assert.strictEqual(syncTargets[0].expectedTrackUri, 'spotify:track:session_1');
     });
+
+    it('preserves waiting status in sendRequest when user schedules a future start time', async () => {
+        const runner = new (DJRunner as unknown as { new(cfg: CLIConfig, token: string): DJRunner })(
+            { ...baseConfig },
+            'valid_token'
+        );
+        const internal = runner as unknown as {
+            ensureFreshToken: () => Promise<void>;
+            pollPlayback: () => Promise<null>;
+            djCore: {
+                createSchedule: () => Promise<{ start: string; end: string; query: string }[]>;
+                getDJStatus: () => { currentThought: string };
+                getProcessLog: () => string[];
+                processDJLoop: () => Promise<void>;
+                getStateSnapshot: () => { status: string };
+            };
+        };
+        internal.ensureFreshToken = async () => {};
+        internal.pollPlayback = async () => null;
+        internal.djCore.createSchedule = async () => [{ start: '23:00', end: '01:00', query: 'piano jazz' }];
+        internal.djCore.getDJStatus = () => ({ currentThought: 'Midnight piano' });
+        internal.djCore.getProcessLog = () => ['Scheduled for 23:00'];
+        internal.djCore.processDJLoop = async () => {};
+        internal.djCore.getStateSnapshot = () => ({ status: '⏰ Waiting for 23:00... (23:00の開始を待機中...)' });
+
+        await runner.sendRequest('23時からはピアノのJazzを聴きたい');
+        assert.strictEqual(runner.getState().status, '⏰ Waiting for 23:00... (23:00の開始を待機中...)');
+    });
 });

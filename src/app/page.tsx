@@ -121,6 +121,22 @@ export default function Home() {
     };
   }, [showHistory]);
 
+  // Sync prompt history & showNotes across browser tabs
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === STORAGE_KEYS.SHOW_NOTES) {
+        setShowNotes(getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
+      }
+      if (e.key === null || e.key === STORAGE_KEYS.PROMPT_HISTORY) {
+        setHistory(getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []));
+        setHistoryIndex(-1);
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
   // Autosize textarea
   useEffect(() => {
     if (textareaRef.current) {
@@ -170,11 +186,20 @@ export default function Home() {
         setInputText('');
         setSchedule(schedule);
         setStatus('🔎 Curating & preparing tracks... (楽曲を選曲・準備中...)');
-        setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
 
-        // Trigger immediate check & play with force=true (onTracksPlayed initiates convergence backoff sync)
+        // Trigger immediate check & play with force=true (or stand by cleanly if scheduled in the future)
         await djCore.processDJLoop(false, true);
-        setStatus('Ready');
+        const latestStatus = djCore.getStateSnapshot().status;
+        if (latestStatus.startsWith('⏰')) {
+          setStatus(latestStatus);
+          setToast({
+            msg: `Scheduled to start at ${schedule[0].start}! Standing by. (${schedule[0].start}開始でスケジュールを予約しました)`,
+            type: 'info',
+          });
+        } else {
+          setStatus('Ready');
+          setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
+        }
 
         await syncUIState({ forceAll: true });
       }
@@ -275,7 +300,7 @@ export default function Home() {
               type="file"
               ref={fileInputRef}
               onChange={handleImageUpload}
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp,image/gif"
               capture="environment"
               style={{ display: 'none' }}
             />
@@ -351,7 +376,15 @@ export default function Home() {
                 {history.map((item, i) => (
                   <div
                     key={`${item}-${i}`}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => handleHistorySelect(item)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleHistorySelect(item);
+                      }
+                    }}
                     className={styles.historyItem}
                   >
                     {item}

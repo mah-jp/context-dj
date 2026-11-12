@@ -169,6 +169,29 @@ describe('TrackSearchPipeline', () => {
         );
         assert.strictEqual(revertedResult.length, 2);
         assert.ok(logs.some(l => l.includes('AI Filtering removed ALL tracks')));
+
+        // 3. When AIService reports a fallback error via getLastFilterError(), logs concrete fallback warning instead of fake success
+        let mockFilterErr: string | null = 'Gemini API Error: 429 Too Many Requests';
+        const fallbackAI = {
+            filterTracksWithAI: async () => [
+                { id: 'spotify:track:c1', score: 70, vibeTag: '#test', selectionReason: 'fallback' },
+                { id: 'spotify:track:c2', score: 70, vibeTag: '#test', selectionReason: 'fallback' },
+            ],
+            getLastFilterError: () => mockFilterErr,
+        } as unknown as AIService;
+        const fallbackPipeline = new TrackSearchPipeline({
+            getSpotify: () => ({} as SpotifyWebApi.SpotifyWebApiJs),
+            getAI: () => fallbackAI,
+            getConfig: () => config,
+            sessionCache,
+            addLog: (m) => logs.push(m),
+            updateStatus: (s) => statuses.push(s),
+        });
+        logs = [];
+        await fallbackPipeline.performAIFiltering(candidates.map(c => ({ ...c })), { userRequest: 'test' });
+        assert.ok(logs.some(l => l.includes('⚠️ AI Filtering fallback (Gemini API Error: 429 Too Many Requests)')));
+        assert.strictEqual(logs.some(l => l.includes('tracks kept.')), false);
+        mockFilterErr = null;
     });
 
     it('findPriorityTrack matches multi-word quoted artist accurately instead of truncating at whitespace', async () => {

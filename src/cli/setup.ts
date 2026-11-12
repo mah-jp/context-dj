@@ -17,6 +17,33 @@ function promptLine(promptText: string): Promise<string> {
     });
 }
 
+export function resolveSetupAIConfig(
+    currentConfig: CLIConfig | null,
+    providerChoiceInput: string,
+    personalContextInput: string
+): {
+    aiProvider: AIProvider;
+    aiModel: string;
+    personalContext?: string;
+} {
+    const defaultChoice = currentConfig?.aiProvider === 'openai' ? '2' : '1';
+    const trimmedChoice = providerChoiceInput.trim() || defaultChoice;
+    const aiProvider: AIProvider = trimmedChoice === '2' ? 'openai' : 'gemini';
+    const defaultModel = aiProvider === 'openai' ? DEFAULT_MODELS.OPENAI : DEFAULT_MODELS.GEMINI;
+    const preservedModel =
+        currentConfig?.aiProvider === aiProvider && currentConfig?.aiModel?.trim()
+            ? currentConfig.aiModel.trim()
+            : defaultModel;
+    const trimmedPersonal = personalContextInput.trim();
+    const resolvedPersonal = trimmedPersonal || currentConfig?.personalContext;
+
+    return {
+        aiProvider,
+        aiModel: preservedModel,
+        ...(resolvedPersonal ? { personalContext: resolvedPersonal } : {}),
+    };
+}
+
 export async function runInteractiveSetup(): Promise<CLIConfig> {
     console.log('\n' + '═'.repeat(64));
     console.log('   🎧 Welcome to ContextDJ - Initial Setup');
@@ -42,18 +69,15 @@ export async function runInteractiveSetup(): Promise<CLIConfig> {
     }
 
     // 2. AI Provider Selection
+    const defaultProviderChoice = currentConfig?.aiProvider === 'openai' ? '2' : '1';
     console.log('\n【 Step 2/3: AI Provider (BYOK) 】');
     console.log('Select your AI provider for music curation:');
     console.log(`  1) Google Gemini (Recommended, Default: ${DEFAULT_MODELS.GEMINI})`);
     console.log(`  2) OpenAI (Default: ${DEFAULT_MODELS.OPENAI})`);
 
-    let providerChoice = await promptLine('Choose provider [1 or 2, default: 1]: ');
-    if (providerChoice !== '2') {
-        providerChoice = '1';
-    }
-
-    const aiProvider: AIProvider = providerChoice === '2' ? 'openai' : 'gemini';
-    const defaultModel = aiProvider === 'openai' ? DEFAULT_MODELS.OPENAI : DEFAULT_MODELS.GEMINI;
+    const providerChoice = await promptLine(`Choose provider [1 or 2, default: ${defaultProviderChoice}]: `);
+    const preliminary = resolveSetupAIConfig(currentConfig, providerChoice, '');
+    const aiProvider = preliminary.aiProvider;
 
     let apiKey = currentConfig?.aiProvider === aiProvider ? currentConfig?.aiApiKey : undefined;
     if (!apiKey) {
@@ -68,13 +92,14 @@ export async function runInteractiveSetup(): Promise<CLIConfig> {
     console.log('\n【 Step 3/3: Personal Context (Optional) 】');
     console.log('e.g. "I love 80s City Pop and Acoustic Jazz. Avoid aggressive EDM."');
     const personalContext = await promptLine('Your preferences (leave blank to skip): ');
+    const resolvedAI = resolveSetupAIConfig(currentConfig, providerChoice, personalContext);
 
     const finalConfig = saveConfig({
         spotifyClientId: clientId,
-        aiProvider,
+        aiProvider: resolvedAI.aiProvider,
         aiApiKey: apiKey,
-        aiModel: defaultModel,
-        ...(personalContext ? { personalContext } : {})
+        aiModel: resolvedAI.aiModel,
+        ...(resolvedAI.personalContext ? { personalContext: resolvedAI.personalContext } : {})
     });
 
     console.log('\n' + '━'.repeat(64));

@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { extractCodeFromInput, getValidSpotifyToken } from '../src/cli/auth';
 import { isConfigured, CLIConfig, loadConfig } from '../src/cli/config';
+import { resolveSetupAIConfig } from '../src/cli/setup';
+import { DEFAULT_MODELS } from '../src/lib/constants';
 
 describe('CLI Auth - extractCodeFromInput', () => {
     test('extracts code from full redirect URL with query params', () => {
@@ -177,5 +179,38 @@ describe('CLI Config - isConfigured', () => {
         } finally {
             globalThis.fetch = origFetch;
         }
+    });
+
+    test('resolveSetupAIConfig preserves existing provider, custom aiModel, and personalContext on re-setup', () => {
+        // 1. Fresh install defaults to Gemini + default Gemini model
+        const fresh = resolveSetupAIConfig(null, '', '');
+        assert.deepStrictEqual(fresh, {
+            aiProvider: 'gemini',
+            aiModel: DEFAULT_MODELS.GEMINI,
+        });
+
+        // 2. Re-setup with existing OpenAI config + custom model + personalContext when user presses Enter ('')
+        const existingOpenAI: CLIConfig = {
+            spotifyClientId: 'cid',
+            spotifyRefreshToken: 'rt',
+            aiProvider: 'openai',
+            aiApiKey: 'sk-old',
+            aiModel: 'gpt-4.1-custom',
+            personalContext: 'Love Bill Evans, no EDM',
+        };
+        const keptOpenAI = resolveSetupAIConfig(existingOpenAI, '', '');
+        assert.deepStrictEqual(keptOpenAI, {
+            aiProvider: 'openai',
+            aiModel: 'gpt-4.1-custom',
+            personalContext: 'Love Bill Evans, no EDM',
+        });
+
+        // 3. Switching provider from OpenAI -> Gemini resets aiModel to Gemini default while updating personalContext
+        const switchedToGemini = resolveSetupAIConfig(existingOpenAI, '1', '  Prefer solo piano  ');
+        assert.deepStrictEqual(switchedToGemini, {
+            aiProvider: 'gemini',
+            aiModel: DEFAULT_MODELS.GEMINI,
+            personalContext: 'Prefer solo piano',
+        });
     });
 });

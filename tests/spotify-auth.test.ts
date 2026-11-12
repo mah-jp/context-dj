@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { SpotifyAuth } from '../src/lib/spotify-auth';
+import { SpotifyAuth, resolveCanonicalRedirectUri } from '../src/lib/spotify-auth';
 import { STORAGE_KEYS } from '../src/lib/constants';
 import { setStorageItem, getStorageItem } from '../src/lib/storage';
 
@@ -50,8 +50,28 @@ describe('SpotifyAuth', () => {
         globalThis.fetch = originalFetch;
     });
 
-    it('gets correct redirect URI without query or hash', () => {
-        assert.strictEqual(SpotifyAuth.getRedirectUri(), 'https://example.com/app');
+    it('gets correct canonical redirect URI with trailing slash and without query, hash, or /settings suffix', () => {
+        assert.strictEqual(SpotifyAuth.getRedirectUri(), 'https://example.com/app/');
+
+        // Root production domain variations
+        assert.strictEqual(resolveCanonicalRedirectUri('https://contextdj.remoteroom.jp'), 'https://contextdj.remoteroom.jp/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://contextdj.remoteroom.jp/'), 'https://contextdj.remoteroom.jp/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://contextdj.remoteroom.jp/index.html'), 'https://contextdj.remoteroom.jp/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://contextdj.remoteroom.jp/settings'), 'https://contextdj.remoteroom.jp/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://contextdj.remoteroom.jp/settings/'), 'https://contextdj.remoteroom.jp/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://contextdj.remoteroom.jp/settings/index.html?foo=1#bar'), 'https://contextdj.remoteroom.jp/');
+
+        // Subpath development domain variations (MUST match trailing slash across main & settings!)
+        assert.strictEqual(resolveCanonicalRedirectUri('https://lab.remoteroom.jp/context-dj'), 'https://lab.remoteroom.jp/context-dj/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://lab.remoteroom.jp/context-dj/'), 'https://lab.remoteroom.jp/context-dj/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://lab.remoteroom.jp/context-dj/index.html?code=xyz'), 'https://lab.remoteroom.jp/context-dj/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://lab.remoteroom.jp/context-dj/settings'), 'https://lab.remoteroom.jp/context-dj/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://lab.remoteroom.jp/context-dj/settings/'), 'https://lab.remoteroom.jp/context-dj/');
+        assert.strictEqual(resolveCanonicalRedirectUri('https://lab.remoteroom.jp/context-dj/settings/index.html'), 'https://lab.remoteroom.jp/context-dj/');
+
+        // Invalid or empty inputs
+        assert.strictEqual(resolveCanonicalRedirectUri(''), '');
+        assert.strictEqual(resolveCanonicalRedirectUri('not-a-valid-url'), '');
     });
 
     it('evaluates isAuthenticated correctly based on token and expiration', () => {
@@ -95,7 +115,7 @@ describe('SpotifyAuth', () => {
         assert.strictEqual(authUrl.searchParams.get('client_id'), 'client_pkce_123');
         assert.strictEqual(authUrl.searchParams.get('code_challenge_method'), 'S256');
         assert.strictEqual(authUrl.searchParams.get('state'), state);
-        assert.strictEqual(authUrl.searchParams.get('redirect_uri'), 'https://example.com/app');
+        assert.strictEqual(authUrl.searchParams.get('redirect_uri'), 'https://example.com/app/');
 
         // Verify challenge matches SHA-256 base64url(verifier)
         const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
@@ -158,7 +178,7 @@ describe('SpotifyAuth', () => {
         const errMsg = SpotifyAuth.getLastError() || '';
         assert.match(errMsg, /400/);
         assert.match(errMsg, /Invalid redirect URI/);
-        assert.match(errMsg, /https:\/\/example\.com\/app/);
+        assert.match(errMsg, /https:\/\/example\.com\/app\//);
     });
 
     it('handles successful token refresh via mock fetch', async () => {

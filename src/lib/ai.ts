@@ -159,8 +159,14 @@ export class AIService {
         }
     }
 
+    private lastFilterError: string | null = null;
+
     getModelName(): string {
         return this.modelName;
+    }
+
+    getLastFilterError(): string | null {
+        return this.lastFilterError;
     }
 
     private static stripMarkdownCodeBlock(text: string): string {
@@ -335,6 +341,7 @@ export class AIService {
     }
 
     async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, album?: string, id: string }[], thought?: string): Promise<TrackEvaluation[]> {
+        this.lastFilterError = null;
         if (tracks.length === 0) return [];
 
         // Limit candidates to 25 to prevent token exhaustion and ensure fast, robust response
@@ -439,6 +446,7 @@ ${trackListStr}
             return evaluations;
         } catch (error) {
             console.error('AI Filtering Error:', error);
+            this.lastFilterError = error instanceof Error ? error.message : String(error);
             // Intelligent fallback when API fails
             const cleanReq = userRequest.replace(/[^\w\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g, '').slice(0, 10);
             const fallbackTag = cleanReq ? `#${cleanReq}` : '#名曲セレクト';

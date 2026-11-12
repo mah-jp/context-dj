@@ -12,15 +12,17 @@ import PrivacyNotice from '../../components/PrivacyNotice';
 import { ArrowLeft, Github } from 'lucide-react';
 
 const subscribeNoop = () => () => {};
-
-function getClientRedirectUri(): string {
-    const origin = window.location.origin;
-    const pathname = window.location.pathname.replace(/\/settings\/?$/, '') || '/';
-    return `${origin}${pathname}`;
-}
+const getClientRedirectUri = () => SpotifyAuth.getRedirectUri();
 
 export default function Settings() {
-    const { reloadConfig } = usePlayerActions();
+    const { reloadConfig, authorized } = usePlayerActions();
+    const [hasStoredSpotifySession, setHasStoredSpotifySession] = useState(() =>
+        Boolean(
+            getStorageItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN, '') ||
+            getStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, '')
+        )
+    );
+    const isSpotifyConnected = authorized || hasStoredSpotifySession;
 
 
     const [spotifyClientId, setSpotifyClientId] = useState(() => getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, ''));
@@ -40,6 +42,7 @@ export default function Settings() {
     const [status, setStatus] = useState('');
     const redirectUri = useSyncExternalStore(subscribeNoop, getClientRedirectUri, () => '');
     const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const prefGroupRef = useRef<HTMLDivElement>(null);
     const [personalPref, setPersonalPref] = useState(() => getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, ''));
     const [prefHistory, setPrefHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, []));
     const [showPrefHistory, setShowPrefHistory] = useState(false);
@@ -73,6 +76,26 @@ export default function Settings() {
             }
         };
     }, []);
+
+    useEffect(() => {
+        if (!showPrefHistory) return;
+        const handleOutsideClick = (e: MouseEvent) => {
+            if (prefGroupRef.current && !prefGroupRef.current.contains(e.target as Node)) {
+                setShowPrefHistory(false);
+            }
+        };
+        const handleEscape = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                setShowPrefHistory(false);
+            }
+        };
+        document.addEventListener('mousedown', handleOutsideClick);
+        window.addEventListener('keydown', handleEscape);
+        return () => {
+            document.removeEventListener('mousedown', handleOutsideClick);
+            window.removeEventListener('keydown', handleEscape);
+        };
+    }, [showPrefHistory]);
 
     const handleSave = () => {
         const cleanClientId = spotifyClientId.trim();
@@ -112,8 +135,10 @@ export default function Settings() {
     };
 
     const handleLogout = () => {
+        if (!isSpotifyConnected) return;
         if (confirm('Are you sure you want to log out from Spotify?\n(Spotifyからログアウトしますか？)')) {
             SpotifyAuth.logout();
+            setHasStoredSpotifySession(false);
             reloadConfig();
             showStatusMessage('Logged out from Spotify. (ログアウトしました)');
         }
@@ -166,9 +191,14 @@ export default function Settings() {
                     </p>
                     <button
                         onClick={handleLogout}
+                        disabled={!isSpotifyConnected}
                         className={styles.disconnectBtn}
                     >
-                        Disconnect Spotify Session <span style={{ fontSize: '0.8em' }}>(切断)</span>
+                        {isSpotifyConnected ? (
+                            <>Disconnect Spotify Session <span style={{ fontSize: '0.8em' }}>(切断)</span></>
+                        ) : (
+                            <>Spotify Not Connected <span style={{ fontSize: '0.8em' }}>(未接続)</span></>
+                        )}
                     </button>
                 </div>
             </div>
@@ -321,11 +351,13 @@ export default function Settings() {
                     Personal Preferences
                     <span className={styles.sectionSubTitle}>個人の好み・設定 (Personal Preferences)</span>
                 </h2>
-                <div className={styles.inputGroup}>
+                <div ref={prefGroupRef} className={styles.inputGroup}>
                     <label className={styles.label}>
                         Universal Style Instructions
                         <span className={styles.subLabel}>共通スタイル指示 (毎回AIへの指示に追加されます)</span>
                         <button
+                            type="button"
+                            disabled={prefHistory.length === 0}
                             onClick={() => setShowPrefHistory(!showPrefHistory)}
                             className={styles.historyToggleBtn}
                         >
@@ -338,13 +370,22 @@ export default function Settings() {
                             {prefHistory.map((h, i) => (
                                 <div
                                     key={`${h}-${i}`}
+                                    role="button"
+                                    tabIndex={0}
                                     onClick={() => {
                                         setPersonalPref(h);
                                         setShowPrefHistory(false);
                                     }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                            e.preventDefault();
+                                            setPersonalPref(h);
+                                            setShowPrefHistory(false);
+                                        }
+                                    }}
                                     className={styles.prefHistoryItem}
                                 >
-                                    {h.slice(0, 60)}...
+                                    {h.length > 60 ? `${h.slice(0, 60)}...` : h}
                                 </div>
                             ))}
                         </div>

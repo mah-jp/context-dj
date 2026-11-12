@@ -283,7 +283,12 @@ export class TrackSearchPipeline {
                 qualified = candidates.filter(t => (t.score ?? 0) >= 50);
             }
 
-            this.deps.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
+            const filterErr = typeof ai.getLastFilterError === 'function' ? ai.getLastFilterError() : null;
+            if (filterErr) {
+                this.deps.addLog(`⚠️ AI Filtering fallback (${filterErr}). Using ${qualified.length || candidates.length} candidates.`);
+            } else {
+                this.deps.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
+            }
             if (!isSilent) {
                 this.deps.updateStatus('Ready');
             }
@@ -296,7 +301,8 @@ export class TrackSearchPipeline {
                 return candidates;
             }
         } catch (e) {
-            this.deps.addLog(`⚠️ AI Filtering failed. Using all candidates.`);
+            const errDetail = e instanceof Error ? e.message : String(e);
+            this.deps.addLog(`⚠️ AI Filtering failed (${errDetail}). Using all candidates.`);
             console.error(e);
             if (!isSilent) {
                 this.deps.updateStatus('Ready');

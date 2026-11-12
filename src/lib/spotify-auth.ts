@@ -10,6 +10,27 @@ interface TokenResponse {
     scope?: string;
 }
 
+/**
+ * Resolves the canonical root callback URL for Spotify OAuth PKCE.
+ * Strips query/hash, `/index.html`, and `/settings` suffixes, and normalizes trailing slash
+ * to match Next.js `trailingSlash: true` static export across both root (`/`) and subpath (`/context-dj/`).
+ */
+export function resolveCanonicalRedirectUri(href: string): string {
+    if (!href) return '';
+    try {
+        const url = new URL(href);
+        let basePath = url.pathname
+            .replace(/\/index\.html$/i, '/')
+            .replace(/\/settings(?:\/index\.html)?\/?$/i, '/');
+        if (!basePath.endsWith('/')) {
+            basePath += '/';
+        }
+        return `${url.origin}${basePath}`;
+    } catch {
+        return '';
+    }
+}
+
 export class SpotifyAuth {
     private static lastError: string | null = null;
 
@@ -22,10 +43,8 @@ export class SpotifyAuth {
     }
 
     static getRedirectUri() {
-        if (typeof window !== 'undefined') {
-            // Remove query params and hash to get the base app URL
-            const url = new URL(window.location.href);
-            return `${url.origin}${url.pathname}`;
+        if (typeof window !== 'undefined' && window.location?.href) {
+            return resolveCanonicalRedirectUri(window.location.href);
         }
         return '';
     }
