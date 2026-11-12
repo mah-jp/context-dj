@@ -4,16 +4,19 @@ import styles from '../app/page.module.css';
 import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor } from 'lucide-react';
 import { STORAGE_KEYS } from '../lib/constants';
 import { getStorageItem, setStorageItem } from '../lib/storage';
+import { useIsHydrated } from '../hooks/useIsHydrated';
 
 interface PlayerBarProps {
     onLogin: () => void;
 }
 
 export default function PlayerBar({ onLogin }: PlayerBarProps) {
-    const [showAiThought, setShowAiThought] = useState<boolean>(() => {
+    const isHydrated = useIsHydrated();
+    const [showAiThoughtState, setShowAiThought] = useState<boolean>(() => {
         const stored = getStorageItem(STORAGE_KEYS.SHOW_AI_THOUGHT, '');
         return stored === '' ? true : stored === 'true';
     });
+    const showAiThought = isHydrated ? showAiThoughtState : true;
 
     const toggleAiThought = () => {
         const newVal = !showAiThought;

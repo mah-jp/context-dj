@@ -247,7 +247,11 @@ export class AIService {
         }
 
         if (currentSchedule && currentSchedule.length > 0) {
-            contextInfo += `\n\nExisting Schedule:\n${JSON.stringify(currentSchedule)}`;
+            const sanitizedExisting = currentSchedule.map(({ scheduledStartAt: _omit, ...rest }) => {
+                void _omit;
+                return rest;
+            });
+            contextInfo += `\n\nExisting Schedule:\n${JSON.stringify(sanitizedExisting)}`;
             contextInfo += `\n\n# Task: Merge Request into Schedule
 1. **Prioritize New Request**: Overwrite conflicting time slots.
 2. **Keep Existing**: Retain non-conflicting slots.

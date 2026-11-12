@@ -217,5 +217,10 @@ describe('CLI DJRunner', () => {
 
         await runner.sendRequest('23時からはピアノのJazzを聴きたい');
         assert.strictEqual(runner.getState().status, '⏰ Waiting for 23:00... (23:00の開始を待機中...)');
+
+        // Also preserves ⚠️ warning statuses (e.g. superseded generation or device warning) instead of overwriting with Playing
+        internal.djCore.getStateSnapshot = () => ({ status: '⚠️ Please open Spotify (Spotifyを開いてください)' });
+        await runner.sendRequest('ジャズを流して');
+        assert.strictEqual(runner.getState().status, '⚠️ Please open Spotify (Spotifyを開いてください)');
     });
 });

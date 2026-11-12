@@ -1,13 +1,7 @@
 import styles from '../app/page.module.css';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Clock } from 'lucide-react';
 import { ScheduleItem } from '../lib/types';
-import {
-    isScheduleItemActive,
-    isScheduleItemPastInTimeline,
-    isWaitingForScheduleStart,
-    getScheduleItemSignature,
-    resolveEffectiveScheduleItem,
-} from '../lib/dj-utils';
+import { getScheduleItemDisplayStatus } from '../lib/dj-utils';
 
 interface ScheduleSidebarProps {
     schedule: ScheduleItem[];
@@ -17,22 +11,13 @@ interface ScheduleSidebarProps {
 }
 
 export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
-    const waitingForStart = isWaitingForScheduleStart(schedule);
-    const effectiveItem = waitingForStart ? null : resolveEffectiveScheduleItem(schedule);
-    const hasMatchingCurrentQuery = Boolean(
-        currentQuery && schedule.some(s => getScheduleItemSignature(s) === currentQuery)
-    );
-
     return (
         <div className={styles.sidebar}>
             {schedule.length > 0 ? schedule.map((item, i) => {
-                const signature = getScheduleItemSignature(item);
-                const isActive = !waitingForStart && (
-                    hasMatchingCurrentQuery
-                        ? currentQuery === signature && (item === effectiveItem || isScheduleItemActive(item))
-                        : item === effectiveItem
-                );
-                const past = !isActive && isScheduleItemPastInTimeline(schedule, i);
+                const displayStatus = getScheduleItemDisplayStatus(schedule, i, currentQuery);
+                const isActive = displayStatus === 'active';
+                const isStandby = displayStatus === 'standby';
+                const past = displayStatus === 'past';
 
                 return (
                     <div
@@ -44,8 +29,16 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
                             display: 'flex',
                             justifyContent: 'space-between',
                             alignItems: 'flex-start',
-                            borderLeft: isActive ? '3px solid var(--primary)' : '3px solid transparent',
-                            background: isActive ? 'rgba(3, 218, 198, 0.05)' : undefined,
+                            borderLeft: isActive
+                                ? '3px solid var(--primary)'
+                                : isStandby
+                                    ? '3px solid #f59e0b'
+                                    : '3px solid transparent',
+                            background: isActive
+                                ? 'rgba(3, 218, 198, 0.05)'
+                                : isStandby
+                                    ? 'rgba(245, 158, 11, 0.06)'
+                                    : undefined,
                             opacity: past ? 0.5 : 1,
                             cursor: 'pointer',
                             transition: 'all 0.2s'
@@ -65,7 +58,36 @@ export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, 
                             }}
                             style={{ flex: 1, marginRight: '8px', borderRadius: '4px' }}
                         >
-                            <div className={styles.scheduleTime} style={{ color: isActive ? 'var(--primary)' : undefined }}>{item.start} - {item.end}</div>
+                            <div
+                                className={styles.scheduleTime}
+                                style={{
+                                    color: isActive ? 'var(--primary)' : isStandby ? '#fbbf24' : undefined,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                }}
+                            >
+                                <span>{item.start} - {item.end}</span>
+                                {isStandby && (
+                                    <span
+                                        style={{
+                                            fontSize: '0.68rem',
+                                            padding: '1px 6px',
+                                            borderRadius: '999px',
+                                            background: 'rgba(245, 158, 11, 0.16)',
+                                            border: '1px solid rgba(245, 158, 11, 0.4)',
+                                            color: '#fbbf24',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '3px',
+                                        }}
+                                        title={`Scheduled to start automatically at ${item.start} (${item.start}に自動開始)`}
+                                    >
+                                        <Clock size={10} />
+                                        待機中
+                                    </span>
+                                )}
+                            </div>
                             <div className={styles.scheduleQuery}>
                                 {item.queries ? item.queries.join(', ') : item.query}
                             </div>

@@ -1142,6 +1142,66 @@ describe('DJCore', () => {
             mockGenerated = [{ start: plus90Str, end: plus180Str, query: 'late night jazz', queries: ['late night jazz'] }];
             const futurePreserved = await dj.createSchedule('23時からはピアノのJazzを聴きたい');
             assert.strictEqual(futurePreserved[0].start, plus90Str);
+
+            // Case 5: Multi-block prompt containing "今夜" or a later hour whose suffix matches Block 0's 12h digit
+            // MUST still snap Block 0 to nowStr while preserving Block 1's future start!
+            mockGenerated = [
+                { start: plus40Str, end: '23:00', query: 'ocean walk', queries: ['ocean walk'] },
+                { start: '23:00', end: '01:00', query: 'piano jazz', queries: ['piano jazz'] },
+            ];
+            const multiWithTonight = await dj.createSchedule('海を散歩したい気分に合う音楽を。今夜23時からはピアノのJazzを聴きたいです。');
+            assert.strictEqual(multiWithTonight[0].start, nowStr);
+            assert.strictEqual(multiWithTonight[1].start, '23:00');
+        });
+
+        it('stands by for >12h future reservations, clears matching stale lastQuery, and resets standby status when items are removed', async () => {
+            const dj = new DJCore('fake_token');
+            const now = new Date();
+            const fmt = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+            // 14 hours in the future (840m > 720m), triggering the exact >12h wraparound case
+            const plus14h = new Date(now.getTime() + 14 * 60 * 60_000);
+            const plus15h = new Date(now.getTime() + 15 * 60 * 60_000);
+            const plus16h = new Date(now.getTime() + 16 * 60 * 60_000);
+
+            // Seed a stale lastQuery that happens to match the upcoming block's signature
+            store['dj_last_query'] = 'piano jazz';
+            (dj as unknown as { lastQuery: string | null }).lastQuery = 'piano jazz';
+
+            (dj as unknown as { ai: { generateSchedule: () => Promise<ScheduleItem[]> } }).ai = {
+                generateSchedule: async () => [
+                    { start: fmt(plus14h), end: fmt(plus15h), query: 'piano jazz', queries: ['piano jazz'] },
+                    { start: fmt(plus15h), end: fmt(plus16h), query: 'midnight ambient', queries: ['midnight ambient'] },
+                ],
+            };
+
+            let searchCalls = 0;
+            (dj as unknown as { searchTracks: () => Promise<Track[]> }).searchTracks = async () => {
+                searchCalls++;
+                return [];
+            };
+
+            await dj.createSchedule(`${fmt(plus14h)}からはピアノのJazzを聴きたいです`);
+            // Stale matching lastQuery must be cleared while waiting for schedule start
+            assert.strictEqual(dj.getDJStatus().currentQuery, null);
+            assert.strictEqual(store['dj_last_query'], undefined);
+
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(searchCalls, 0);
+            assert.strictEqual(
+                dj.getStateSnapshot().status,
+                `⏰ Waiting for ${fmt(plus14h)}... (${fmt(plus14h)}の開始を待機中...)`
+            );
+
+            // Removing the first waiting block immediately updates standby status to the second block's start time
+            dj.removeScheduleItem(0, true);
+            assert.strictEqual(
+                dj.getStateSnapshot().status,
+                `⏰ Waiting for ${fmt(plus15h)}... (${fmt(plus15h)}の開始を待機中...)`
+            );
+
+            // Removing the last remaining waiting block resets status cleanly back to 'Ready'
+            dj.removeScheduleItem(0, true);
+            assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
         });
 
         it('stands by without premature playback for future-start schedules, preloads 60s before start, and plays on time', async () => {
@@ -1510,6 +1570,105 @@ describe('DJCore', () => {
             searchResult = [makeTrack({ id: 'ok1', uri: 'spotify:track:ok1', name: 'Found', artistName: 'Art' })];
             await dj.processDJLoop(false, true);
             assert.strictEqual(searchCalls, 2);
+            assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+        });
+
+        it('stands by without playing at 09:17 for >12h future schedule ("23時からはピアノのJazz"), and clears stale lastQuery when active block is removed', async (t) => {
+            // Freeze wall clock at 2026-11-12 09:17:00
+            const fixedMorning = new Date(2026, 10, 12, 9, 17, 0, 0);
+            t.mock.timers.enable({ apis: ['Date'], now: fixedMorning.getTime() });
+
+            const dj = new DJCore('fake_token');
+            let playedCount = 0;
+            const djInternal = dj as unknown as {
+                ai: {
+                    generateSchedule: (instruction: string) => Promise<ScheduleItem[]>;
+                };
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+
+            djInternal.ai = {
+                generateSchedule: async () => [
+                    {
+                        start: '23:00',
+                        end: '01:00',
+                        query: 'genre:jazz piano',
+                        queries: ['genre:jazz piano'],
+                        thought: '23時からの静かなピアノジャズをお届けします。',
+                    },
+                ],
+            };
+            djInternal.playerClient.getDevices = async () => [
+                { id: 'dev_1', name: 'Living Room Speaker', is_active: true } as SpotifyApi.UserDevice,
+            ];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {
+                playedCount++;
+            };
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.searchTracks = async () => [
+                makeTrack({ id: 'pj1', uri: 'spotify:track:pj1', name: 'Waltz for Debby', artistName: 'Bill Evans' }),
+            ];
+
+            // 1. At 09:17, booking 23:00 - 01:00 must stand by and NOT start playback!
+            await dj.createSchedule('23時からはピアノのJazzを聴きたいです。');
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(playedCount, 0);
+            assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for 23:00/);
+            assert.strictEqual(dj.getStateSnapshot().currentQuery, null);
+
+            // 2. Multi-block prompt ("海を散歩したい気分に合う音楽を。23時からはピアノのJazzを聴きたいです。") where AI rounds Block 0 to 09:30:
+            //    "23時" must NOT falsely match "3時", so Block 0 snaps to 09:17 and starts playing immediately!
+            djInternal.ai.generateSchedule = async () => [
+                {
+                    start: '09:30',
+                    end: '23:00',
+                    query: 'ocean breeze acoustic',
+                    queries: ['ocean breeze acoustic'],
+                    thought: '海辺の散歩に合う爽やかな音楽です。',
+                },
+                {
+                    start: '23:00',
+                    end: '01:00',
+                    query: 'genre:jazz piano',
+                    queries: ['genre:jazz piano'],
+                    thought: '23時からのピアノジャズです。',
+                },
+            ];
+            const multiSchedule = await dj.createSchedule('海を散歩したい気分に合う音楽を。23時からはピアノのJazzを聴きたいです。');
+            assert.strictEqual(multiSchedule[0].start, '09:17');
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(playedCount, 1);
+            assert.strictEqual(dj.getStateSnapshot().currentQuery, 'ocean breeze acoustic');
+
+            // 3. Removing Block 0 (09:17 - 23:00) leaves only Block 1 (23:00 - 01:00) -> enters standby without prematurely playing Block 1,
+            //    and if lastQuery collided with Block 1's signature, clears it so 23:00 will start cleanly when reached!
+            dj.removeScheduleItem(0, true);
+            assert.strictEqual(dj.getStateSnapshot().currentQuery, 'ocean breeze acoustic');
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(playedCount, 1);
+            assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for 23:00/);
+
+            // Colliding lastQuery with upcoming 23:00 signature is cleared on setSchedule so 23:00 transition is never skipped
+            store['dj_last_query'] = 'genre:jazz piano';
+            (dj as unknown as { lastQuery: string | null }).lastQuery = 'genre:jazz piano';
+            dj.setSchedule(dj.getSchedule(), true);
+            assert.strictEqual(dj.getStateSnapshot().currentQuery, null);
+            assert.strictEqual(store['dj_last_query'], undefined);
+
+            // Advance clock to 23:00 -> standby ends and piano jazz starts playing automatically!
+            t.mock.timers.setTime(new Date(2026, 10, 12, 23, 0, 0, 0).getTime());
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(playedCount, 2);
+            assert.strictEqual(dj.getStateSnapshot().currentQuery, 'genre:jazz piano');
             assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
         });
     });

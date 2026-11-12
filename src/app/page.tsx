@@ -13,11 +13,14 @@ import QueueList from '../components/QueueList';
 import DynamicBackground from '../components/DynamicBackground';
 import { STORAGE_KEYS } from '../lib/constants';
 import { ScheduleItem } from '../lib/types';
+import { isWaitingForScheduleStart } from '../lib/dj-utils';
 import { getStorageItem, setStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import { useVisionInput } from '../hooks/useVisionInput';
+import { useIsHydrated } from '../hooks/useIsHydrated';
 
 export default function Home() {
+  const isHydrated = useIsHydrated();
   const {
     status,
     currentTrack,
@@ -48,13 +51,16 @@ export default function Home() {
   const [inputText, setInputText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputBarRef = useRef<HTMLDivElement>(null);
+  const isSubmittingRef = useRef(false);
 
   const [showHistory, setShowHistory] = useState(false);
-  const [showNotes, setShowNotes] = useState(() => getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
+  const [showNotesState, setShowNotes] = useState(() => getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
+  const showNotes = isHydrated ? showNotesState : false;
   const [showLogs, setShowLogs] = useState(false);
   const [toast, setToast] = useState<{ msg: string, type: 'info' | 'error' | 'success' } | null>(null);
 
-  const [history, setHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []));
+  const [historyState, setHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []));
+  const history = isHydrated ? historyState : [];
   const [historyIndex, setHistoryIndex] = useState(-1);
 
   const activeToast = toast || (error ? { msg: error, type: 'error' as const } : null);
@@ -163,7 +169,8 @@ export default function Home() {
   };
 
   const handleSend = async () => {
-    if (!inputText.trim() || !djCore) return;
+    if (!inputText.trim() || !djCore || isBusy || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
 
     // Activate background mode (keep alive)
     startBackgroundKeepAlive();
@@ -196,6 +203,8 @@ export default function Home() {
             msg: `Scheduled to start at ${schedule[0].start}! Standing by. (${schedule[0].start}開始でスケジュールを予約しました)`,
             type: 'info',
           });
+        } else if (latestStatus.startsWith('⚠️')) {
+          setStatus(latestStatus);
         } else {
           setStatus('Ready');
           setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
@@ -213,6 +222,8 @@ export default function Home() {
         msg: hasJapanese ? errorMsg : `Error: ${errorMsg} (エラーが発生しました)`,
         type: 'error',
       });
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 
@@ -439,6 +450,7 @@ export default function Home() {
           onLogin={handleLogin}
           deviceName={deviceName}
           currentQuery={currentQuery}
+          standbyStartTime={isWaitingForScheduleStart(schedule) ? schedule[0]?.start ?? null : null}
           showLogs={() => setShowLogs(true)}
           queue={queue}
           showNotes={showNotes}

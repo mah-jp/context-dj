@@ -187,7 +187,7 @@ export class DJRunner {
 
             const latestStatus = this.djCore.getStateSnapshot().status;
             this.updateState({
-                status: latestStatus.startsWith('⏰') ? latestStatus : 'Playing',
+                status: (latestStatus.startsWith('⏰') || latestStatus.startsWith('⚠️')) ? latestStatus : 'Playing',
                 logs: this.djCore.getProcessLog(),
             });
 

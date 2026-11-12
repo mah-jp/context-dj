@@ -19,6 +19,7 @@ export interface ScheduleItem {
     priorityTrack?: string; // Query for a specific song to play first
     thought?: string; // DJ's reasoning/comment
     userRequest?: string; // Original user instruction for context
+    scheduledStartAt?: number; // Epoch ms of this block's scheduled start when anchored at creation
 }
 
 export interface TrackMetadata {

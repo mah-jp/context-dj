@@ -36,7 +36,7 @@ describe('SpotifyAuth', () => {
             crypto: {
                 getRandomValues: (arr: Uint8Array) => globalThis.crypto.getRandomValues(arr),
                 subtle: {
-                    digest: async (algo: string, data: Uint8Array) => {
+                    digest: async (algo: string, data: BufferSource) => {
                         return globalThis.crypto.subtle.digest(algo, data);
                     }
                 }

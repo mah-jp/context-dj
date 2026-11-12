@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { STORAGE_KEYS, DEFAULTS } from '../lib/constants';
 import { ISpeechRecognition, SpeechRecognitionEvent } from '../lib/types';
 import { getStorageItem } from '../lib/storage';
+import { normalizeVoiceLang } from '../lib/settings-sync';
 
 interface UseVoiceInputProps {
     onResult: (text: string) => void;
@@ -67,7 +68,7 @@ export function useVoiceInput({ onResult, onError }: UseVoiceInputProps) {
 
         const recognition = new SpeechRecognition();
         const savedLang = getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, '');
-        recognition.lang = savedLang || navigator.language || DEFAULTS.VOICE_LANG;
+        recognition.lang = normalizeVoiceLang(savedLang || navigator.language || DEFAULTS.VOICE_LANG);
         recognition.interimResults = true;
         recognition.continuous = false; // Stop after one sentence/pause
 

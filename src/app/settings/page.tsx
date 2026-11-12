@@ -4,59 +4,83 @@ import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
-import { STORAGE_KEYS, DEFAULT_MODELS, DEFAULTS } from '../../lib/constants';
+import { STORAGE_KEYS, DEFAULT_MODELS } from '../../lib/constants';
 import { AIProvider } from '../../lib/types';
-import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../../lib/storage';
+import { setStorageItem, removeStorageItem, setStoredJSON } from '../../lib/storage';
+import {
+    SERVER_DEFAULT_SETTINGS_FORM,
+    SettingsFormState,
+    applySettingsStorageEvent,
+    hasStoredSpotifyTokens,
+    readSettingsFormStateFromStorage,
+    subscribeSpotifySessionStore,
+} from '../../lib/settings-sync';
+import { useIsHydrated } from '../../hooks/useIsHydrated';
 import { usePlayerActions } from '../../context/PlayerContext';
 import PrivacyNotice from '../../components/PrivacyNotice';
 import { ArrowLeft, Github } from 'lucide-react';
 
 const subscribeNoop = () => () => {};
 const getClientRedirectUri = () => SpotifyAuth.getRedirectUri();
+const getServerSpotifyTokens = () => false;
 
 export default function Settings() {
     const { reloadConfig, authorized } = usePlayerActions();
-    const [hasStoredSpotifySession, setHasStoredSpotifySession] = useState(() =>
-        Boolean(
-            getStorageItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN, '') ||
-            getStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, '')
-        )
+    const hasStoredSpotifySession = useSyncExternalStore(
+        subscribeSpotifySessionStore,
+        hasStoredSpotifyTokens,
+        getServerSpotifyTokens
     );
     const isSpotifyConnected = authorized || hasStoredSpotifySession;
 
+    const isHydrated = useIsHydrated();
+    const [form, setForm] = useState<SettingsFormState>(() => readSettingsFormStateFromStorage());
+    const displayForm = isHydrated ? form : SERVER_DEFAULT_SETTINGS_FORM;
+    const {
+        spotifyClientId,
+        openAiKey,
+        openAiModel,
+        geminiKey,
+        geminiModel,
+        aiProvider,
+        personalPref,
+        prefHistory,
+        voiceLang,
+        backgroundKeepAlive,
+        aiFilteringEnabled,
+    } = displayForm;
 
-    const [spotifyClientId, setSpotifyClientId] = useState(() => getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, ''));
-    const [openAiKey, setOpenAiKey] = useState(() => getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, ''));
-    const [openAiModel, setOpenAiModel] = useState(() => getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI));
-    const [geminiKey, setGeminiKey] = useState(() => getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, ''));
-    const [geminiModel, setGeminiModel] = useState(() => getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI));
-    const [aiProvider, setAiProvider] = useState<AIProvider>(() => {
-        const savedProvider = getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '').trim();
-        if (savedProvider === 'gemini' || savedProvider === 'openai') {
-            return savedProvider;
-        }
-        const hasGemini = Boolean(getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '').trim());
-        const hasOpenAi = Boolean(getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '').trim());
-        return hasGemini && !hasOpenAi ? 'gemini' : DEFAULTS.AI_PROVIDER;
-    });
+    const setSpotifyClientId = (v: string) => setForm(prev => ({ ...prev, spotifyClientId: v }));
+    const setOpenAiKey = (v: string) => setForm(prev => ({ ...prev, openAiKey: v }));
+    const setOpenAiModel = (v: string) => setForm(prev => ({ ...prev, openAiModel: v }));
+    const setGeminiKey = (v: string) => setForm(prev => ({ ...prev, geminiKey: v }));
+    const setGeminiModel = (v: string) => setForm(prev => ({ ...prev, geminiModel: v }));
+    const setAiProvider = (v: AIProvider) => setForm(prev => ({ ...prev, aiProvider: v }));
+    const setPersonalPref = (v: string) => setForm(prev => ({ ...prev, personalPref: v }));
+    const setPrefHistory = (v: string[]) => setForm(prev => ({ ...prev, prefHistory: v }));
+    const setVoiceLang = (v: string) => setForm(prev => ({ ...prev, voiceLang: v }));
+    const setBackgroundKeepAlive = (v: boolean) => setForm(prev => ({ ...prev, backgroundKeepAlive: v }));
+    const setAiFilteringEnabled = (v: boolean) => setForm(prev => ({ ...prev, aiFilteringEnabled: v }));
+
     const [status, setStatus] = useState('');
     const redirectUri = useSyncExternalStore(subscribeNoop, getClientRedirectUri, () => '');
     const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const prefGroupRef = useRef<HTMLDivElement>(null);
-    const [personalPref, setPersonalPref] = useState(() => getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, ''));
-    const [prefHistory, setPrefHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, []));
     const [showPrefHistory, setShowPrefHistory] = useState(false);
-    const [voiceLang, setVoiceLang] = useState<string>(() => {
-        const defaultLang = typeof navigator !== 'undefined' && navigator.language ? navigator.language : DEFAULTS.VOICE_LANG;
-        return getStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, defaultLang);
-    });
-    const [backgroundKeepAlive, setBackgroundKeepAlive] = useState<boolean>(
-        () => getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, '') === 'true'
-    );
-    const [aiFilteringEnabled, setAiFilteringEnabled] = useState<boolean>(() => {
-        const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
-        return savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
-    });
+
+    // Synchronize settings form state when another browser tab updates or clears localStorage
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+            return;
+        }
+        const handleStorage = (e: StorageEvent) => {
+            setForm(prev => applySettingsStorageEvent(prev, e.key));
+        };
+        window.addEventListener('storage', handleStorage);
+        return () => {
+            window.removeEventListener('storage', handleStorage);
+        };
+    }, []);
 
     const showStatusMessage = (msg: string) => {
         setStatus(msg);
@@ -138,7 +162,6 @@ export default function Settings() {
         if (!isSpotifyConnected) return;
         if (confirm('Are you sure you want to log out from Spotify?\n(Spotifyからログアウトしますか？)')) {
             SpotifyAuth.logout();
-            setHasStoredSpotifySession(false);
             reloadConfig();
             showStatusMessage('Logged out from Spotify. (ログアウトしました)');
         }

@@ -12,9 +12,17 @@ import {
 } from '../src/context/PlayerContext';
 import { classifySpeechRecognitionError } from '../src/hooks/useVoiceInput';
 import { validateVisionImageFile, MAX_VISION_IMAGE_BYTES } from '../src/hooks/useVisionInput';
-import { DEFAULT_MODELS, STORAGE_KEYS } from '../src/lib/constants';
+import { DEFAULT_MODELS, DEFAULTS, STORAGE_KEYS } from '../src/lib/constants';
 import { computeNextUIPollDelay, createDJPollingController } from '../src/hooks/useDJPollingLoops';
 import { SpotifyAuth } from '../src/lib/spotify-auth';
+import {
+    SPOTIFY_AUTH_SYNC_EVENT,
+    applySettingsStorageEvent,
+    hasStoredSpotifyTokens,
+    normalizeVoiceLang,
+    readSettingsFormStateFromStorage,
+    subscribeSpotifySessionStore,
+} from '../src/lib/settings-sync';
 import { SpotifyApiErrorInfo, Track } from '../src/lib/types';
 
 function makeTrack(overrides: {
@@ -426,5 +434,110 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
         const pdfRes = validateVisionImageFile({ type: 'application/pdf', size: 10_000, name: 'doc.pdf' });
         assert.strictEqual(pdfRes.ok, false);
         assert.match(pdfRes.errorMessage || '', /画像ファイルを選択/);
+    });
+
+    it('synchronizes Settings Spotify session status across other-tab storage events and same-tab logout/refresh', () => {
+        const listeners = new Map<string, Set<(ev?: unknown) => void>>();
+        const g = globalThis as Record<string, unknown>;
+        g.window = {
+            localStorage: g.localStorage,
+            addEventListener: (type: string, fn: (ev?: unknown) => void) => {
+                if (!listeners.has(type)) listeners.set(type, new Set());
+                listeners.get(type)!.add(fn);
+            },
+            removeEventListener: (type: string, fn: (ev?: unknown) => void) => {
+                listeners.get(type)?.delete(fn);
+            },
+            dispatchEvent: (ev: Event) => {
+                listeners.get(ev.type)?.forEach((fn) => fn(ev));
+                return true;
+            },
+        };
+
+        store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN] = 'tok_1';
+        store[STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN] = 'ref_1';
+        assert.strictEqual(hasStoredSpotifyTokens(), true);
+
+        let storeChangeCount = 0;
+        const unsubscribe = subscribeSpotifySessionStore(() => {
+            storeChangeCount++;
+        });
+
+        // 1. Unrelated storage event in another tab does NOT trigger session store notification
+        listeners.get('storage')?.forEach((fn) => fn({ key: STORAGE_KEYS.DJ_LAST_QUERY }));
+        assert.strictEqual(storeChangeCount, 0);
+
+        // 2. Another tab logs out (removes access & refresh tokens) -> fires notification & snapshot becomes false
+        delete store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN];
+        delete store[STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN];
+        listeners.get('storage')?.forEach((fn) => fn({ key: STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN }));
+        assert.strictEqual(storeChangeCount, 1);
+        assert.strictEqual(hasStoredSpotifyTokens(), false);
+
+        // 3. Another tab logs in (sets refresh token) -> snapshot becomes true
+        store[STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN] = 'ref_2';
+        listeners.get('storage')?.forEach((fn) => fn({ key: STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN }));
+        assert.strictEqual(storeChangeCount, 2);
+        assert.strictEqual(hasStoredSpotifyTokens(), true);
+
+        // 4. Same-tab SpotifyAuth.logout() dispatches SPOTIFY_AUTH_SYNC_EVENT -> snapshot becomes false immediately
+        SpotifyAuth.logout();
+        assert.strictEqual(storeChangeCount, 3);
+        assert.strictEqual(hasStoredSpotifyTokens(), false);
+        assert.strictEqual(listeners.get(SPOTIFY_AUTH_SYNC_EVENT)?.size, 1);
+
+        unsubscribe();
+        assert.strictEqual(listeners.get(SPOTIFY_AUTH_SYNC_EVENT)?.size, 0);
+    });
+
+    it('synchronizes Settings form fields across cross-tab storage changes without clobbering unrelated unsaved edits', () => {
+        store[STORAGE_KEYS.SPOTIFY_CLIENT_ID] = 'cid_initial';
+        store[STORAGE_KEYS.GEMINI_API_KEY] = 'AIza_initial';
+
+        const initial = readSettingsFormStateFromStorage('en-US');
+        assert.strictEqual(initial.spotifyClientId, 'cid_initial');
+        assert.strictEqual(initial.aiProvider, 'gemini');
+        assert.strictEqual(initial.openAiModel, DEFAULT_MODELS.OPENAI);
+        assert.strictEqual(initial.geminiModel, DEFAULT_MODELS.GEMINI);
+        assert.strictEqual(initial.voiceLang, 'en-US');
+        assert.strictEqual(initial.aiFilteringEnabled, DEFAULTS.AI_FILTERING_ENABLED);
+
+        // Simulate user typing unsaved text into personalPref on /settings
+        const withUnsavedDraft = { ...initial, personalPref: 'unsaved draft in progress' };
+
+        // 1. Background playback storage updates in another tab leave form state reference untouched
+        const afterPlaybackKey = applySettingsStorageEvent(withUnsavedDraft, STORAGE_KEYS.DJ_CURRENT_PLAYING_TRACK, 'en-US');
+        assert.strictEqual(afterPlaybackKey, withUnsavedDraft);
+
+        // 2. Another tab updates OPENAI_API_KEY and SELECTED_AI_PROVIDER -> updates those fields while preserving unsaved personalPref!
+        store[STORAGE_KEYS.OPENAI_API_KEY] = 'sk_new_key';
+        store[STORAGE_KEYS.SELECTED_AI_PROVIDER] = 'openai';
+        store[STORAGE_KEYS.AI_FILTERING_ENABLED] = 'false';
+        let synced = applySettingsStorageEvent(withUnsavedDraft, STORAGE_KEYS.OPENAI_API_KEY, 'en-US');
+        synced = applySettingsStorageEvent(synced, STORAGE_KEYS.SELECTED_AI_PROVIDER, 'en-US');
+        synced = applySettingsStorageEvent(synced, STORAGE_KEYS.AI_FILTERING_ENABLED, 'en-US');
+        assert.strictEqual(synced.openAiKey, 'sk_new_key');
+        assert.strictEqual(synced.aiProvider, 'openai');
+        assert.strictEqual(synced.aiFilteringEnabled, false);
+        assert.strictEqual(synced.personalPref, 'unsaved draft in progress');
+
+        // 3. Another tab calls localStorage.clear() (key === null) -> resets all settings cleanly to storage defaults
+        store = {};
+        const afterClear = applySettingsStorageEvent(synced, null, 'ja-JP');
+        assert.strictEqual(afterClear.spotifyClientId, '');
+        assert.strictEqual(afterClear.openAiKey, '');
+        assert.strictEqual(afterClear.geminiKey, '');
+        assert.strictEqual(afterClear.aiProvider, DEFAULTS.AI_PROVIDER);
+        assert.strictEqual(afterClear.personalPref, '');
+        assert.strictEqual(afterClear.voiceLang, 'ja-JP');
+        assert.strictEqual(afterClear.aiFilteringEnabled, DEFAULTS.AI_FILTERING_ENABLED);
+
+        // 4. Short/regional/unsupported browser locales normalize cleanly to supported <select> option values
+        assert.strictEqual(normalizeVoiceLang('ja'), 'ja-JP');
+        assert.strictEqual(normalizeVoiceLang('en'), 'en-US');
+        assert.strictEqual(normalizeVoiceLang('en-gb'), 'en-GB');
+        assert.strictEqual(normalizeVoiceLang('zh-TW'), 'zh-CN');
+        assert.strictEqual(normalizeVoiceLang('pt-BR'), 'ja-JP');
+        assert.strictEqual(normalizeVoiceLang(''), 'ja-JP');
     });
 });

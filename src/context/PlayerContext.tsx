@@ -7,8 +7,16 @@ import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../l
 import { AIProvider, ScheduleItem, SpotifyApiErrorInfo, Track } from '../lib/types';
 import { getStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
+import { useIsHydrated } from '../hooks/useIsHydrated';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
-import { generateTrackKey, resolveEffectiveScheduleItem } from '../lib/dj-utils';
+import {
+    generateTrackKey,
+    getScheduleItemSignature,
+    isWaitingForScheduleStart,
+    resolveEffectiveScheduleItem,
+} from '../lib/dj-utils';
+
+const EMPTY_SCHEDULE: ScheduleItem[] = [];
 
 export interface SetupStatus {
     hasClientId: boolean;
@@ -193,6 +201,7 @@ export function isSameDeviceList(a: SpotifyApi.UserDevice[], b: SpotifyApi.UserD
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
+    const isHydrated = useIsHydrated();
     const [authorized, setAuthorized] = useState(false);
     const [djCore, setDjCore] = useState<DJCore | null>(null);
     const [status, setStatus] = useState('Initializing...');
@@ -658,7 +667,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             } else if (action === 'sync_schedule') {
                 const nextSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
                 setScheduleState(nextSchedule);
-                djRef.current?.setSchedule(nextSchedule, false);
+                if (djRef.current) {
+                    djRef.current.setSchedule(nextSchedule, false);
+                } else {
+                    setCurrentThought(
+                        nextSchedule.length > 0
+                            ? resolveEffectiveScheduleItem(nextSchedule)?.thought || nextSchedule[0]?.thought || null
+                            : null
+                    );
+                    if (nextSchedule.length === 0) {
+                        setCurrentQuery(null);
+                    } else if (isWaitingForScheduleStart(nextSchedule)) {
+                        setCurrentQuery(prev =>
+                            prev && nextSchedule.some(item => getScheduleItemSignature(item) === prev) ? null : prev
+                        );
+                    }
+                }
             } else if (action === 'sync_query') {
                 setCurrentQuery(getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null);
             }
@@ -916,6 +940,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const handleRemoveScheduleItem = useCallback((index: number) => {
         if (djRef.current) {
             const prevQuery = djRef.current.getDJStatus().currentQuery;
+            const prevStatus = djRef.current.getStateSnapshot().status;
             const newSchedule = djRef.current.removeScheduleItem(index, true);
             setScheduleState([...newSchedule]);
             if (newSchedule.length === 0) {
@@ -923,8 +948,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 setCurrentThought(null);
             } else {
                 const nextEffective = djRef.current.getEffectiveItemForPlayback();
+                setCurrentQuery(djRef.current.getDJStatus().currentQuery);
                 setCurrentThought(nextEffective?.thought || null);
-                if (prevQuery !== null) {
+                if (prevQuery !== null || prevStatus.startsWith('⏰')) {
                     void djRef.current.processDJLoop(true, false).catch((err) => {
                         console.warn('Schedule transition after item removal failed:', err);
                     });
@@ -938,6 +964,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (next.length === 0) {
                     setCurrentQuery(null);
                     setCurrentThought(null);
+                    removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+                } else {
+                    if (isWaitingForScheduleStart(next)) {
+                        const savedQ = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '');
+                        if (savedQ && next.some(item => getScheduleItemSignature(item) === savedQ)) {
+                            setCurrentQuery(null);
+                            removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+                        }
+                    }
+                    setCurrentThought(
+                        resolveEffectiveScheduleItem(next)?.thought || next[0]?.thought || null
+                    );
                 }
                 return next;
             });
@@ -985,30 +1023,35 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         logs: djLogs,
     }), [djLogs]);
 
+    const exposedSchedule = isHydrated ? schedule : EMPTY_SCHEDULE;
+    const exposedTrack = isHydrated ? currentTrack : null;
+    const exposedQuery = isHydrated ? currentQuery : null;
+    const exposedThought = isHydrated ? currentThought : null;
+
     const queueScheduleContextValue = useMemo<PlayerQueueScheduleContextType>(() => ({
         queue,
-        schedule,
+        schedule: exposedSchedule,
         setSchedule,
         handleRemoveScheduleItem,
-    }), [queue, schedule, setSchedule, handleRemoveScheduleItem]);
+    }), [queue, exposedSchedule, setSchedule, handleRemoveScheduleItem]);
 
     const playbackContextValue = useMemo<PlayerPlaybackContextType>(() => ({
         status,
-        currentTrack,
+        currentTrack: exposedTrack,
         isPlaying,
         deviceName,
         devices,
-        currentQuery,
-        currentThought,
+        currentQuery: exposedQuery,
+        currentThought: exposedThought,
         error,
     }), [
         status,
-        currentTrack,
+        exposedTrack,
         isPlaying,
         deviceName,
         devices,
-        currentQuery,
-        currentThought,
+        exposedQuery,
+        exposedThought,
         error,
     ]);
 

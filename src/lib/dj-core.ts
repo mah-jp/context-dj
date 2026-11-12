@@ -16,7 +16,9 @@ import {
 } from './types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
 import {
+    attachScheduleTimestamps,
     generateTrackKey,
+    isExplicitFutureScheduleRequest,
     isScheduleItemActive,
     getScheduleItemSignature,
     getScheduleItemQueries,
@@ -31,46 +33,6 @@ import { SpotifyPlayerClient } from './spotify-player-client';
 import { TrackSearchPipeline } from './track-search-pipeline';
 
 export type { Track };
-
-function isExplicitFutureScheduleRequest(instruction: string, normalizedStart: string, forwardDiff: number): boolean {
-    const mins = parseTimeToMinutes(normalizedStart);
-    const h24 = Math.floor(mins / 60);
-    const m = mins % 60;
-    const h12 = h24 % 12 || 12;
-    const mm = String(m).padStart(2, '0');
-
-    const normalizedInput = instruction
-        .replace(/[０-９：]/g, (ch) =>
-            ch === '：' ? ':' : String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
-        )
-        .toLowerCase();
-
-    const patterns = [
-        normalizedStart.toLowerCase(),
-        `${h24}:${mm}`,
-        `${h12}:${mm}`,
-        `${h24}時`,
-        `${h12}時`,
-        `${h12}pm`,
-        `${h12} pm`,
-        `${h12}am`,
-        `${h12} am`,
-    ];
-    if (patterns.some(p => normalizedInput.includes(p))) {
-        return true;
-    }
-
-    if (forwardDiff > 15) {
-        if (/(?:今夜|今晩|深夜|夜遅く|明日|あとで|後で)/.test(normalizedInput)) {
-            return true;
-        }
-        if (/\b(?:tonight|this evening|late night|tomorrow|later)\b/i.test(normalizedInput)) {
-            return true;
-        }
-    }
-
-    return false;
-}
 
 export class DJCore {
     private spotify: SpotifyWebApi.SpotifyWebApiJs;
@@ -138,6 +100,7 @@ export class DJCore {
         const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
         if (Array.isArray(savedSchedule) && savedSchedule.length > 0) {
             this.schedule = savedSchedule;
+            this.clearCollidingLastQueryWhenWaiting();
         }
     }
 
@@ -482,29 +445,34 @@ export class DJCore {
     async createSchedule(instruction: string, personalContext?: string) {
         if (!this.ai) throw new Error("AI not initialized. Please configure your AI API Key in Settings. (AIが初期化されていません。設定画面でAPIキーを設定してください)");
 
-        const schedule = await this.ai.generateSchedule(instruction, this.schedule, personalContext);
+        const prevSchedule = this.schedule;
+        const schedule = await this.ai.generateSchedule(instruction, prevSchedule, personalContext);
+        const now = new Date();
 
         // Snap LLM clock-rounding drift (<= 60m ahead) to current time unless user explicitly requested a future time
-        if (schedule.length > 0) {
-            const now = new Date();
-            if (!isScheduleItemActive(schedule[0], now)) {
-                const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-                const firstStartMins = parseTimeToMinutes(schedule[0].start);
-                const nowMins = now.getHours() * 60 + now.getMinutes();
-                const forwardDiff = (firstStartMins - nowMins + 1440) % 1440;
+        if (schedule.length > 0 && !isScheduleItemActive(schedule[0], now)) {
+            const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            const firstStartMins = parseTimeToMinutes(schedule[0].start);
+            const nowMins = now.getHours() * 60 + now.getMinutes();
+            const forwardDiff = (firstStartMins - nowMins + 1440) % 1440;
 
-                if (
-                    forwardDiff > 0 &&
-                    forwardDiff <= 60 &&
-                    !isExplicitFutureScheduleRequest(instruction, schedule[0].start, forwardDiff)
-                ) {
-                    schedule[0].start = nowStr;
-                }
+            if (
+                forwardDiff > 0 &&
+                forwardDiff <= 60 &&
+                !isExplicitFutureScheduleRequest(instruction, schedule[0].start, forwardDiff, schedule.length)
+            ) {
+                schedule[0].start = nowStr;
             }
         }
 
-        this.setSchedule(schedule, true);
-        return schedule;
+        const forceFutureDay =
+            schedule.length === 1 &&
+            /(?:明日|あした)|\btomorrow\b/i.test(instruction) &&
+            !/(?:今日|今から|いまから|今は|いまは)|\b(?:today|right now|for now|start now)\b/i.test(instruction);
+
+        const anchoredSchedule = attachScheduleTimestamps(schedule, now, prevSchedule, { forceFutureDay });
+        this.setSchedule(anchoredSchedule, true);
+        return this.schedule;
     }
 
     private invalidatePreload() {
@@ -564,21 +532,45 @@ export class DJCore {
         };
     }
 
-    setSchedule(schedule: ScheduleItem[], persist: boolean = false) {
-        this.schedule = [...schedule];
-        this.invalidatePreload();
-        this.lastStartFailure = null;
+    private syncStandbyStatusAfterScheduleChange() {
+        if (this.schedule.length === 0) {
+            if (this.statusText.startsWith('⏰')) {
+                this.statusText = 'Ready';
+            }
+            return;
+        }
+        if (isWaitingForScheduleStart(this.schedule)) {
+            if (this.statusText.startsWith('⏰')) {
+                const firstStart = this.schedule[0].start;
+                this.statusText = `⏰ Waiting for ${firstStart}... (${firstStart}の開始を待機中...)`;
+            }
+        } else if (this.statusText.startsWith('⏰')) {
+            this.statusText = 'Ready';
+        }
+    }
+
+    private clearCollidingLastQueryWhenWaiting() {
         if (this.schedule.length === 0) {
             this.lastQuery = null;
             removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
-        } else if (
-            isWaitingForScheduleStart(this.schedule) &&
+            return;
+        }
+        if (
             this.lastQuery &&
-            !this.schedule.some(s => getScheduleItemSignature(s) === this.lastQuery)
+            isWaitingForScheduleStart(this.schedule) &&
+            this.schedule.some(item => getScheduleItemSignature(item) === this.lastQuery)
         ) {
             this.lastQuery = null;
             removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
         }
+    }
+
+    setSchedule(schedule: ScheduleItem[], persist: boolean = false) {
+        this.schedule = [...schedule];
+        this.invalidatePreload();
+        this.lastStartFailure = null;
+        this.clearCollidingLastQueryWhenWaiting();
+        this.syncStandbyStatusAfterScheduleChange();
         if (persist) {
             setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, this.schedule);
         }
@@ -590,10 +582,8 @@ export class DJCore {
             this.schedule = this.schedule.filter((_, idx) => idx !== index);
             this.invalidatePreload();
             this.lastStartFailure = null;
-            if (this.schedule.length === 0) {
-                this.lastQuery = null;
-                removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
-            }
+            this.clearCollidingLastQueryWhenWaiting();
+            this.syncStandbyStatusAfterScheduleChange();
             if (persist) {
                 setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, this.schedule);
             }

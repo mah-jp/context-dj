@@ -44,6 +44,14 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
         if (initialPrompt && initialPrompt.trim().length > 0) {
             historyRef.current.add(initialPrompt.trim());
             runner.sendRequest(initialPrompt)
+                .then((createdSchedule) => {
+                    const latestStatus = runner.getState().status;
+                    if (latestStatus.startsWith('⏰') && createdSchedule.length > 0) {
+                        setFeedbackMessage(`Scheduled to start at ${createdSchedule[0].start}! Standing by.`);
+                    } else {
+                        setFeedbackMessage('Schedule updated & playing!');
+                    }
+                })
                 .catch((err) => {
                     setFeedbackMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
                 })
@@ -120,8 +128,13 @@ export const App: React.FC<AppProps> = ({ runner, initialPrompt }) => {
         setFeedbackMessage('Processing request...');
 
         try {
-            await runner.sendRequest(trimmed);
-            setFeedbackMessage('Schedule updated & playing!');
+            const createdSchedule = await runner.sendRequest(trimmed);
+            const latestStatus = runner.getState().status;
+            if (latestStatus.startsWith('⏰') && createdSchedule.length > 0) {
+                setFeedbackMessage(`Scheduled to start at ${createdSchedule[0].start}! Standing by.`);
+            } else {
+                setFeedbackMessage('Schedule updated & playing!');
+            }
         } catch (e) {
             setFeedbackMessage(`Failed: ${e instanceof Error ? e.message : String(e)}`);
         } finally {

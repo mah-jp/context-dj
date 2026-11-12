@@ -1,5 +1,5 @@
 import styles from '../app/page.module.css';
-import { Bot, AlertTriangle, Anchor } from 'lucide-react';
+import { Bot, AlertTriangle, Anchor, Clock } from 'lucide-react';
 import Onboarding from './Onboarding';
 import { Track } from '../lib/types';
 
@@ -10,6 +10,7 @@ interface QueueListProps {
     onLogin: () => void;
     deviceName: string;
     currentQuery: string | null;
+    standbyStartTime?: string | null;
     showLogs: () => void;
     queue: Track[];
     showNotes: boolean;
@@ -23,6 +24,7 @@ export default function QueueList({
     onLogin,
     deviceName,
     currentQuery,
+    standbyStartTime,
     showLogs,
     queue,
     showNotes,
@@ -172,7 +174,28 @@ export default function QueueList({
                                     )}
                                 </div>
                             </div>
-                        )) : (
+                        )) : standbyStartTime ? (
+                            <div
+                                style={{
+                                    color: '#cbd5e1',
+                                    padding: '1.5rem',
+                                    textAlign: 'center',
+                                    background: 'rgba(245, 158, 11, 0.06)',
+                                    border: '1px solid rgba(245, 158, 11, 0.25)',
+                                    borderRadius: '8px',
+                                    lineHeight: 1.6,
+                                }}
+                            >
+                                <div style={{ color: '#fbbf24', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                                    <Clock size={16} />
+                                    <span>Standing by until {standbyStartTime} ({standbyStartTime} の開始まで待機中)</span>
+                                </div>
+                                <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                                    Tracks will be curated automatically 1 minute before scheduled start.<br />
+                                    (開始1分前に自動で選曲・再生準備を開始します)
+                                </div>
+                            </div>
+                        ) : (
                             <div style={{ color: '#555', padding: '2rem', textAlign: 'center' }}>Queue is empty.</div>
                         )}
                     </div>
