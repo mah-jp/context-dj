@@ -172,6 +172,14 @@ export class DJRunner {
 
         try {
             await this.ensureFreshToken();
+            const prevSchedule = typeof this.djCore.getSchedule === 'function' ? this.djCore.getSchedule() : [];
+            const prevStatus = this.djCore.getDJStatus();
+            const prevCurrentQuery = prevStatus?.currentQuery ?? null;
+            const wasSessionActive =
+                typeof this.djCore.isSessionPlaybackActive === 'function'
+                    ? this.djCore.isSessionPlaybackActive()
+                    : false;
+
             const schedule = await this.djCore.createSchedule(userPrompt, this.config.personalContext);
             const djStatus = this.djCore.getDJStatus();
 
@@ -181,9 +189,19 @@ export class DJRunner {
                 logs: this.djCore.getProcessLog(),
             });
 
-            // Trigger immediate playback for newly calculated schedule (or stand by if scheduled in the future)
-            this.updateState({ status: 'Searching tracks & starting playback... (再生準備中...)' });
-            await this.djCore.processDJLoop(false, true);
+            const preserveCurrentPlayback =
+                typeof this.djCore.shouldPreservePlaybackAfterScheduleChange === 'function' &&
+                this.djCore.shouldPreservePlaybackAfterScheduleChange(
+                    prevSchedule,
+                    prevCurrentQuery,
+                    wasSessionActive
+                );
+
+            // Trigger immediate playback for newly calculated schedule (or preserve active playback if only future slots changed)
+            if (!preserveCurrentPlayback) {
+                this.updateState({ status: 'Searching tracks & starting playback... (再生準備中...)' });
+            }
+            await this.djCore.processDJLoop(false, !preserveCurrentPlayback);
 
             const latestStatus = this.djCore.getStateSnapshot().status;
             this.updateState({

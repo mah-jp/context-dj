@@ -6,12 +6,13 @@ import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
 import { STORAGE_KEYS, DEFAULT_MODELS } from '../../lib/constants';
 import { AIProvider } from '../../lib/types';
-import { setStorageItem, removeStorageItem, setStoredJSON } from '../../lib/storage';
+import { removeStorageItem } from '../../lib/storage';
 import {
     SERVER_DEFAULT_SETTINGS_FORM,
     SettingsFormState,
     applySettingsStorageEvent,
     hasStoredSpotifyTokens,
+    persistSettingsFormState,
     readSettingsFormStateFromStorage,
     subscribeSpotifySessionStore,
 } from '../../lib/settings-sync';
@@ -122,39 +123,9 @@ export default function Settings() {
     }, [showPrefHistory]);
 
     const handleSave = () => {
-        const cleanClientId = spotifyClientId.trim();
-        const cleanOpenAiKey = openAiKey.trim();
-        const cleanOpenAiModel = openAiModel.trim() || DEFAULT_MODELS.OPENAI;
-        const cleanGeminiKey = geminiKey.trim();
-        const cleanGeminiModel = geminiModel.trim() || DEFAULT_MODELS.GEMINI;
-        const cleanPersonalPref = personalPref.trim();
-
-        setSpotifyClientId(cleanClientId);
-        setOpenAiKey(cleanOpenAiKey);
-        setOpenAiModel(cleanOpenAiModel);
-        setGeminiKey(cleanGeminiKey);
-        setGeminiModel(cleanGeminiModel);
-        setPersonalPref(cleanPersonalPref);
-
-        setStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, cleanClientId);
-        setStorageItem(STORAGE_KEYS.OPENAI_API_KEY, cleanOpenAiKey);
-        setStorageItem(STORAGE_KEYS.OPENAI_MODEL, cleanOpenAiModel);
-        setStorageItem(STORAGE_KEYS.GEMINI_API_KEY, cleanGeminiKey);
-        setStorageItem(STORAGE_KEYS.GEMINI_MODEL, cleanGeminiModel);
-        setStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, aiProvider);
-        setStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, cleanPersonalPref);
-        setStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, voiceLang);
-        setStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
-        setStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(aiFilteringEnabled));
-
-        if (cleanPersonalPref) {
-            const newHistory = [cleanPersonalPref, ...prefHistory.filter(h => h !== cleanPersonalPref)].slice(0, 10);
-            setPrefHistory(newHistory);
-            setStoredJSON(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, newHistory);
-        }
-
+        const nextForm = persistSettingsFormState(form);
+        setForm(nextForm);
         reloadConfig();
-
         showStatusMessage('Settings saved! (設定を保存しました)');
     };
 

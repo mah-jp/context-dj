@@ -18,6 +18,7 @@ import { getStorageItem, setStorageItem, getStoredJSON, setStoredJSON } from '..
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import { useVisionInput } from '../hooks/useVisionInput';
 import { useIsHydrated } from '../hooks/useIsHydrated';
+import { useMinuteClock } from '../hooks/useMinuteClock';
 
 export default function Home() {
   const isHydrated = useIsHydrated();
@@ -35,6 +36,7 @@ export default function Home() {
     queue,
     handleRemoveScheduleItem,
   } = usePlayerQueueSchedule();
+  const minuteClock = useMinuteClock(schedule.length > 0);
 
   const {
     djCore,
@@ -183,6 +185,9 @@ export default function Home() {
 
     setStatus('🤖 AI is thinking... (AIが考え中...)');
     try {
+      const prevSchedule = djCore.getSchedule();
+      const prevCurrentQuery = djCore.getDJStatus().currentQuery;
+      const wasSessionActive = djCore.isSessionPlaybackActive();
       const personalPref = getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, '');
       const schedule = await djCore.createSchedule(inputText, personalPref);
 
@@ -192,10 +197,17 @@ export default function Home() {
       } else {
         setInputText('');
         setSchedule(schedule);
-        setStatus('🔎 Curating & preparing tracks... (楽曲を選曲・準備中...)');
+        const preserveCurrentPlayback = djCore.shouldPreservePlaybackAfterScheduleChange(
+          prevSchedule,
+          prevCurrentQuery,
+          wasSessionActive
+        );
+        if (!preserveCurrentPlayback) {
+          setStatus('🔎 Curating & preparing tracks... (楽曲を選曲・準備中...)');
+        }
 
-        // Trigger immediate check & play with force=true (or stand by cleanly if scheduled in the future)
-        await djCore.processDJLoop(false, true);
+        // Trigger immediate check & play (or preserve active playback if only future slots changed)
+        await djCore.processDJLoop(false, !preserveCurrentPlayback);
         const latestStatus = djCore.getStateSnapshot().status;
         if (latestStatus.startsWith('⏰')) {
           setStatus(latestStatus);
@@ -438,6 +450,7 @@ export default function Home() {
         <ScheduleSidebar
           schedule={schedule}
           currentQuery={currentQuery}
+          now={minuteClock}
           onRemoveItem={handleRemoveScheduleItem}
           onRecallItem={handleRecallItem}
         />
@@ -450,7 +463,7 @@ export default function Home() {
           onLogin={handleLogin}
           deviceName={deviceName}
           currentQuery={currentQuery}
-          standbyStartTime={isWaitingForScheduleStart(schedule) ? schedule[0]?.start ?? null : null}
+          standbyStartTime={isWaitingForScheduleStart(schedule, minuteClock) ? schedule[0]?.start ?? null : null}
           showLogs={() => setShowLogs(true)}
           queue={queue}
           showNotes={showNotes}

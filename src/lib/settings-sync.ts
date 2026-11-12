@@ -1,5 +1,5 @@
 import { DEFAULT_MODELS, DEFAULTS, STORAGE_KEYS } from './constants';
-import { getStorageItem, getStoredJSON } from './storage';
+import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
 import { AIProvider } from './types';
 
 export const SPOTIFY_AUTH_SYNC_EVENT = 'contextdj:spotify-auth-sync';
@@ -79,6 +79,8 @@ export function getDefaultVoiceLang(): string {
 }
 
 export function hasStoredSpotifyTokens(): boolean {
+    const hasClientId = Boolean(getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim());
+    if (!hasClientId) return false;
     return Boolean(
         getStorageItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN, '') ||
         getStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, '')
@@ -92,6 +94,7 @@ export function subscribeSpotifySessionStore(onStoreChange: () => void): () => v
     const handleStorage = (e: StorageEvent) => {
         if (
             e.key === null ||
+            e.key === STORAGE_KEYS.SPOTIFY_CLIENT_ID ||
             e.key === STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN ||
             e.key === STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN ||
             e.key === STORAGE_KEYS.SPOTIFY_EXPIRES_AT
@@ -115,6 +118,15 @@ export function notifySpotifyAuthStateChanged(): void {
     ) {
         window.dispatchEvent(new Event(SPOTIFY_AUTH_SYNC_EVENT));
     }
+}
+
+export function clearSpotifySessionStorage(): void {
+    removeStorageItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN);
+    removeStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
+    removeStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN);
+    removeStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
+    removeStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE);
+    notifySpotifyAuthStateChanged();
 }
 
 export function resolveInitialAIProviderFromStorage(): AIProvider {
@@ -216,4 +228,57 @@ export function applySettingsStorageEvent(
         default:
             return prev;
     }
+}
+
+/**
+ * Normalizes and persists `SettingsFormState` to `localStorage`.
+ * Invalidates stored OAuth session tokens whenever `SPOTIFY_CLIENT_ID` is cleared or changed
+ * to a different Spotify App ID so session UI and token state never contradict each other.
+ */
+export function persistSettingsFormState(form: SettingsFormState): SettingsFormState {
+    const prevStoredClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
+    const cleanClientId = form.spotifyClientId.trim();
+    const cleanOpenAiKey = form.openAiKey.trim();
+    const cleanOpenAiModel = form.openAiModel.trim() || DEFAULT_MODELS.OPENAI;
+    const cleanGeminiKey = form.geminiKey.trim();
+    const cleanGeminiModel = form.geminiModel.trim() || DEFAULT_MODELS.GEMINI;
+    const cleanPersonalPref = form.personalPref.trim();
+    const cleanVoiceLang = normalizeVoiceLang(form.voiceLang);
+
+    setStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, cleanClientId);
+    setStorageItem(STORAGE_KEYS.OPENAI_API_KEY, cleanOpenAiKey);
+    setStorageItem(STORAGE_KEYS.OPENAI_MODEL, cleanOpenAiModel);
+    setStorageItem(STORAGE_KEYS.GEMINI_API_KEY, cleanGeminiKey);
+    setStorageItem(STORAGE_KEYS.GEMINI_MODEL, cleanGeminiModel);
+    setStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, form.aiProvider);
+    setStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, cleanPersonalPref);
+    setStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, cleanVoiceLang);
+    setStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(form.backgroundKeepAlive));
+    setStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(form.aiFilteringEnabled));
+
+    if (!cleanClientId || (prevStoredClientId && prevStoredClientId !== cleanClientId)) {
+        clearSpotifySessionStorage();
+    } else if (prevStoredClientId !== cleanClientId) {
+        notifySpotifyAuthStateChanged();
+    }
+
+    let nextHistory = form.prefHistory;
+    if (cleanPersonalPref) {
+        nextHistory = [cleanPersonalPref, ...form.prefHistory.filter((h) => h !== cleanPersonalPref)].slice(0, 10);
+        setStoredJSON(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, nextHistory);
+    }
+
+    return {
+        spotifyClientId: cleanClientId,
+        openAiKey: cleanOpenAiKey,
+        openAiModel: cleanOpenAiModel,
+        geminiKey: cleanGeminiKey,
+        geminiModel: cleanGeminiModel,
+        aiProvider: form.aiProvider,
+        personalPref: cleanPersonalPref,
+        prefHistory: nextHistory,
+        voiceLang: cleanVoiceLang,
+        backgroundKeepAlive: form.backgroundKeepAlive,
+        aiFilteringEnabled: form.aiFilteringEnabled,
+    };
 }

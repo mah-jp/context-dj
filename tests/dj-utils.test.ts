@@ -15,8 +15,12 @@ import {
     isWaitingForScheduleStart,
     resolveEffectiveScheduleItem,
     attachScheduleTimestamps,
+    filterActiveOrUpcomingSchedule,
     isExplicitFutureScheduleRequest,
+    isTomorrowFirstBlockRequest,
     getScheduleItemDisplayStatus,
+    resolveScheduleThought,
+    shouldPreserveActivePlaybackOnScheduleUpdate,
 } from '../src/lib/dj-utils';
 import { ScheduleItem, Track } from '../src/lib/types';
 
@@ -417,7 +421,7 @@ describe('dj-utils', () => {
             assert.strictEqual(isScheduleItemPastInTimeline(anchored, 1, fri0917), false);
         });
 
-        it('supports forceFutureDay for explicit tomorrow single-block reservations overlapping current clock time', () => {
+        it('supports forceFutureDay for explicit tomorrow single-block and multi-block reservations even when requested time >= current clock time', () => {
             const thu0917 = new Date(2026, 10, 12, 9, 17, 0, 0);
             const tomorrowMorning = attachScheduleTimestamps(
                 [{ start: '09:00', end: '11:00', query: 'tomorrow jazz' }],
@@ -431,6 +435,117 @@ describe('dj-utils', () => {
             assert.strictEqual(
                 findStrictlyActiveScheduleItem(tomorrowMorning, new Date(2026, 10, 13, 9, 17, 0, 0))?.query,
                 'tomorrow jazz'
+            );
+
+            // Requested time >= current time (Thu 09:17 -> "明日の10:00"): must anchor to Fri 10:00, NOT Thu 10:00!
+            const tomorrowTenAm = attachScheduleTimestamps(
+                [{ start: '10:00', end: '12:00', query: 'friday 10am jazz' }],
+                thu0917,
+                [],
+                { forceFutureDay: true }
+            );
+            const thu1030 = new Date(2026, 10, 12, 10, 30, 0, 0);
+            const fri1030 = new Date(2026, 10, 13, 10, 30, 0, 0);
+            assert.strictEqual(findStrictlyActiveScheduleItem(tomorrowTenAm, thu1030), null);
+            assert.strictEqual(isWaitingForScheduleStart(tomorrowTenAm, thu1030), true);
+            assert.strictEqual(findStrictlyActiveScheduleItem(tomorrowTenAm, fri1030)?.query, 'friday 10am jazz');
+
+            // Late-night booking (Thu 23:30 -> "明日の09:00"): must anchor to Fri 09:00, NOT Sat 09:00!
+            const thu2330 = new Date(2026, 10, 12, 23, 30, 0, 0);
+            const bookedLateForFri = attachScheduleTimestamps(
+                [
+                    { start: '09:00', end: '12:00', query: 'fri classical' },
+                    { start: '12:00', end: '15:00', query: 'fri bossa' },
+                ],
+                thu2330,
+                [],
+                { forceFutureDay: true }
+            );
+            assert.strictEqual(isWaitingForScheduleStart(bookedLateForFri, thu2330), true);
+            assert.strictEqual(
+                findStrictlyActiveScheduleItem(bookedLateForFri, new Date(2026, 10, 13, 9, 30))?.query,
+                'fri classical'
+            );
+            assert.strictEqual(
+                findStrictlyActiveScheduleItem(bookedLateForFri, new Date(2026, 10, 13, 12, 30))?.query,
+                'fri bossa'
+            );
+        });
+
+        it('handles expired previousSchedule, >10h overnight future reservations, preserved upcoming anchors, and multi-day overlap advancement', () => {
+            const wed2300 = new Date(2026, 10, 11, 23, 0, 0, 0);
+            const expiredYesterday = attachScheduleTimestamps(
+                [{ start: '23:00', end: '01:00', query: 'old jazz' }],
+                wed2300
+            );
+            const thu0917 = new Date(2026, 10, 12, 9, 17, 0, 0);
+            assert.deepStrictEqual(filterActiveOrUpcomingSchedule(expiredYesterday, thu0917), []);
+
+            // Even if expiredYesterday is passed as previousSchedule at Thu 09:17, new 23:00 booking anchors to Thu 23:00 (waiting!)
+            const rebookedTonight = attachScheduleTimestamps(
+                [{ start: '23:00', end: '01:00', query: 'new bossa' }],
+                thu0917,
+                expiredYesterday
+            );
+            assert.strictEqual(isWaitingForScheduleStart(rebookedTonight, thu0917), true);
+
+            // Multi-block overnight [23:00-07:00, 07:00-10:00] and long overnight [23:00-10:00] booked at Thu 09:17
+            const twoBlockOvernight = attachScheduleTimestamps(
+                [
+                    { start: '23:00', end: '07:00', query: 'sleep ambient' },
+                    { start: '07:00', end: '10:00', query: 'morning pop' },
+                ],
+                thu0917
+            );
+            assert.strictEqual(isWaitingForScheduleStart(twoBlockOvernight, thu0917), true);
+            assert.strictEqual(findStrictlyActiveScheduleItem(twoBlockOvernight, thu0917), null);
+
+            const longOvernight = attachScheduleTimestamps(
+                [{ start: '23:00', end: '10:00', query: 'deep sleep' }],
+                thu0917,
+                [],
+                { forceFutureStart: true }
+            );
+            assert.strictEqual(isWaitingForScheduleStart(longOvernight, thu0917), true);
+
+            // Preserves upcoming Fri 09:00 anchor when appending a 12:00 block at Thu 09:18
+            const friSingle = attachScheduleTimestamps(
+                [{ start: '09:00', end: '12:00', query: 'fri classical' }],
+                thu0917,
+                [],
+                { forceFutureDay: true }
+            );
+            const thu0918 = new Date(2026, 10, 12, 9, 18, 0, 0);
+            const friAppended = attachScheduleTimestamps(
+                [
+                    { start: '09:00', end: '12:00', query: 'fri classical' },
+                    { start: '12:00', end: '14:00', query: 'fri bossa' },
+                ],
+                thu0918,
+                friSingle
+            );
+            assert.strictEqual(isWaitingForScheduleStart(friAppended, thu0918), true);
+            assert.strictEqual(
+                findStrictlyActiveScheduleItem(friAppended, new Date(2026, 10, 13, 12, 30))?.query,
+                'fri bossa'
+            );
+
+            // Multi-day [Thu 08:50-12:00, Fri 09:00-11:00]: Block 1 advances to Fri 09:00 instead of overlapping Thu 08:50-12:00
+            const thu0850 = new Date(2026, 10, 12, 8, 50, 0, 0);
+            const todayPlusTomorrow = attachScheduleTimestamps(
+                [
+                    { start: '08:50', end: '12:00', query: 'today ocean' },
+                    { start: '09:00', end: '11:00', query: 'tomorrow classical' },
+                ],
+                thu0850
+            );
+            assert.strictEqual(
+                findStrictlyActiveScheduleItem(todayPlusTomorrow, new Date(2026, 10, 12, 9, 30))?.query,
+                'today ocean'
+            );
+            assert.strictEqual(
+                findStrictlyActiveScheduleItem(todayPlusTomorrow, new Date(2026, 10, 13, 9, 30))?.query,
+                'tomorrow classical'
             );
         });
     });
@@ -523,22 +638,68 @@ describe('dj-utils', () => {
             assert.strictEqual(isExplicitFutureScheduleRequest('正午からボサノバ', '12:00', 30, 1), true);
             assert.strictEqual(isExplicitFutureScheduleRequest('Play bossa nova at noon', '12:00', 30, 1), true);
 
-            // End-bound expressions ("23時まで", "until 23:00", "21時から23時") must NOT match as start time, while "これから23時に" MUST match
+            // End-bound expressions ("23時まで", "until 23:00", "21時から23時", "from 21:00 to 23:00") must NOT match as start time, while "これから23時に" MUST match
             assert.strictEqual(isExplicitFutureScheduleRequest('23時まで作業用BGMを流して', '23:00', 40, 1), false);
             assert.strictEqual(isExplicitFutureScheduleRequest('Play focus beats until 23:00', '23:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('Play focus beats from 21:00 to 23:00', '23:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('Play focus beats from 21:00 to 23:00', '21:00', 40, 1), true);
             assert.strictEqual(isExplicitFutureScheduleRequest('21時から23時はジャズ', '23:00', 40, 1), false);
             assert.strictEqual(isExplicitFutureScheduleRequest('21時から23時はジャズ', '21:00', 40, 1), true);
             assert.strictEqual(isExplicitFutureScheduleRequest('これから23時にジャズを流して', '23:00', 40, 1), true);
         });
+
+        it('rejects duration false positives ("3時間") and natural meridiem conflicts ("夜9時" vs 09:00, "朝9時" vs 21:00), and classifies tomorrow multi-block prompts', () => {
+            // Duration expressions ("3時間", "1時間", "24時間") must NOT match clock hours ("15:00", "01:00", "00:00")
+            assert.strictEqual(isExplicitFutureScheduleRequest('3時間くらい作業用BGMをかけて', '15:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('1時間だけ集中したい', '13:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('24時間ラジオみたいに流して', '00:00', 40, 1), false);
+            // Relative future offset ("1時間後") still matches as explicit future!
+            assert.strictEqual(isExplicitFutureScheduleRequest('1時間後にジャズを流して', '15:00', 60, 1), true);
+
+            // Natural Japanese meridiem words ("朝", "昼", "夕方", "夜", "深夜")
+            assert.strictEqual(isExplicitFutureScheduleRequest('海を散歩したい。夜9時からはピアノのJazz', '09:00', 20, 2), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('夜9時からはピアノのJazz', '21:00', 40, 1), true);
+            assert.strictEqual(isExplicitFutureScheduleRequest('夜23時からはピアノのJazz', '23:00', 40, 1), true);
+            assert.strictEqual(isExplicitFutureScheduleRequest('リラックスしたい。朝9時からはクラシック', '21:00', 20, 2), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('朝9時からはクラシック', '09:00', 40, 1), true);
+            assert.strictEqual(isExplicitFutureScheduleRequest('夕方5時からはロック', '05:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('夕方5時からはロック', '17:00', 40, 1), true);
+            assert.strictEqual(isExplicitFutureScheduleRequest('昼2時からはポップス', '02:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('昼2時からはポップス', '14:00', 40, 1), true);
+            assert.strictEqual(isExplicitFutureScheduleRequest('深夜2時からはアンビエント', '14:00', 40, 1), false);
+            assert.strictEqual(isExplicitFutureScheduleRequest('深夜2時からはアンビエント', '02:00', 40, 1), true);
+
+            // Clause-2 tomorrow clock token ("海を散歩したい。明日の朝9時からはクラシック") must NOT match Block 0's rounded 09:00
+            assert.strictEqual(
+                isExplicitFutureScheduleRequest('海を散歩したい気分。明日の朝9時からはクラシック', '09:00', 10, 2),
+                false
+            );
+            assert.strictEqual(
+                isTomorrowFirstBlockRequest('海を散歩したい気分。明日の朝9時からはクラシック', '09:00', 2),
+                false
+            );
+            assert.strictEqual(
+                isTomorrowFirstBlockRequest('22時からはジャズ、明日の朝9時からはクラシック', '22:00', 2),
+                false
+            );
+            assert.strictEqual(
+                isTomorrowFirstBlockRequest('明日の朝9時からはクラシック、12時からはボサノバ', '09:00', 2),
+                true
+            );
+            assert.strictEqual(
+                isTomorrowFirstBlockRequest('明日の10時からジャズを聴きたい', '10:00', 1),
+                true
+            );
+        });
     });
 
-    describe('getScheduleItemDisplayStatus', () => {
-        it('transitions cleanly across standby -> active -> past -> upcoming for >12h future reservations', () => {
+    describe('getScheduleItemDisplayStatus, resolveScheduleThought & shouldPreserveActivePlaybackOnScheduleUpdate', () => {
+        it('transitions cleanly across standby -> active -> past -> upcoming and marks expired idle schedules as past', () => {
             const bookedAt0917 = new Date(2026, 10, 12, 9, 17, 0, 0);
             const schedule = attachScheduleTimestamps(
                 [
-                    { start: '23:00', end: '01:00', query: 'piano jazz' },
-                    { start: '01:00', end: '03:00', query: 'ambient sleep' },
+                    { start: '23:00', end: '01:00', query: 'piano jazz', thought: 'Late piano' },
+                    { start: '01:00', end: '03:00', query: 'ambient sleep', thought: 'Deep sleep' },
                 ],
                 bookedAt0917
             );
@@ -546,6 +707,9 @@ describe('dj-utils', () => {
             // At 09:17 (waiting for 23:00): Block 0 is 'standby', Block 1 is 'upcoming'
             assert.strictEqual(getScheduleItemDisplayStatus(schedule, 0, null, bookedAt0917), 'standby');
             assert.strictEqual(getScheduleItemDisplayStatus(schedule, 1, null, bookedAt0917), 'upcoming');
+            // Thought is shown when idle, but suppressed if a prior block's query is still playing
+            assert.strictEqual(resolveScheduleThought(schedule, null, bookedAt0917), 'Late piano');
+            assert.strictEqual(resolveScheduleThought(schedule, 'ocean walk', bookedAt0917), null);
 
             // At 23:30: Block 0 is 'active', Block 1 is 'upcoming'
             const at2330 = new Date(2026, 10, 12, 23, 30, 0, 0);
@@ -556,6 +720,47 @@ describe('dj-utils', () => {
             const at0130 = new Date(2026, 10, 13, 1, 30, 0, 0);
             assert.strictEqual(getScheduleItemDisplayStatus(schedule, 0, 'ambient sleep', at0130), 'past');
             assert.strictEqual(getScheduleItemDisplayStatus(schedule, 1, 'ambient sleep', at0130), 'active');
+
+            // At 09:17 next day after all slots ended: 'active' if fallback query still playing, 'past' if idle (currentQuery === null)
+            const nextMorning = new Date(2026, 10, 13, 9, 17, 0, 0);
+            assert.strictEqual(getScheduleItemDisplayStatus(schedule, 1, 'ambient sleep', nextMorning), 'active');
+            assert.strictEqual(getScheduleItemDisplayStatus(schedule, 0, null, nextMorning), 'past');
+            assert.strictEqual(getScheduleItemDisplayStatus(schedule, 1, null, nextMorning), 'past');
+
+            // Preserves active playback when appending/editing future blocks, but restarts when active block changes or single block repeats
+            const morningNow = new Date(2026, 10, 12, 10, 15, 0, 0);
+            const prevSched = attachScheduleTimestamps(
+                [{ start: '09:00', end: '12:00', query: 'ocean walk' }],
+                morningNow
+            );
+            const nextWithTonight = attachScheduleTimestamps(
+                [
+                    { start: '09:00', end: '23:00', query: 'ocean walk' },
+                    { start: '23:00', end: '01:00', query: 'piano jazz' },
+                ],
+                morningNow,
+                prevSched
+            );
+            assert.strictEqual(
+                shouldPreserveActivePlaybackOnScheduleUpdate({
+                    prevSchedule: prevSched,
+                    nextSchedule: nextWithTonight,
+                    prevCurrentQuery: 'ocean walk',
+                    isSessionActive: true,
+                    date: morningNow,
+                }),
+                true
+            );
+            assert.strictEqual(
+                shouldPreserveActivePlaybackOnScheduleUpdate({
+                    prevSchedule: prevSched,
+                    nextSchedule: prevSched,
+                    prevCurrentQuery: 'ocean walk',
+                    isSessionActive: true,
+                    date: morningNow,
+                }),
+                false
+            );
         });
     });
 });

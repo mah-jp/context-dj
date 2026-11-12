@@ -38,6 +38,9 @@ export default function ServiceWorkerRegister() {
             .register(swUrl)
             .then((registration) => {
                 console.log('Service Worker registered with scope:', registration.scope);
+                void registration.update().catch(() => {
+                    // Ignore transient offline SW update check errors
+                });
             })
             .catch((error) => {
                 console.error('Service Worker registration failed:', error);

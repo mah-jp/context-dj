@@ -1650,9 +1650,12 @@ describe('DJCore', () => {
             assert.strictEqual(dj.getStateSnapshot().currentQuery, 'ocean breeze acoustic');
 
             // 3. Removing Block 0 (09:17 - 23:00) leaves only Block 1 (23:00 - 01:00) -> enters standby without prematurely playing Block 1,
+            //    suppresses future Block 1 thought while 'ocean breeze acoustic' is still active,
             //    and if lastQuery collided with Block 1's signature, clears it so 23:00 will start cleanly when reached!
             dj.removeScheduleItem(0, true);
             assert.strictEqual(dj.getStateSnapshot().currentQuery, 'ocean breeze acoustic');
+            assert.strictEqual(dj.getStateSnapshot().currentThought, null);
+            assert.strictEqual(dj.getDJStatus().currentThought, null);
             await dj.processDJLoop(true, false);
             assert.strictEqual(playedCount, 1);
             assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for 23:00/);
@@ -1662,6 +1665,7 @@ describe('DJCore', () => {
             (dj as unknown as { lastQuery: string | null }).lastQuery = 'genre:jazz piano';
             dj.setSchedule(dj.getSchedule(), true);
             assert.strictEqual(dj.getStateSnapshot().currentQuery, null);
+            assert.strictEqual(dj.getStateSnapshot().currentThought, '23時からのピアノジャズです。');
             assert.strictEqual(store['dj_last_query'], undefined);
 
             // Advance clock to 23:00 -> standby ends and piano jazz starts playing automatically!
@@ -1670,6 +1674,122 @@ describe('DJCore', () => {
             assert.strictEqual(playedCount, 2);
             assert.strictEqual(dj.getStateSnapshot().currentQuery, 'genre:jazz piano');
             assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+        });
+
+        it('strips expired yesterday schedules, stands by for multi-block tomorrow & >10h overnight reservations, and preserves active playback when appending future slots', async (t) => {
+            // 1. Seed a schedule on Wed 23:00 - Thu 01:00, then advance to Thu 09:17 (8h 17m after show ended)
+            const wedNight = new Date(2026, 10, 11, 23, 0, 0, 0);
+            t.mock.timers.enable({ apis: ['Date'], now: wedNight.getTime() });
+
+            const dj = new DJCore('fake_token');
+            let playedCount = 0;
+            let receivedExistingSchedule: ScheduleItem[] = [];
+
+            const djInternal = dj as unknown as {
+                ai: {
+                    generateSchedule: (instruction: string, existing: ScheduleItem[]) => Promise<ScheduleItem[]>;
+                };
+                spotify: {
+                    getMyCurrentPlaybackState: () => Promise<unknown>;
+                };
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                    getUserQueue: () => Promise<{ currently_playing: Track | null; queue: Track[] }>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: () => Promise<Track[]>;
+            };
+
+            djInternal.playerClient.getDevices = async () => [
+                { id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice,
+            ];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {
+                playedCount++;
+            };
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            const sampleTracks = Array.from({ length: 6 }, (_, idx) =>
+                makeTrack({ id: `tr_${idx}`, uri: `spotify:track:tr_${idx}`, name: `Track ${idx}`, artistName: 'Artist' })
+            );
+            djInternal.searchTracks = async () => sampleTracks;
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: true,
+                item: sampleTracks[0],
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            });
+            djInternal.playerClient.getUserQueue = async () => ({
+                currently_playing: sampleTracks[0],
+                queue: sampleTracks.slice(1),
+            });
+
+            djInternal.ai = {
+                generateSchedule: async (_inst, existing) => {
+                    receivedExistingSchedule = existing;
+                    return [{ start: '23:00', end: '01:00', query: 'wed jazz', queries: ['wed jazz'] }];
+                },
+            };
+            await dj.createSchedule('23時からジャズ');
+
+            // Advance to Thu 09:17 -> yesterday's 23:00-01:00 has finished; booking tonight's 23:00 must strip expired context & stand by!
+            const thu0917 = new Date(2026, 10, 12, 9, 17, 0, 0);
+            t.mock.timers.setTime(thu0917.getTime());
+            djInternal.ai.generateSchedule = async (_inst, existing) => {
+                receivedExistingSchedule = existing;
+                return [{ start: '23:00', end: '01:00', query: 'thu bossa', queries: ['thu bossa'] }];
+            };
+            await dj.createSchedule('23時からはボサノバを聴きたいです');
+            assert.deepStrictEqual(receivedExistingSchedule, []);
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(playedCount, 0);
+            assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for 23:00/);
+
+            // 2. Long overnight future slot ("今夜23時から朝10時までアンビエント" -> 23:00 - 10:00) at Thu 09:17 must stand by!
+            djInternal.ai.generateSchedule = async () => [
+                { start: '23:00', end: '10:00', query: 'sleep ambient', queries: ['sleep ambient'] },
+            ];
+            await dj.createSchedule('今夜23時から朝10時までアンビエント');
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(playedCount, 0);
+            assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for 23:00/);
+
+            // 3. Multi-block tomorrow schedule ("明日の朝9時からはクラシック、12時からはボサノバ") at Thu 09:17 must stand by until Friday 09:00!
+            djInternal.ai.generateSchedule = async () => [
+                { start: '09:00', end: '12:00', query: 'fri classical', queries: ['fri classical'] },
+                { start: '12:00', end: '15:00', query: 'fri bossa', queries: ['fri bossa'] },
+            ];
+            await dj.createSchedule('明日の朝9時からはクラシック、12時からはボサノバ');
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(playedCount, 0);
+            assert.match(dj.getStateSnapshot().status, /^⏰ Waiting for 09:00/);
+
+            // 4. Active session playing 09:17-12:00 'morning acoustic': appending a 23:00 block preserves active playback without restarting!
+            djInternal.ai.generateSchedule = async () => [
+                { start: '09:30', end: '12:00', query: 'morning acoustic', queries: ['morning acoustic'] },
+            ];
+            await dj.createSchedule('3時間くらい作業用アコースティックをかけて');
+            assert.strictEqual(dj.getSchedule()[0].start, '09:17');
+            await dj.processDJLoop(false, true);
+            assert.strictEqual(playedCount, 1);
+            assert.strictEqual(dj.isSessionPlaybackActive(), true);
+
+            const prevSched = dj.getSchedule();
+            const prevQuery = dj.getDJStatus().currentQuery;
+            const wasActive = dj.isSessionPlaybackActive();
+            djInternal.ai.generateSchedule = async () => [
+                { start: '09:17', end: '23:00', query: 'morning acoustic', queries: ['morning acoustic'] },
+                { start: '23:00', end: '01:00', query: 'piano jazz', queries: ['piano jazz'] },
+            ];
+            await dj.createSchedule('23時からはピアノのJazzも追加して');
+            const preserve = dj.shouldPreservePlaybackAfterScheduleChange(prevSched, prevQuery, wasActive);
+            assert.strictEqual(preserve, true);
+            await dj.processDJLoop(false, !preserve);
+            // Active session was NOT interrupted (playedCount remained 1)!
+            assert.strictEqual(playedCount, 1);
+            assert.strictEqual(dj.getDJStatus().currentQuery, 'morning acoustic');
         });
     });
 });

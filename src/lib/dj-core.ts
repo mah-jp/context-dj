@@ -16,17 +16,24 @@ import {
 } from './types';
 import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from './storage';
 import {
+    POST_OVERNIGHT_END_WINDOW_MINS,
     attachScheduleTimestamps,
+    filterActiveOrUpcomingSchedule,
     generateTrackKey,
+    hasImmediateCueInPrompt,
     isExplicitFutureScheduleRequest,
     isScheduleItemActive,
+    isTomorrowFirstBlockRequest,
     getScheduleItemSignature,
     getScheduleItemQueries,
+    normalizeTimeString,
     parseTimeToMinutes,
     findActiveScheduleItem,
     findStrictlyActiveScheduleItem,
     isWaitingForScheduleStart,
     resolveEffectiveScheduleItem,
+    resolveScheduleThought,
+    shouldPreserveActivePlaybackOnScheduleUpdate,
 } from './dj-utils';
 import { TrackSessionCache } from './track-session-cache';
 import { SpotifyPlayerClient } from './spotify-player-client';
@@ -73,6 +80,7 @@ export class DJCore {
         cachedTracks: Track[];
     } | null = null;
     private lastKnownIsPlaying: boolean | null = null;
+    private loggedStandbyStart: string | null = null;
 
     constructor(accessToken: string) {
         this.spotify = new SpotifyWebApi();
@@ -101,6 +109,7 @@ export class DJCore {
         if (Array.isArray(savedSchedule) && savedSchedule.length > 0) {
             this.schedule = savedSchedule;
             this.clearCollidingLastQueryWhenWaiting();
+            this.syncStandbyStatusAfterScheduleChange();
         }
     }
 
@@ -210,12 +219,11 @@ export class DJCore {
     // --- Event / Subscription Model ---
 
     getStateSnapshot(): DJStateSnapshot {
-        const currentItem = this.getCurrentItem() ?? this.getEffectiveItemForPlayback();
         return {
             status: this.statusText,
             schedule: [...this.schedule],
             currentQuery: this.lastQuery,
-            currentThought: currentItem?.thought || (this.schedule[0]?.thought ?? null),
+            currentThought: resolveScheduleThought(this.schedule, this.lastQuery),
             logs: [...this.processLog],
             lastError: this.lastError,
         };
@@ -445,34 +453,77 @@ export class DJCore {
     async createSchedule(instruction: string, personalContext?: string) {
         if (!this.ai) throw new Error("AI not initialized. Please configure your AI API Key in Settings. (AIが初期化されていません。設定画面でAPIキーを設定してください)");
 
-        const prevSchedule = this.schedule;
-        const schedule = await this.ai.generateSchedule(instruction, prevSchedule, personalContext);
+        const activePrevSchedule = filterActiveOrUpcomingSchedule(this.schedule, new Date());
+        const schedule = await this.ai.generateSchedule(instruction, activePrevSchedule, personalContext);
         const now = new Date();
 
-        // Snap LLM clock-rounding drift (<= 60m ahead) to current time unless user explicitly requested a future time
-        if (schedule.length > 0 && !isScheduleItemActive(schedule[0], now)) {
-            const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-            const firstStartMins = parseTimeToMinutes(schedule[0].start);
-            const nowMins = now.getHours() * 60 + now.getMinutes();
-            const forwardDiff = (firstStartMins - nowMins + 1440) % 1440;
-
-            if (
-                forwardDiff > 0 &&
-                forwardDiff <= 60 &&
-                !isExplicitFutureScheduleRequest(instruction, schedule[0].start, forwardDiff, schedule.length)
-            ) {
-                schedule[0].start = nowStr;
-            }
+        if (schedule.length === 0) {
+            this.setSchedule([], true);
+            return this.schedule;
         }
 
+        const hasImmediateCue = hasImmediateCueInPrompt(instruction, schedule.length);
+        const prevFirstPreserved = Boolean(
+            !hasImmediateCue &&
+            activePrevSchedule.length > 0 &&
+            normalizeTimeString(activePrevSchedule[0].start) === normalizeTimeString(schedule[0].start) &&
+            getScheduleItemSignature(activePrevSchedule[0]) === getScheduleItemSignature(schedule[0])
+        );
         const forceFutureDay =
-            schedule.length === 1 &&
-            /(?:明日|あした)|\btomorrow\b/i.test(instruction) &&
-            !/(?:今日|今から|いまから|今は|いまは)|\b(?:today|right now|for now|start now)\b/i.test(instruction);
+            !prevFirstPreserved &&
+            isTomorrowFirstBlockRequest(instruction, schedule[0].start, schedule.length);
 
-        const anchoredSchedule = attachScheduleTimestamps(schedule, now, prevSchedule, { forceFutureDay });
+        const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        const firstStartMins = parseTimeToMinutes(schedule[0].start);
+        const nowMins = now.getHours() * 60 + now.getMinutes();
+        const forwardDiff = (firstStartMins - nowMins + 1440) % 1440;
+        const relNow = (nowMins - firstStartMins + 1440) % 1440;
+        const explicitFutureStart = isExplicitFutureScheduleRequest(
+            instruction,
+            schedule[0].start,
+            forwardDiff || 1440,
+            schedule.length
+        );
+        const forceFutureStart =
+            !forceFutureDay &&
+            !prevFirstPreserved &&
+            explicitFutureStart &&
+            forwardDiff > 0 &&
+            relNow > POST_OVERNIGHT_END_WINDOW_MINS;
+
+        // Snap LLM clock-rounding drift (<= 60m ahead) to current time unless user explicitly requested a future time
+        if (
+            !forceFutureDay &&
+            !forceFutureStart &&
+            !prevFirstPreserved &&
+            !isScheduleItemActive(schedule[0], now) &&
+            forwardDiff > 0 &&
+            forwardDiff <= 60 &&
+            !explicitFutureStart
+        ) {
+            schedule[0].start = nowStr;
+        }
+
+        const anchoredSchedule = attachScheduleTimestamps(schedule, now, activePrevSchedule, {
+            forceFutureDay,
+            forceFutureStart,
+            hasImmediateCue,
+        });
         this.setSchedule(anchoredSchedule, true);
         return this.schedule;
+    }
+
+    shouldPreservePlaybackAfterScheduleChange(
+        prevSchedule: ScheduleItem[],
+        prevCurrentQuery: string | null,
+        wasSessionActive: boolean
+    ): boolean {
+        return shouldPreserveActivePlaybackOnScheduleUpdate({
+            prevSchedule,
+            nextSchedule: this.schedule,
+            prevCurrentQuery,
+            isSessionActive: wasSessionActive,
+        });
     }
 
     private invalidatePreload() {
@@ -534,18 +585,25 @@ export class DJCore {
 
     private syncStandbyStatusAfterScheduleChange() {
         if (this.schedule.length === 0) {
+            this.loggedStandbyStart = null;
             if (this.statusText.startsWith('⏰')) {
                 this.statusText = 'Ready';
             }
             return;
         }
         if (isWaitingForScheduleStart(this.schedule)) {
-            if (this.statusText.startsWith('⏰')) {
-                const firstStart = this.schedule[0].start;
+            const firstStart = this.schedule[0].start;
+            if (this.loggedStandbyStart !== firstStart) {
+                this.loggedStandbyStart = null;
+            }
+            if (this.statusText === 'Ready' || this.statusText.startsWith('⏰')) {
                 this.statusText = `⏰ Waiting for ${firstStart}... (${firstStart}の開始を待機中...)`;
             }
-        } else if (this.statusText.startsWith('⏰')) {
-            this.statusText = 'Ready';
+        } else {
+            this.loggedStandbyStart = null;
+            if (this.statusText.startsWith('⏰')) {
+                this.statusText = 'Ready';
+            }
         }
     }
 
@@ -639,12 +697,16 @@ export class DJCore {
                 }
 
                 const waitStatus = `⏰ Waiting for ${firstItem.start}... (${firstItem.start}の開始を待機中...)`;
-                if (this.statusText !== waitStatus) {
+                if (this.loggedStandbyStart !== firstItem.start) {
+                    this.loggedStandbyStart = firstItem.start;
                     this.addLog(`⏰ Scheduled to start at ${firstItem.start}. Standing by...`);
+                }
+                if (this.statusText !== waitStatus) {
                     this.updateStatus(waitStatus);
                 }
                 return;
             }
+            this.loggedStandbyStart = null;
 
             const currentItem = this.getEffectiveItemForPlayback(now);
 
@@ -1175,11 +1237,13 @@ export class DJCore {
     }
 
     getDJStatus() {
-        const currentItem = this.getCurrentItem() ?? this.getEffectiveItemForPlayback();
+        const currentItem = isWaitingForScheduleStart(this.schedule)
+            ? null
+            : (this.getCurrentItem() ?? this.getEffectiveItemForPlayback());
         return {
             currentScheduleItem: currentItem,
             currentQuery: this.lastQuery,
-            currentThought: currentItem?.thought || null,
+            currentThought: resolveScheduleThought(this.schedule, this.lastQuery),
             config: this.config
         };
     }

@@ -13,7 +13,7 @@ import {
     generateTrackKey,
     getScheduleItemSignature,
     isWaitingForScheduleStart,
-    resolveEffectiveScheduleItem,
+    resolveScheduleThought,
 } from '../lib/dj-utils';
 
 const EMPTY_SCHEDULE: ScheduleItem[] = [];
@@ -229,9 +229,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [currentThought, setCurrentThought] = useState<string | null>(() => {
         if (typeof window !== 'undefined') {
             const savedSchedule = getStoredJSON<ScheduleItem[]>(STORAGE_KEYS.DJ_SCHEDULE, []);
-            if (savedSchedule.length > 0) {
-                return resolveEffectiveScheduleItem(savedSchedule)?.thought || savedSchedule[0]?.thought || null;
-            }
+            const savedQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null;
+            return resolveScheduleThought(savedSchedule, savedQuery);
         }
         return null;
     });
@@ -543,6 +542,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setScheduleState(initialSnapshot.schedule);
         setCurrentQuery(initialSnapshot.currentQuery);
         setCurrentThought(initialSnapshot.currentThought);
+        if (initialSnapshot.status.startsWith('⏰')) {
+            setStatus(initialSnapshot.status);
+        }
 
         dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
             setError(prev => (prev === errMsg ? prev : errMsg));
@@ -670,18 +672,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (djRef.current) {
                     djRef.current.setSchedule(nextSchedule, false);
                 } else {
-                    setCurrentThought(
-                        nextSchedule.length > 0
-                            ? resolveEffectiveScheduleItem(nextSchedule)?.thought || nextSchedule[0]?.thought || null
-                            : null
-                    );
+                    let effectiveQuery = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null;
                     if (nextSchedule.length === 0) {
+                        effectiveQuery = null;
                         setCurrentQuery(null);
                     } else if (isWaitingForScheduleStart(nextSchedule)) {
+                        if (effectiveQuery && nextSchedule.some(item => getScheduleItemSignature(item) === effectiveQuery)) {
+                            effectiveQuery = null;
+                        }
                         setCurrentQuery(prev =>
                             prev && nextSchedule.some(item => getScheduleItemSignature(item) === prev) ? null : prev
                         );
                     }
+                    setCurrentThought(resolveScheduleThought(nextSchedule, effectiveQuery));
                 }
             } else if (action === 'sync_query') {
                 setCurrentQuery(getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null);
@@ -947,9 +950,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 setCurrentQuery(null);
                 setCurrentThought(null);
             } else {
-                const nextEffective = djRef.current.getEffectiveItemForPlayback();
-                setCurrentQuery(djRef.current.getDJStatus().currentQuery);
-                setCurrentThought(nextEffective?.thought || null);
+                const nextDjStatus = djRef.current.getDJStatus();
+                setCurrentQuery(nextDjStatus.currentQuery);
+                setCurrentThought(nextDjStatus.currentThought);
                 if (prevQuery !== null || prevStatus.startsWith('⏰')) {
                     void djRef.current.processDJLoop(true, false).catch((err) => {
                         console.warn('Schedule transition after item removal failed:', err);
@@ -966,16 +969,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     setCurrentThought(null);
                     removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
                 } else {
+                    let savedQ = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '') || null;
                     if (isWaitingForScheduleStart(next)) {
-                        const savedQ = getStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, '');
                         if (savedQ && next.some(item => getScheduleItemSignature(item) === savedQ)) {
+                            savedQ = null;
                             setCurrentQuery(null);
                             removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
                         }
                     }
-                    setCurrentThought(
-                        resolveEffectiveScheduleItem(next)?.thought || next[0]?.thought || null
-                    );
+                    setCurrentThought(resolveScheduleThought(next, savedQ));
                 }
                 return next;
             });

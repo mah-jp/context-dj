@@ -20,6 +20,7 @@ import {
     applySettingsStorageEvent,
     hasStoredSpotifyTokens,
     normalizeVoiceLang,
+    persistSettingsFormState,
     readSettingsFormStateFromStorage,
     subscribeSpotifySessionStore,
 } from '../src/lib/settings-sync';
@@ -454,6 +455,7 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
             },
         };
 
+        store[STORAGE_KEYS.SPOTIFY_CLIENT_ID] = 'cid_1';
         store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN] = 'tok_1';
         store[STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN] = 'ref_1';
         assert.strictEqual(hasStoredSpotifyTokens(), true);
@@ -480,9 +482,39 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
         assert.strictEqual(storeChangeCount, 2);
         assert.strictEqual(hasStoredSpotifyTokens(), true);
 
-        // 4. Same-tab SpotifyAuth.logout() dispatches SPOTIFY_AUTH_SYNC_EVENT -> snapshot becomes false immediately
-        SpotifyAuth.logout();
+        // 4. Another tab clears SPOTIFY_CLIENT_ID -> fires notification & snapshot becomes false even if stale refresh token remains
+        store[STORAGE_KEYS.SPOTIFY_CLIENT_ID] = '';
+        listeners.get('storage')?.forEach((fn) => fn({ key: STORAGE_KEYS.SPOTIFY_CLIENT_ID }));
         assert.strictEqual(storeChangeCount, 3);
+        assert.strictEqual(hasStoredSpotifyTokens(), false);
+
+        // 5. Same-tab persistSettingsFormState invalidates OAuth tokens when Client ID is cleared or changed to another app ID
+        store[STORAGE_KEYS.SPOTIFY_CLIENT_ID] = 'cid_1';
+        store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN] = 'tok_2';
+        store[STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN] = 'ref_2';
+        assert.strictEqual(hasStoredSpotifyTokens(), true);
+
+        const baseForm = readSettingsFormStateFromStorage('ja-JP');
+        persistSettingsFormState({ ...baseForm, spotifyClientId: '  cid_2  ' });
+        assert.strictEqual(store[STORAGE_KEYS.SPOTIFY_CLIENT_ID], 'cid_2');
+        assert.strictEqual(store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN], undefined);
+        assert.strictEqual(store[STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN], undefined);
+        assert.strictEqual(hasStoredSpotifyTokens(), false);
+        assert.strictEqual(storeChangeCount, 4);
+
+        store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN] = 'tok_3';
+        assert.strictEqual(hasStoredSpotifyTokens(), true);
+        persistSettingsFormState({ ...readSettingsFormStateFromStorage('ja-JP'), spotifyClientId: '   ' });
+        assert.strictEqual(store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN], undefined);
+        assert.strictEqual(hasStoredSpotifyTokens(), false);
+        assert.strictEqual(storeChangeCount, 5);
+
+        // 6. Same-tab SpotifyAuth.logout() dispatches SPOTIFY_AUTH_SYNC_EVENT -> snapshot becomes false immediately
+        store[STORAGE_KEYS.SPOTIFY_CLIENT_ID] = 'cid_2';
+        store[STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN] = 'tok_4';
+        assert.strictEqual(hasStoredSpotifyTokens(), true);
+        SpotifyAuth.logout();
+        assert.strictEqual(storeChangeCount, 6);
         assert.strictEqual(hasStoredSpotifyTokens(), false);
         assert.strictEqual(listeners.get(SPOTIFY_AUTH_SYNC_EVENT)?.size, 1);
 

@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { STORAGE_KEYS, SPOTIFY_AUTH_CONSTANTS } from '../lib/constants';
 import { getStorageItem, setStorageItem, removeStorageItem } from './storage';
-import { notifySpotifyAuthStateChanged } from './settings-sync';
+import { clearSpotifySessionStorage, notifySpotifyAuthStateChanged } from './settings-sync';
 
 interface TokenResponse {
     access_token: string;
@@ -238,11 +238,6 @@ export class SpotifyAuth {
     }
 
     static logout() {
-        removeStorageItem(STORAGE_KEYS.SPOTIFY_ACCESS_TOKEN);
-        removeStorageItem(STORAGE_KEYS.SPOTIFY_EXPIRES_AT);
-        removeStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN);
-        removeStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
-        removeStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE);
-        notifySpotifyAuthStateChanged();
+        clearSpotifySessionStorage();
     }
 }

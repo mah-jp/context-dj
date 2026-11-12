@@ -6,15 +6,16 @@ import { getScheduleItemDisplayStatus } from '../lib/dj-utils';
 interface ScheduleSidebarProps {
     schedule: ScheduleItem[];
     currentQuery: string | null;
+    now?: Date;
     onRemoveItem: (index: number) => void;
     onRecallItem: (item: ScheduleItem) => void;
 }
 
-export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
+export default function ScheduleSidebar({ schedule, currentQuery, now, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
     return (
         <div className={styles.sidebar}>
             {schedule.length > 0 ? schedule.map((item, i) => {
-                const displayStatus = getScheduleItemDisplayStatus(schedule, i, currentQuery);
+                const displayStatus = getScheduleItemDisplayStatus(schedule, i, currentQuery, now);
                 const isActive = displayStatus === 'active';
                 const isStandby = displayStatus === 'standby';
                 const past = displayStatus === 'past';
