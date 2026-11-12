@@ -103,10 +103,17 @@ export default function Onboarding({ setupStatus, authorized, onLogin }: Onboard
                     </div>
                 </div>
 
-                {!setupStatus.hasClientId && (
+                {!setupStatus.hasClientId ? (
                     <p style={{ fontSize: '0.9rem', color: '#666' }}>
                         Please start from Step 1.<br />
                         (まずはステップ1から始めてください)
+                    </p>
+                ) : (
+                    <p style={{ fontSize: '0.85rem', color: '#888' }}>
+                        Need to update your Client ID or API Key?{' '}
+                        <Link href="/settings" style={{ color: 'var(--primary)', textDecoration: 'underline' }}>
+                            Open Settings (設定を変更)
+                        </Link>
                     </p>
                 )}
             </div>

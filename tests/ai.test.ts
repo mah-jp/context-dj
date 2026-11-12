@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { AIService } from '../src/lib/ai';
+import { AIService, formatAIProviderError } from '../src/lib/ai';
 import { DEFAULT_MODELS } from '../src/lib/constants';
 
 describe('AIService', () => {
@@ -25,9 +25,16 @@ describe('AIService', () => {
             assert.strictEqual(service.getModelName(), DEFAULT_MODELS.OPENAI);
         });
 
-        it('respects explicitly provided custom modelName', () => {
-            const service = new AIService('gemini', 'fake_key', 'gemini-custom-pro');
+        it('respects explicitly provided custom modelName and trims whitespace', () => {
+            const service = new AIService('gemini', '  fake_key  ', '  gemini-custom-pro  ');
             assert.strictEqual(service.getModelName(), 'gemini-custom-pro');
+        });
+
+        it('falls back to DEFAULT_MODELS when modelName is whitespace-only', () => {
+            const geminiService = new AIService('gemini', 'fake_key', '   ');
+            assert.strictEqual(geminiService.getModelName(), DEFAULT_MODELS.GEMINI);
+            const openaiService = new AIService('openai', 'fake_key', ' \t ');
+            assert.strictEqual(openaiService.getModelName(), DEFAULT_MODELS.OPENAI);
         });
     });
 
@@ -298,6 +305,68 @@ describe('AIService', () => {
             const visionDesc = await service.analyzeImage('abc123base64', 'image/png');
             assert.strictEqual(visionDesc, '静かな夜の書斎に似合う柔らかなピアノトリオ。');
             assert.strictEqual(capturedRequests.length, 3);
+        });
+
+        it('sanitizes empty or whitespace queries in generateSchedule using priorityTrack / userRequest fallback', async () => {
+            globalThis.fetch = (async () => ({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{
+                        content: {
+                            parts: [{
+                                text: JSON.stringify([
+                                    { start: '10:00', end: '12:00', queries: ['   ', ''], priorityTrack: ' artist:"Nujabes" ', thought: ' Chill ' },
+                                    { start: '12:00', end: '14:00', queries: [], thought: 'Afternoon' },
+                                ])
+                            }]
+                        }
+                    }]
+                })
+            } as unknown as Response)) as typeof globalThis.fetch;
+
+            const service = new AIService('gemini', 'test_key');
+            const items = await service.generateSchedule('lo-fi study');
+            assert.strictEqual(items.length, 2);
+            assert.deepStrictEqual(items[0].queries, ['artist:"Nujabes"']);
+            assert.strictEqual(items[0].query, 'artist:"Nujabes"');
+            assert.deepStrictEqual(items[1].queries, ['lo-fi study']);
+            assert.strictEqual(items[1].query, 'lo-fi study');
+        });
+
+        it('formats concrete bilingual AI provider errors for 400, 401/403, 404 (with model name), 429, and 503', async () => {
+            const err400 = formatAIProviderError(
+                'gemini',
+                'gemini-2.5-flash',
+                400,
+                'Bad Request',
+                JSON.stringify({ error: { message: 'API key not valid. Please pass a valid API key.' } })
+            );
+            assert.match(err400.message, /Gemini API Error: 400 Bad Request - API key not valid/);
+            assert.match(err400.message, /APIキーまたはリクエスト形式が無効です/);
+
+            const err404 = formatAIProviderError('openai', 'gpt-nonexistent-99', 404, 'Not Found', 'The model does not exist');
+            assert.match(err404.message, /OpenAI API Error: 404 Not Found/);
+            assert.match(err404.message, /"gpt-nonexistent-99" が見つかりません/);
+
+            const err429 = formatAIProviderError('gemini', 'gemini-2.5-flash', 429, 'Too Many Requests', '{"error":{"message":"Quota exceeded"}}');
+            assert.match(err429.message, /Quota exceeded/);
+            assert.match(err429.message, /レート制限または利用枠の上限/);
+
+            // Verify OpenAI SDK error status propagation in generateSchedule
+            const service = new AIService('openai', 'sk-bad', 'gpt-bad-model');
+            const internal = service as unknown as {
+                openai: { chat: { completions: { create: () => Promise<never> } } };
+            };
+            internal.openai.chat.completions.create = async () => {
+                const sdkErr = new Error('404 The model `gpt-bad-model` does not exist') as Error & { status?: number };
+                sdkErr.status = 404;
+                throw sdkErr;
+            };
+            await assert.rejects(
+                async () => service.generateSchedule('jazz'),
+                /gpt-bad-model.*が見つかりません/
+            );
         });
     });
 });

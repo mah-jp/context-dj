@@ -30,6 +30,26 @@ import { TrackSearchPipeline } from './track-search-pipeline';
 
 export type { Track };
 
+function isExplicitStartTimeInPrompt(instruction: string, normalizedStart: string): boolean {
+    const mins = parseTimeToMinutes(normalizedStart);
+    const h24 = Math.floor(mins / 60);
+    const m = mins % 60;
+    const h12 = h24 % 12 || 12;
+    const mm = String(m).padStart(2, '0');
+
+    const patterns = [
+        normalizedStart,
+        `${h24}:${mm}`,
+        `${h12}:${mm}`,
+        `${h24}時`,
+        `${h12}時`,
+    ];
+    const normalizedInput = instruction.replace(/[０-９：]/g, (ch) =>
+        ch === '：' ? ':' : String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
+    );
+    return patterns.some(p => normalizedInput.includes(p));
+}
+
 export class DJCore {
     private spotify: SpotifyWebApi.SpotifyWebApiJs;
     private playerClient: SpotifyPlayerClient;
@@ -58,8 +78,9 @@ export class DJCore {
     private playbackGeneration = 0;
     private isRefilling = false;
     private lastRefillAttemptTime = 0;
-    private preloadedResult: { signature: string, tracks: Track[] } | null = null;
-    private isPreloading = false;
+    private preloadedResult: { signature: string; tracks: Track[] } | null = null;
+    private inFlightPreload: { signature: string; generation: number; promise: Promise<Track[]> } | null = null;
+    private preloadGeneration = 0;
     private lastKnownIsPlaying: boolean | null = null;
 
     constructor(accessToken: string) {
@@ -183,6 +204,10 @@ export class DJCore {
 
     initAI(backend: AIProvider, apiKey: string, modelName?: string) {
         this.ai = new AIService(backend, apiKey, modelName);
+    }
+
+    clearAI() {
+        this.ai = undefined;
     }
 
     async analyzeImage(base64Image: string, mimeType: string): Promise<string> {
@@ -417,11 +442,11 @@ export class DJCore {
     }
 
     async createSchedule(instruction: string, personalContext?: string) {
-        if (!this.ai) throw new Error("AI not initialized (AIが初期化されていません)");
+        if (!this.ai) throw new Error("AI not initialized. Please configure your AI API Key in Settings. (AIが初期化されていません。設定画面でAPIキーを設定してください)");
 
         const schedule = await this.ai.generateSchedule(instruction, this.schedule, personalContext);
 
-        // If first item starts slightly in the future (within 3 hours), align with now so playback starts immediately
+        // Snap minor LLM clock-rounding drift (<= 15 minutes ahead) to current time unless user explicitly specified that start time
         if (schedule.length > 0) {
             const now = new Date();
             if (!isScheduleItemActive(schedule[0], now)) {
@@ -430,7 +455,11 @@ export class DJCore {
                 const nowMins = now.getHours() * 60 + now.getMinutes();
                 const forwardDiff = (firstStartMins - nowMins + 1440) % 1440;
 
-                if (forwardDiff > 0 && forwardDiff <= 180) {
+                if (
+                    forwardDiff > 0 &&
+                    forwardDiff <= 15 &&
+                    !isExplicitStartTimeInPrompt(instruction, schedule[0].start)
+                ) {
                     schedule[0].start = nowStr;
                 }
             }
@@ -440,18 +469,33 @@ export class DJCore {
         return schedule;
     }
 
-    setSchedule(schedule: ScheduleItem[], persist: boolean = false) {
-        this.schedule = schedule;
+    private invalidatePreload() {
+        this.preloadGeneration++;
         this.preloadedResult = null;
+        this.inFlightPreload = null;
+    }
+
+    setSchedule(schedule: ScheduleItem[], persist: boolean = false) {
+        this.schedule = [...schedule];
+        this.invalidatePreload();
+        if (this.schedule.length === 0) {
+            this.lastQuery = null;
+            removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+        }
         if (persist) {
-            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, schedule);
+            setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, this.schedule);
         }
         this.notifyStateListeners();
     }
 
     removeScheduleItem(index: number, persist: boolean = false) {
         if (index >= 0 && index < this.schedule.length) {
-            this.schedule.splice(index, 1);
+            this.schedule = this.schedule.filter((_, idx) => idx !== index);
+            this.invalidatePreload();
+            if (this.schedule.length === 0) {
+                this.lastQuery = null;
+                removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
+            }
             if (persist) {
                 setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, this.schedule);
             }
@@ -489,10 +533,20 @@ export class DJCore {
             const now = new Date();
             const currentItem = this.getEffectiveItemForPlayback(now);
 
-            if (!currentItem) return;
+            if (!currentItem) {
+                if (!silentWait) {
+                    throw new Error('No active schedule item to play. (再生可能なスケジュールがありません)');
+                }
+                return;
+            }
 
             const queriesToUse = getScheduleItemQueries(currentItem);
-            if (queriesToUse.length === 0) return;
+            if (queriesToUse.length === 0) {
+                if (!silentWait) {
+                    throw new Error('Schedule block contains no search queries. Try rephrasing your request. (スケジュールに検索キーワードが含まれていません)');
+                }
+                return;
+            }
 
             const querySignature = getScheduleItemSignature(currentItem);
 
@@ -506,31 +560,48 @@ export class DJCore {
                     const nextSignature = getScheduleItemSignature(nextItem);
                     const queries = getScheduleItemQueries(nextItem);
 
-                    if (nextSignature && nextSignature !== this.lastQuery &&
-                        (!this.preloadedResult || this.preloadedResult.signature !== nextSignature)) {
+                    if (
+                        nextSignature &&
+                        queries.length > 0 &&
+                        nextSignature !== this.lastQuery &&
+                        (!this.preloadedResult || this.preloadedResult.signature !== nextSignature) &&
+                        (!this.inFlightPreload || this.inFlightPreload.signature !== nextSignature)
+                    ) {
+                        const preloadGen = ++this.preloadGeneration;
+                        console.log(`⏳ Preloading tracks for upcoming schedule: ${nextSignature}`);
+                        this.addLog(`⏳ Preloading upcoming block: ${nextSignature}`);
 
-                        if (!this.isPreloading) {
-                            console.log(`⏳ Preloading tracks for upcoming schedule: ${nextSignature} `);
-                            this.isPreloading = true;
+                        const preloadPromise = this.searchTracks(queries, nextItem.priorityTrack, {
+                            userRequest: nextItem.userRequest,
+                            thought: nextItem.thought,
+                            anchorTracks: nextItem.anchorTracks,
+                            silent: true,
+                        }).then(tracks => {
+                            if (preloadGen === this.preloadGeneration && tracks.length > 0) {
+                                console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
+                                this.preloadedResult = {
+                                    signature: nextSignature,
+                                    tracks
+                                };
+                                this.addLog(`✅ Preloaded ${tracks.length} tracks for upcoming block`);
+                            }
+                            if (this.inFlightPreload?.generation === preloadGen) {
+                                this.inFlightPreload = null;
+                            }
+                            return tracks;
+                        }).catch(err => {
+                            console.error("Failed to preload:", err);
+                            if (this.inFlightPreload?.generation === preloadGen) {
+                                this.inFlightPreload = null;
+                            }
+                            return [] as Track[];
+                        });
 
-                            this.searchTracks(queries, nextItem.priorityTrack, {
-                                userRequest: nextItem.userRequest,
-                                thought: nextItem.thought,
-                                anchorTracks: nextItem.anchorTracks
-                            }).then(tracks => {
-                                if (tracks.length > 0) {
-                                    console.log(`✅ Preloaded ${tracks.length} tracks for "${nextSignature}"`);
-                                    this.preloadedResult = {
-                                        signature: nextSignature,
-                                        tracks
-                                    };
-                                }
-                                this.isPreloading = false;
-                            }).catch(err => {
-                                console.error("Failed to preload:", err);
-                                this.isPreloading = false;
-                            });
-                        }
+                        this.inFlightPreload = {
+                            signature: nextSignature,
+                            generation: preloadGen,
+                            promise: preloadPromise,
+                        };
                     }
                 }
             }
@@ -538,6 +609,9 @@ export class DJCore {
             // 2. Check if we need to change music (or start session if no active/external session exists)
             const hasNoActiveOrExternalSession = !this.isExternalContextActive && this.sessionCache.getSessionTracks().length === 0;
             if (force || querySignature !== this.lastQuery || hasNoActiveOrExternalSession) {
+                if (force) {
+                    this.invalidatePreload();
+                }
                 const currentGen = ++this.playbackGeneration;
                 this.playerClient.clearLastError();
                 const devices = await this.getDevices();
@@ -581,8 +655,25 @@ export class DJCore {
                     this.preloadedResult.tracks.length > 0
                 ) {
                     console.log(`🚀 Using Preloaded Tracks for ${querySignature}`);
+                    this.addLog(`🚀 Transitioning seamlessly with ${this.preloadedResult.tracks.length} preloaded tracks`);
                     tracks = this.preloadedResult.tracks;
                     this.preloadedResult = null;
+                } else if (
+                    !force &&
+                    this.inFlightPreload &&
+                    this.inFlightPreload.signature === querySignature
+                ) {
+                    this.updateStatus(`🔎 Finishing preload: ${queriesToUse[0]}... (選曲仕上げ中...)`);
+                    tracks = await this.inFlightPreload.promise;
+                    this.preloadedResult = null;
+                    if (tracks.length === 0 && currentGen === this.playbackGeneration) {
+                        this.updateStatus(`🔎 Searching: ${queriesToUse[0]}... (選曲中...)`);
+                        tracks = await this.searchTracks(queriesToUse, currentItem.priorityTrack, {
+                            userRequest: currentItem.userRequest,
+                            thought: currentItem.thought,
+                            anchorTracks: currentItem.anchorTracks
+                        });
+                    }
                 } else {
                     this.updateStatus(`🔎 Searching: ${queriesToUse[0]}... (選曲中...)`);
                     console.log(`🔎 Performing immediate search for ${querySignature}`);
@@ -677,12 +768,17 @@ export class DJCore {
                         const startIdx = this.sessionCache.getSessionStartIndex();
                         const tracksToPlay = sessionTracks.slice(startIdx);
                         if (tracksToPlay.length > 0) {
+                            this.lastRefillAttemptTime = Date.now();
                             this.sessionCache.markTracksPlayed(sessionTracks);
-                            await this.playTracks(tracksToPlay, {
-                                isDJSession: true,
-                                fullSessionTracks: sessionTracks,
-                                sessionStartIndex: startIdx,
-                            });
+                            try {
+                                await this.playTracks(tracksToPlay, {
+                                    isDJSession: true,
+                                    fullSessionTracks: sessionTracks,
+                                    sessionStartIndex: startIdx,
+                                });
+                            } catch (restoreErr) {
+                                console.warn("Restored session auto-start failed (will retry after cooldown):", restoreErr);
+                            }
                         }
                     }
                 }
@@ -978,31 +1074,58 @@ export class DJCore {
 
     async next() {
         const sessionTracks = this.sessionCache.getSessionTracks();
+        const prevStartIndex = this.sessionCache.getSessionStartIndex();
+        const prevPlayingTrack = this.lastPlayingTrack;
+        let didAdvanceSession = false;
+
         if (sessionTracks.length > 0 && !this.isExternalContextActive) {
             const lastPlaying = this.lastPlayingTrack;
             const currentIdx = lastPlaying ? this.sessionCache.findTrackIndexInSession(lastPlaying) : -1;
-            const baseIdx = currentIdx >= 0 ? currentIdx : this.sessionCache.getSessionStartIndex();
+            const baseIdx = currentIdx >= 0 ? currentIdx : prevStartIndex;
             if (baseIdx + 1 < sessionTracks.length) {
-                this.sessionCache.setSessionStartIndex(baseIdx + 1);
+                const nextIdx = baseIdx + 1;
+                this.sessionCache.setSessionStartIndex(nextIdx);
+                this.lastPlayingTrack = sessionTracks[nextIdx];
+                didAdvanceSession = true;
             }
         }
-        return this.playerClient.next();
+        const res = await this.playerClient.next();
+        if (!res.ok && didAdvanceSession) {
+            this.sessionCache.setSessionStartIndex(prevStartIndex);
+            this.lastPlayingTrack = prevPlayingTrack;
+        }
+        return res;
     }
 
     async previous() {
         const sessionTracks = this.sessionCache.getSessionTracks();
+        const prevStartIndex = this.sessionCache.getSessionStartIndex();
+        const prevPlayingTrack = this.lastPlayingTrack;
+        const prevPlayTime = this.sessionCache.getLastPlayTime();
+        let didMutateSession = false;
+
         if (sessionTracks.length > 0 && !this.isExternalContextActive) {
             const lastPlaying = this.lastPlayingTrack;
             const currentIdx = lastPlaying ? this.sessionCache.findTrackIndexInSession(lastPlaying) : -1;
-            const baseIdx = currentIdx >= 0 ? currentIdx : this.sessionCache.getSessionStartIndex();
+            const baseIdx = currentIdx >= 0 ? currentIdx : prevStartIndex;
             if (baseIdx > 0) {
-                this.sessionCache.setSessionStartIndex(baseIdx - 1);
+                const targetIdx = baseIdx - 1;
+                this.sessionCache.setSessionStartIndex(targetIdx);
+                this.lastPlayingTrack = sessionTracks[targetIdx];
+                didMutateSession = true;
             }
             if (!this.hasConfirmedSessionPlayback) {
                 this.sessionCache.setLastPlayTime(0);
+                didMutateSession = true;
             }
         }
-        return this.playerClient.previous();
+        const res = await this.playerClient.previous();
+        if (!res.ok && didMutateSession) {
+            this.sessionCache.setSessionStartIndex(prevStartIndex);
+            this.lastPlayingTrack = prevPlayingTrack;
+            this.sessionCache.setLastPlayTime(prevPlayTime);
+        }
+        return res;
     }
 
     async pause() {

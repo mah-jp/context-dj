@@ -5,7 +5,7 @@ import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
 import { AIProvider, ScheduleItem, SpotifyApiErrorInfo, Track } from '../lib/types';
-import { getStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
+import { getStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
 import { generateTrackKey, resolveEffectiveScheduleItem } from '../lib/dj-utils';
@@ -13,6 +13,12 @@ import { generateTrackKey, resolveEffectiveScheduleItem } from '../lib/dj-utils'
 export interface SetupStatus {
     hasClientId: boolean;
     hasAiKey: boolean;
+}
+
+export interface ResolvedAIConfig {
+    provider: AIProvider;
+    apiKey: string;
+    model: string;
 }
 
 export interface PlayerLogsContextType {
@@ -49,6 +55,7 @@ export interface PlayerActionsContextType {
     handleNext: () => Promise<void>;
     handlePrev: () => Promise<void>;
     handleTogglePlay: () => Promise<void>;
+    handlePlayQueueIndex: (index: number) => Promise<void>;
     handleRemoveScheduleItem: (index: number) => void;
     clearError: () => void;
     startBackgroundKeepAlive: () => void;
@@ -67,30 +74,55 @@ const PlayerQueueScheduleContext = createContext<PlayerQueueScheduleContextType 
 const PlayerPlaybackContext = createContext<PlayerPlaybackContextType | undefined>(undefined);
 const PlayerActionsContext = createContext<PlayerActionsContextType | undefined>(undefined);
 
-function computeSetupStatus(): SetupStatus {
-    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-    const provider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER) as AIProvider) || DEFAULTS.AI_PROVIDER;
-    const hasAiKey = provider === 'gemini'
-        ? !!getStorageItem(STORAGE_KEYS.GEMINI_API_KEY)
-        : !!getStorageItem(STORAGE_KEYS.OPENAI_API_KEY);
-    return { hasClientId: !!clientId, hasAiKey };
+export function resolveAIConfigFromStorage(): ResolvedAIConfig | null {
+    const rawProvider = getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '').trim();
+    const openaiKey = getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '').trim();
+    const openaiModel = getStorageItem(STORAGE_KEYS.OPENAI_MODEL, '').trim() || DEFAULT_MODELS.OPENAI;
+    const geminiKey = getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '').trim();
+    const geminiModel = getStorageItem(STORAGE_KEYS.GEMINI_MODEL, '').trim() || DEFAULT_MODELS.GEMINI;
+
+    if (rawProvider === 'gemini') {
+        return geminiKey ? { provider: 'gemini', apiKey: geminiKey, model: geminiModel } : null;
+    }
+    if (rawProvider === 'openai') {
+        return openaiKey ? { provider: 'openai', apiKey: openaiKey, model: openaiModel } : null;
+    }
+    // Fallback when SELECTED_AI_PROVIDER has not been explicitly stored yet
+    if (openaiKey) {
+        return { provider: 'openai', apiKey: openaiKey, model: openaiModel };
+    }
+    if (geminiKey) {
+        return { provider: 'gemini', apiKey: geminiKey, model: geminiModel };
+    }
+    return null;
 }
 
-function applyStoredConfigToDJ(dj: DJCore) {
-    const openaiKey = getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '');
-    const openaiModel = getStorageItem(STORAGE_KEYS.OPENAI_MODEL, DEFAULT_MODELS.OPENAI);
-    const geminiKey = getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '');
-    const geminiModel = getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI);
-    const selectedProvider = (getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider) || DEFAULTS.AI_PROVIDER;
+export function computeSetupStatus(): SetupStatus {
+    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
+    const aiConfig = resolveAIConfigFromStorage();
+    return { hasClientId: Boolean(clientId), hasAiKey: Boolean(aiConfig) };
+}
 
-    if (selectedProvider === 'gemini' && geminiKey) {
-        dj.initAI('gemini', geminiKey, geminiModel);
-    } else if (selectedProvider === 'openai' && openaiKey) {
-        dj.initAI('openai', openaiKey, openaiModel);
-    } else if (openaiKey) {
-        dj.initAI('openai', openaiKey, openaiModel);
-    } else if (geminiKey) {
-        dj.initAI('gemini', geminiKey, geminiModel);
+export function shouldShowOnboarding(params: {
+    setupStatus: SetupStatus;
+    authorized: boolean;
+    isAuthPending: boolean;
+}): boolean {
+    if (!params.setupStatus.hasClientId || !params.setupStatus.hasAiKey) {
+        return true;
+    }
+    if (params.authorized || params.isAuthPending) {
+        return false;
+    }
+    return true;
+}
+
+export function applyStoredConfigToDJ(dj: DJCore) {
+    const aiConfig = resolveAIConfigFromStorage();
+    if (aiConfig) {
+        dj.initAI(aiConfig.provider, aiConfig.apiKey, aiConfig.model);
+    } else {
+        dj.clearAI();
     }
 
     const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
@@ -173,6 +205,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [error, setError] = useState<string | null>(null);
 
     const djRef = useRef<DJCore | null>(null);
+    const detachDJSubscriptionsRef = useRef<(() => void) | null>(null);
     const convergenceRef = useRef<PlaybackConvergenceController>(new PlaybackConvergenceController());
     const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
     const lastTrackUriRef = useRef<string | null>(currentTrack?.uri || null);
@@ -238,13 +271,38 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setDevices(prev => (isSameDeviceList(prev, nextDevices) ? prev : nextDevices));
     }, []);
 
+    const resetLoggedOutState = useCallback((nextSetup: SetupStatus, nextStatus: string) => {
+        convergenceRef.current.cancel();
+        if (detachDJSubscriptionsRef.current) {
+            detachDJSubscriptionsRef.current();
+            detachDJSubscriptionsRef.current = null;
+        }
+        djRef.current = null;
+        setDjCore(null);
+        updateIsPlaying(false);
+        updateDeviceName('');
+        updateDevicesState([]);
+        updateQueueState([]);
+        currentTrackRef.current = null;
+        setCurrentTrack(null);
+        lastTrackUriRef.current = null;
+        setAuthorized(false);
+        setStatus(nextStatus);
+        setNeedsOnboarding(shouldShowOnboarding({
+            setupStatus: nextSetup,
+            authorized: false,
+            isAuthPending: false,
+        }));
+    }, [updateIsPlaying, updateDeviceName, updateDevicesState, updateQueueState]);
+
     const handleAuthExpired = useCallback(() => {
         if (isRefreshingTokenRef.current) return;
-        const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+        const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
+        const nextSetup = computeSetupStatus();
+        setSetupStatus(nextSetup);
         if (!clientId) {
             SpotifyAuth.logout();
-            setAuthorized(false);
-            setStatus('connect_needed');
+            resetLoggedOutState(nextSetup, 'connect_needed');
             return;
         }
         isRefreshingTokenRef.current = true;
@@ -254,14 +312,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     djRef.current?.updateAccessToken(refreshed);
                 } else {
                     SpotifyAuth.logout();
-                    setAuthorized(false);
-                    setStatus('connect_needed');
+                    resetLoggedOutState(computeSetupStatus(), 'connect_needed');
                 }
             })
             .finally(() => {
                 isRefreshingTokenRef.current = false;
             });
-    }, []);
+    }, [resetLoggedOutState]);
 
     const syncUIState = useCallback(async (options?: { forceAll?: boolean }) => {
         if (!djRef.current) return null;
@@ -413,45 +470,172 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
     }, [updateQueueState, updateDevicesState, updateDeviceName, updateIsPlaying, persistPlayingTrack]);
 
+    const attachDJInstance = useCallback((token: string) => {
+        if (djRef.current) {
+            djRef.current.updateAccessToken(token);
+            applyStoredConfigToDJ(djRef.current);
+            return;
+        }
+
+        if (detachDJSubscriptionsRef.current) {
+            detachDJSubscriptionsRef.current();
+            detachDJSubscriptionsRef.current = null;
+        }
+
+        const dj = new DJCore(token);
+        applyStoredConfigToDJ(dj);
+
+        djRef.current = dj;
+        setDjCore(dj);
+        const initialSnapshot = dj.getStateSnapshot();
+        setScheduleState(initialSnapshot.schedule);
+        setCurrentQuery(initialSnapshot.currentQuery);
+        setCurrentThought(initialSnapshot.currentThought);
+
+        dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
+            setError(prev => (prev === errMsg ? prev : errMsg));
+            if (errInfo?.category === 'auth_expired') {
+                handleAuthExpired();
+            }
+        });
+        const unsubscribeState = dj.subscribe((snapshot) => {
+            setStatus(snapshot.status);
+            setCurrentQuery(snapshot.currentQuery);
+            setCurrentThought(snapshot.currentThought);
+            setScheduleState(prev => (prev === snapshot.schedule ? prev : snapshot.schedule));
+        });
+        const unsubscribeLogs = dj.subscribeLogs((latestLogs) => {
+            setDjLogs(prev =>
+                prev.length === latestLogs.length && prev[0] === latestLogs[0]
+                    ? prev
+                    : latestLogs
+            );
+        });
+
+        dj.setOnTracksPlayedCallback((tracks) => {
+            if (tracks.length > 0) {
+                const first = tracks[0];
+                currentTrackRef.current = first;
+                setCurrentTrack(first);
+                persistPlayingTrack(first, false);
+                updateQueueState(tracks.slice(1, 21));
+                updateIsPlaying(true);
+                lastTrackUriRef.current = first.uri;
+                lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
+                lastSyncedSessionVersionRef.current = dj.getSessionCache().getSessionVersion();
+                void convergenceRef.current.syncUntilConverged(
+                    {
+                        expectedTrackUri: first.uri,
+                        expectedTrackKey: generateTrackKey(first),
+                        expectedIsPlaying: true,
+                    },
+                    syncUIState
+                );
+            }
+        });
+
+        const savedSessionTracks = dj.getSessionCache().getSessionTracks();
+        if (savedSessionTracks.length > 0) {
+            const startIdx = dj.getSessionCache().getSessionStartIndex();
+            updateQueueState(savedSessionTracks.slice(startIdx + 1, startIdx + 21));
+        }
+
+        detachDJSubscriptionsRef.current = () => {
+            unsubscribeState();
+            unsubscribeLogs();
+        };
+    }, [handleAuthExpired, persistPlayingTrack, syncUIState, updateIsPlaying, updateQueueState]);
+
     const reloadConfig = useCallback(() => {
-        const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
-        setNeedsOnboarding(!storedClientId);
-        setSetupStatus(computeSetupStatus());
+        const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
+        const nextSetup = computeSetupStatus();
+        setSetupStatus(nextSetup);
 
         if (!storedClientId) {
-            setAuthorized(false);
-            setStatus('Please configure settings first.');
+            resetLoggedOutState(nextSetup, 'Please configure settings first.');
             return;
         }
 
         const isAuth = SpotifyAuth.isAuthenticated();
-        if (!isAuth) {
-            setAuthorized(false);
-            setStatus('connect_needed');
+        const token = SpotifyAuth.getAccessToken();
+        if (isAuth && token) {
+            setAuthorized(true);
+            setNeedsOnboarding(shouldShowOnboarding({
+                setupStatus: nextSetup,
+                authorized: true,
+                isAuthPending: false,
+            }));
+            attachDJInstance(token);
+            setStatus(prev => (prev === 'connect_needed' || prev === 'Please configure settings first.' ? 'Ready' : prev));
             return;
         }
 
-        if (djRef.current) {
-            applyStoredConfigToDJ(djRef.current);
+        const hasRefreshToken = Boolean(getStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, '').trim());
+        if (hasRefreshToken) {
+            setNeedsOnboarding(shouldShowOnboarding({
+                setupStatus: nextSetup,
+                authorized: false,
+                isAuthPending: true,
+            }));
+            void SpotifyAuth.refreshToken(storedClientId).then((refreshed) => {
+                const latestSetup = computeSetupStatus();
+                setSetupStatus(latestSetup);
+                if (refreshed) {
+                    setAuthorized(true);
+                    setNeedsOnboarding(shouldShowOnboarding({
+                        setupStatus: latestSetup,
+                        authorized: true,
+                        isAuthPending: false,
+                    }));
+                    attachDJInstance(refreshed);
+                    setStatus(prev => (prev === 'connect_needed' || prev === 'Please configure settings first.' ? 'Ready' : prev));
+                } else {
+                    SpotifyAuth.logout();
+                    resetLoggedOutState(latestSetup, 'connect_needed');
+                }
+            });
+            return;
         }
-    }, []);
+
+        resetLoggedOutState(nextSetup, 'connect_needed');
+    }, [attachDJInstance, resetLoggedOutState]);
 
     // Initialize Auth & DJCore
     useEffect(() => {
         let isCancelled = false;
-        let unsubscribeLogs: (() => void) | null = null;
-        let unsubscribeState: (() => void) | null = null;
         const convergenceController = convergenceRef.current;
 
         const init = async () => {
             try {
-                setNeedsOnboarding(!getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID));
-                setSetupStatus(computeSetupStatus());
+                const initialSetup = computeSetupStatus();
+                setSetupStatus(initialSetup);
 
                 const params = new URLSearchParams(window.location.search);
                 const code = params.get('code');
                 const returnedState = params.get('state');
-                const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+                const oauthError = params.get('error');
+                const storedClientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
+
+                if (oauthError) {
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    removeStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER);
+                    removeStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE);
+                    const oauthMsg = oauthError === 'access_denied'
+                        ? 'Spotify authorization was cancelled. Please click Login to connect your account. (Spotifyの認証がキャンセルされました)'
+                        : `Spotify authorization failed: ${oauthError} (Spotify認証エラー: ${oauthError})`;
+                    setError(oauthMsg);
+                }
+
+                const hasPendingAuth = Boolean(
+                    storedClientId &&
+                    !oauthError &&
+                    (code || SpotifyAuth.isAuthenticated() || getStorageItem(STORAGE_KEYS.SPOTIFY_REFRESH_TOKEN, '').trim())
+                );
+                setNeedsOnboarding(shouldShowOnboarding({
+                    setupStatus: initialSetup,
+                    authorized: SpotifyAuth.isAuthenticated(),
+                    isAuthPending: hasPendingAuth,
+                }));
 
                 if (!storedClientId) {
                     setStatus('Please configure settings first.');
@@ -464,6 +648,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     setStatus('Authenticating...');
                     token = await SpotifyAuth.handleCallback(storedClientId, code, returnedState);
                     window.history.replaceState({}, document.title, window.location.pathname);
+                    if (!token) {
+                        const callbackErr = SpotifyAuth.getLastError();
+                        if (callbackErr) {
+                            setError(callbackErr);
+                        }
+                    }
                 }
 
                 if (isCancelled) return;
@@ -476,7 +666,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                         console.log("Token refreshed successfully");
                     } else {
                         SpotifyAuth.logout();
+                        const latestSetup = computeSetupStatus();
+                        setSetupStatus(latestSetup);
                         setAuthorized(false);
+                        setNeedsOnboarding(shouldShowOnboarding({
+                            setupStatus: latestSetup,
+                            authorized: false,
+                            isAuthPending: false,
+                        }));
                         setStatus('connect_needed');
                         return;
                     }
@@ -484,73 +681,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
                 if (isCancelled) return;
 
+                const finalSetup = computeSetupStatus();
+                setSetupStatus(finalSetup);
                 setAuthorized(true);
+                setNeedsOnboarding(shouldShowOnboarding({
+                    setupStatus: finalSetup,
+                    authorized: true,
+                    isAuthPending: false,
+                }));
                 setStatus('Ready');
 
-                if (!djRef.current) {
-                    const dj = new DJCore(token);
-                    applyStoredConfigToDJ(dj);
-
-                    djRef.current = dj;
-                    setDjCore(dj);
-                    const initialSnapshot = dj.getStateSnapshot();
-                    setScheduleState(initialSnapshot.schedule);
-                    setCurrentQuery(initialSnapshot.currentQuery);
-                    setCurrentThought(initialSnapshot.currentThought);
-
-                    dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
-                        setError(prev => (prev === errMsg ? prev : errMsg));
-                        if (errInfo?.category === 'auth_expired') {
-                            handleAuthExpired();
-                        }
-                    });
-                    unsubscribeState = dj.subscribe((snapshot) => {
-                        setStatus(snapshot.status);
-                        setCurrentQuery(snapshot.currentQuery);
-                        setCurrentThought(snapshot.currentThought);
-                        setScheduleState(prev => (prev === snapshot.schedule ? prev : snapshot.schedule));
-                    });
-                    unsubscribeLogs = dj.subscribeLogs((latestLogs) => {
-                        setDjLogs(prev =>
-                            prev.length === latestLogs.length && prev[0] === latestLogs[0]
-                                ? prev
-                                : latestLogs
-                        );
-                    });
-
-                    dj.setOnTracksPlayedCallback((tracks) => {
-                        if (tracks.length > 0) {
-                            const first = tracks[0];
-                            currentTrackRef.current = first;
-                            setCurrentTrack(first);
-                            persistPlayingTrack(first, false);
-                            updateQueueState(tracks.slice(1, 21));
-                            updateIsPlaying(true);
-                            lastTrackUriRef.current = first.uri;
-                            lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
-                            lastSyncedSessionVersionRef.current = dj.getSessionCache().getSessionVersion();
-                            void convergenceRef.current.syncUntilConverged(
-                                {
-                                    expectedTrackUri: first.uri,
-                                    expectedTrackKey: generateTrackKey(first),
-                                    expectedIsPlaying: true,
-                                },
-                                syncUIState
-                            );
-                        }
-                    });
-
-                    const savedSessionTracks = dj.getSessionCache().getSessionTracks();
-                    if (savedSessionTracks.length > 0) {
-                        const startIdx = dj.getSessionCache().getSessionStartIndex();
-                        updateQueueState(savedSessionTracks.slice(startIdx + 1, startIdx + 21));
-                    }
-                }
+                attachDJInstance(token);
             } catch (initError: unknown) {
                 if (isCancelled) return;
                 console.error("Fatal initialization error:", initError);
                 const msg = initError instanceof Error ? initError.message : String(initError);
                 setStatus(`Init Error: ${msg}`);
+                setError(msg);
             }
         };
 
@@ -559,14 +706,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         return () => {
             isCancelled = true;
             convergenceController.cancel();
-            if (unsubscribeState) {
-                unsubscribeState();
-            }
-            if (unsubscribeLogs) {
-                unsubscribeLogs();
+            if (detachDJSubscriptionsRef.current) {
+                detachDJSubscriptionsRef.current();
+                detachDJSubscriptionsRef.current = null;
             }
         };
-    }, [syncUIState, updateQueueState, updateIsPlaying, persistPlayingTrack, handleAuthExpired]);
+    }, [attachDJInstance]);
 
     const handleLoopError = useCallback((msg: string) => {
         setError(prev => (prev === msg ? prev : msg));
@@ -685,15 +830,45 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
     }, [startBackgroundKeepAlive, syncUIState, updateIsPlaying]);
 
+    const handlePlayQueueIndex = useCallback(async (index: number) => {
+        startBackgroundKeepAlive();
+        if (!djRef.current) return;
+        const currentQueue = queueRef.current;
+        if (index < 0 || index >= currentQueue.length) return;
+        try {
+            await djRef.current.playFromQueueIndex(index, currentQueue);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setError(prev => (prev === msg ? prev : msg));
+        }
+    }, [startBackgroundKeepAlive]);
+
     const handleRemoveScheduleItem = useCallback((index: number) => {
         if (djRef.current) {
+            const prevQuery = djRef.current.getDJStatus().currentQuery;
             const newSchedule = djRef.current.removeScheduleItem(index, true);
             setScheduleState([...newSchedule]);
+            if (newSchedule.length === 0) {
+                setCurrentQuery(null);
+                setCurrentThought(null);
+            } else {
+                const nextEffective = djRef.current.getEffectiveItemForPlayback();
+                setCurrentThought(nextEffective?.thought || null);
+                if (prevQuery !== null) {
+                    void djRef.current.processDJLoop(true, false).catch((err) => {
+                        console.warn('Schedule transition after item removal failed:', err);
+                    });
+                }
+            }
         } else {
             setScheduleState(prev => {
                 if (index < 0 || index >= prev.length) return prev;
                 const next = prev.filter((_, i) => i !== index);
                 setStoredJSON(STORAGE_KEYS.DJ_SCHEDULE, next);
+                if (next.length === 0) {
+                    setCurrentQuery(null);
+                    setCurrentThought(null);
+                }
                 return next;
             });
         }
@@ -771,6 +946,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         handleNext,
         handlePrev,
         handleTogglePlay,
+        handlePlayQueueIndex,
         handleRemoveScheduleItem,
         clearError,
         startBackgroundKeepAlive,
@@ -787,6 +963,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         handleNext,
         handlePrev,
         handleTogglePlay,
+        handlePlayQueueIndex,
         handleRemoveScheduleItem,
         clearError,
         startBackgroundKeepAlive,

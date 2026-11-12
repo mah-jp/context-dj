@@ -64,7 +64,11 @@ Hotkeys inside TUI (when input is empty):
         const utilModule = await import('node:util');
         const { getConfigDir } = await import('./config');
 
-        const logFile = pathModule.join(getConfigDir(), 'debug.log');
+        const configDir = getConfigDir();
+        try {
+            fsModule.mkdirSync(configDir, { recursive: true });
+        } catch {}
+        const logFile = pathModule.join(configDir, 'debug.log');
 
         const appendLog = (level: string, logArgs: unknown[]) => {
             const text = logArgs.map(a => (typeof a === 'string' ? a : utilModule.inspect(a))).join(' ');

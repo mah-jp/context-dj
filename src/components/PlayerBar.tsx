@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { usePlayerPlayback, usePlayerActions } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
 import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor } from 'lucide-react';
@@ -44,6 +44,27 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
     // Local UI state
     const [showCover, setShowCover] = useState(false);
     const [showDevices, setShowDevices] = useState(false);
+    const deviceMenuRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!showDevices) return;
+        const handleOutsideClick = (e: MouseEvent) => {
+            if (deviceMenuRef.current && !deviceMenuRef.current.contains(e.target as Node)) {
+                setShowDevices(false);
+            }
+        };
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                setShowDevices(false);
+            }
+        };
+        document.addEventListener('mousedown', handleOutsideClick);
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', handleOutsideClick);
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [showDevices]);
 
     const handleShare = async () => {
         if (!currentTrack) return;
@@ -136,22 +157,32 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                 {currentTrack ? (
                     <>
                         <div
-                            style={{ position: 'relative', cursor: 'zoom-in' }}
-                            onMouseEnter={() => setShowCover(true)}
+                            style={{ position: 'relative', cursor: currentTrack.album?.images?.[0]?.url ? 'zoom-in' : 'default' }}
+                            onMouseEnter={() => {
+                                if (currentTrack.album?.images?.[0]?.url) setShowCover(true);
+                            }}
                             onMouseLeave={() => setShowCover(false)}
                         >
-                            <img
-                                src={currentTrack.album?.images?.[0]?.url || ''}
-                                className={styles.nowPlayingImg}
-                                alt="Now Playing"
-                            />
+                            {currentTrack.album?.images?.[0]?.url ? (
+                                <img
+                                    src={currentTrack.album.images[0].url}
+                                    className={styles.nowPlayingImg}
+                                    alt="Now Playing"
+                                />
+                            ) : (
+                                <div className={styles.nowPlayingImg} aria-hidden="true" />
+                            )}
                         </div>
                         <div className={styles.nowPlayingText}>
                             {/* Line 1: Track Name + Equalizer */}
                             <div className={styles.nowPlayingTitle}>
-                                <a href={currentTrack.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }} className={styles.hoverUnderline}>
-                                    {currentTrack.name}
-                                </a>
+                                {currentTrack.external_urls?.spotify ? (
+                                    <a href={currentTrack.external_urls.spotify} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }} className={styles.hoverUnderline}>
+                                        {currentTrack.name}
+                                    </a>
+                                ) : (
+                                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>{currentTrack.name}</span>
+                                )}
                                 {isPlaying && (
                                     <div className={styles.equalizer}>
                                         <div className={styles.bar}></div>
@@ -163,9 +194,15 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
 
                             {/* Line 2: Artist + Vibe Badge */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'nowrap', marginTop: '2px', fontSize: '0.85rem', overflow: 'hidden' }}>
-                                <a href={currentTrack.artists?.[0]?.external_urls?.spotify} target="_blank" rel="noopener noreferrer" style={{ color: '#aaa', textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 1, minWidth: 0 }} className={styles.hoverUnderline}>
-                                    {(currentTrack.artists || []).map(a => a.name).join(', ')}
-                                </a>
+                                {currentTrack.artists?.[0]?.external_urls?.spotify ? (
+                                    <a href={currentTrack.artists[0].external_urls.spotify} target="_blank" rel="noopener noreferrer" style={{ color: '#aaa', textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 1, minWidth: 0 }} className={styles.hoverUnderline}>
+                                        {(currentTrack.artists || []).map(a => a.name).join(', ')}
+                                    </a>
+                                ) : (
+                                    <span style={{ color: '#aaa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 1, minWidth: 0 }}>
+                                        {(currentTrack.artists || []).map(a => a.name).join(', ')}
+                                    </span>
+                                )}
                                 {currentTrack.vibeTag && (
                                     <span
                                         className={styles.vibeBadge}
@@ -189,7 +226,7 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
             {/* Center: Controls */}
             <div className={styles.playerControls}>
                 <div className={styles.controlButtons}>
-                    <button className={styles.controlBtn} onClick={handlePrev} title="Previous" aria-label="Previous Track" style={{ color: 'var(--primary)' }}>
+                    <button className={styles.controlBtn} onClick={handlePrev} disabled={!authorized} title="Previous" aria-label="Previous Track" style={{ color: 'var(--primary)' }}>
                         <SkipBack size={20} fill="currentColor" />
                     </button>
 
@@ -203,7 +240,7 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                         </button>
                     )}
 
-                    <button className={styles.controlBtn} onClick={handleNext} title="Next" aria-label="Next Track" style={{ color: 'var(--primary)' }}>
+                    <button className={styles.controlBtn} onClick={handleNext} disabled={!authorized} title="Next" aria-label="Next Track" style={{ color: 'var(--primary)' }}>
                         <SkipForward size={20} fill="currentColor" />
                     </button>
                 </div>
@@ -236,10 +273,12 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                     </button>
                 )}
 
-                <div style={{ position: 'relative' }}>
+                <div ref={deviceMenuRef} style={{ position: 'relative' }}>
                     <button
                         className={styles.deviceLabel}
+                        disabled={!authorized}
                         onClick={() => {
+                            if (!authorized) return;
                             setShowDevices(!showDevices);
                             if (!showDevices) refreshDevices();
                         }}

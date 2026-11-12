@@ -12,12 +12,17 @@ interface ScheduleSidebarProps {
 
 export default function ScheduleSidebar({ schedule, currentQuery, onRemoveItem, onRecallItem }: ScheduleSidebarProps) {
     const effectiveItem = resolveEffectiveScheduleItem(schedule);
+    const hasMatchingCurrentQuery = Boolean(
+        currentQuery && schedule.some(s => getScheduleItemSignature(s) === currentQuery)
+    );
 
     return (
         <div className={styles.sidebar}>
             {schedule.length > 0 ? schedule.map((item, i) => {
                 const signature = getScheduleItemSignature(item);
-                const isActive = item === effectiveItem && (currentQuery === signature || isScheduleItemActive(item));
+                const isActive = hasMatchingCurrentQuery
+                    ? currentQuery === signature && (item === effectiveItem || isScheduleItemActive(item))
+                    : item === effectiveItem;
                 const past = !isActive && isScheduleItemPastInTimeline(schedule, i);
 
                 return (

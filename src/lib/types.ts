@@ -44,6 +44,7 @@ export interface SearchPipelineContext {
     userRequest?: string;
     thought?: string;
     anchorTracks?: string[];
+    silent?: boolean;
 }
 
 // Spotify Queue API Types (/v1/me/player/queue)

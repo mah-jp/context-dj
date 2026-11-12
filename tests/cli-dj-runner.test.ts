@@ -136,4 +136,58 @@ describe('CLI DJRunner', () => {
         await runner.pollPlayback();
         assert.strictEqual(runner.getState().currentTrack?.uri, 'spotify:track:tB');
     });
+
+    it('surfaces Spotify API errors in status and preserves onTracksPlayed convergence target during resume()', async () => {
+        const runner = new (DJRunner as unknown as { new(cfg: CLIConfig, token: string): DJRunner })(
+            { ...baseConfig },
+            'valid_token'
+        );
+
+        const internal = runner as unknown as {
+            djCore: DJCore;
+            convergence: { syncUntilConverged: (opts: Record<string, unknown>) => Promise<void> };
+        };
+        type DJCore = {
+            resume: () => Promise<{ ok: boolean }>;
+            getLastPlayTime: () => number;
+        };
+
+        // 1. Triggering a Spotify API error inside djCore updates runner status with concrete message
+        const coreInternal = (runner as unknown as { djCore: { handleSpotifyApiError: (e: unknown) => void } }).djCore;
+        coreInternal.handleSpotifyApiError({
+            status: 403,
+            category: 'premium_required',
+            operation: 'play',
+            message: 'Spotify Premium is required for playback control.',
+        });
+        assert.strictEqual(runner.getState().status, '⚠️ Spotify Premium is required for playback control.');
+
+        // 2. When resume() starts session tracks (updating lastPlayTime and firing onTracksPlayed),
+        // DJRunner.resume() must NOT overwrite onTracksPlayed's expectedTrackUri convergence target
+        const syncTargets: Record<string, unknown>[] = [];
+        internal.convergence.syncUntilConverged = async (opts) => {
+            syncTargets.push(opts);
+        };
+
+        let mockPlayTime = 1000;
+        internal.djCore.getLastPlayTime = () => mockPlayTime;
+        const onTracksPlayedCb = (runner as unknown as { djCore: { onTracksPlayed?: (tracks: Track[]) => void } }).djCore.onTracksPlayed;
+        internal.djCore.resume = async () => {
+            mockPlayTime = 2000;
+            onTracksPlayedCb?.([
+                {
+                    id: 'session_1',
+                    uri: 'spotify:track:session_1',
+                    name: 'Session Track 1',
+                    type: 'track',
+                    artists: [{ name: 'Artist' }],
+                } as unknown as Track,
+            ]);
+            return { ok: true };
+        };
+
+        await runner.resume();
+        assert.strictEqual(syncTargets.length, 1);
+        assert.strictEqual(syncTargets[0].expectedTrackUri, 'spotify:track:session_1');
+    });
 });

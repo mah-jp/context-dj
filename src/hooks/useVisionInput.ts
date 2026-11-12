@@ -17,10 +17,20 @@ export function useVisionInput({ djCore, onPromptGenerated, setStatus, setToast 
 
     const handleImageUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
-        if (!file || !djCore) return;
+        if (!file) return;
+
+        if (!djCore) {
+            e.target.value = '';
+            setToast({
+                msg: 'Please log in to Spotify and configure AI settings first. (先にSpotifyログインとAI設定を完了してください)',
+                type: 'error',
+            });
+            return;
+        }
 
         // Verify format
         if (!file.type.startsWith('image/')) {
+            e.target.value = '';
             setToast({ msg: 'Please select an image file. (画像ファイルを選択してください)', type: 'error' });
             return;
         }
@@ -33,7 +43,7 @@ export function useVisionInput({ djCore, onPromptGenerated, setStatus, setToast 
                 const base64Data = resultStr.includes(',') ? resultStr.split(',')[1] : '';
                 try {
                     if (!base64Data) {
-                        throw new Error('Invalid image data');
+                        throw new Error('Invalid image data (画像データが無効です)');
                     }
                     const generatedPrompt = await djCore.analyzeImage(base64Data, file.type);
                     onPromptGenerated(generatedPrompt);
@@ -57,8 +67,9 @@ export function useVisionInput({ djCore, onPromptGenerated, setStatus, setToast 
             reader.readAsDataURL(file);
         } catch (err: unknown) {
             console.error(err);
-            setToast({ msg: 'Failed to read image file.', type: 'error' });
+            setToast({ msg: 'Failed to read image file. (画像の読み込みに失敗しました)', type: 'error' });
             setStatus('Ready');
+            if (fileInputRef.current) fileInputRef.current.value = '';
         }
     }, [djCore, onPromptGenerated, setStatus, setToast]);
 

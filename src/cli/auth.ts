@@ -26,22 +26,38 @@ function generateCodeChallenge(verifier: string): string {
         .digest('base64url');
 }
 
-export function extractCodeFromInput(input: string): string {
+export function extractCodeFromInput(input: string, expectedState?: string): string {
     const trimmed = input.trim();
-    if (!trimmed.includes('?') && !trimmed.includes('&') && !trimmed.includes('=')) {
+    if (!trimmed) return '';
+
+    const looksLikeUrl = /^https?:\/\//i.test(trimmed);
+    if (!looksLikeUrl && !trimmed.includes('?') && !trimmed.includes('&') && !trimmed.includes('=')) {
         return trimmed;
     }
     try {
-        // If user pasted a full URL
-        const parsedUrl = new URL(trimmed.startsWith('http') ? trimmed : `http://${trimmed}`);
+        // If user pasted a full URL or query string
+        const parsedUrl = new URL(looksLikeUrl ? trimmed : `http://${trimmed}`);
+        const oauthError = parsedUrl.searchParams.get('error');
+        if (oauthError) {
+            throw new Error(`Spotify authorization failed: ${oauthError}`);
+        }
+        const returnedState = parsedUrl.searchParams.get('state');
+        if (expectedState && (looksLikeUrl ? returnedState !== expectedState : (returnedState !== null && returnedState !== expectedState))) {
+            throw new Error('Spotify OAuth state mismatch. Please restart setup and paste the latest callback URL.');
+        }
         const code = parsedUrl.searchParams.get('code');
         if (code) return code;
-    } catch {
+        if (looksLikeUrl) return '';
+    } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Spotify ')) {
+            throw err;
+        }
         // Fallback regex match for code=...
         const match = trimmed.match(/[?&]code=([^&\s]+)/);
         if (match && match[1]) {
             return decodeURIComponent(match[1]);
         }
+        if (looksLikeUrl) return '';
     }
     return trimmed;
 }
@@ -57,6 +73,19 @@ function promptLine(promptText: string): Promise<string> {
             resolve(answer);
         });
     });
+}
+
+function formatSpotifyTokenError(prefix: string, status: number, errorText: string): string {
+    let detail = errorText.trim();
+    try {
+        const parsed = JSON.parse(errorText) as { error?: string; error_description?: string };
+        if (parsed.error_description || parsed.error) {
+            detail = [parsed.error, parsed.error_description].filter(Boolean).join(': ');
+        }
+    } catch {
+        // Keep raw text when response body is not JSON
+    }
+    return `${prefix} (HTTP ${status}${detail ? ` - ${detail}` : ''})`;
 }
 
 /**
@@ -90,7 +119,7 @@ export async function runTerminalAuth(clientId: string, redirectUri: string = DE
     console.log('4. Copy the ENTIRE redirected URL (or just the code value) from your address bar.\n');
 
     const userInput = await promptLine('Paste redirected URL or code here: ');
-    const code = extractCodeFromInput(userInput);
+    const code = extractCodeFromInput(userInput, state);
 
     if (!code) {
         throw new Error('No authorization code provided. Authorization aborted.');
@@ -116,7 +145,7 @@ export async function runTerminalAuth(clientId: string, redirectUri: string = DE
 
     if (!res.ok) {
         const errorText = await res.text();
-        throw new Error(`Spotify token exchange failed (${res.status}): ${errorText}`);
+        throw new Error(formatSpotifyTokenError('Spotify token exchange failed', res.status, errorText));
     }
 
     const data = await res.json() as {
@@ -171,7 +200,7 @@ export async function getValidSpotifyToken(config: CLIConfig): Promise<string> {
 
     if (!res.ok) {
         const errorText = await res.text();
-        throw new Error(`Failed to refresh Spotify access token (${res.status}): ${errorText}`);
+        throw new Error(formatSpotifyTokenError('Failed to refresh Spotify access token', res.status, errorText));
     }
 
     const data = await res.json() as {

@@ -36,6 +36,14 @@ describe('dj-utils', () => {
             assert.strictEqual(normalizeTimeString('2:15 PM'), '14:15');
             assert.strictEqual(normalizeTimeString(''), '00:00');
         });
+
+        it('parses full-width digits/colons and colon-less 3/4-digit times', () => {
+            assert.strictEqual(parseTimeToMinutes('２３：３０'), 23 * 60 + 30);
+            assert.strictEqual(normalizeTimeString('２３：３０'), '23:30');
+            assert.strictEqual(normalizeTimeString('0930'), '09:30');
+            assert.strictEqual(normalizeTimeString('930'), '09:30');
+            assert.strictEqual(normalizeTimeString('2300'), '23:00');
+        });
     });
     describe('normalizeTrackName', () => {
         it('should remove parentheses content (half-width and full-width)', () => {

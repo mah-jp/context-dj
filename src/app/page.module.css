@@ -100,7 +100,6 @@
   background: transparent;
   border: none;
   color: var(--text-base);
-  color: var(--text-base);
   font-size: 0.875rem;
   /* Standardize text-sm */
   outline: none;
@@ -143,21 +142,16 @@
   padding: 8px;
 }
 
-.sendBtn,
-.iconBtn {
-  color: var(--accent);
-}
-
-.sendBtn:hover,
-
-.sendBtn {
-  color: var(--accent);
-}
-
-.sendBtn:hover,
-.iconBtn:hover {
+.sendBtn:not(:disabled):hover,
+.iconBtn:not(:disabled):hover {
   color: var(--text-base);
   background-color: rgba(255, 255, 255, 0.1);
+}
+
+.sendBtn:disabled,
+.iconBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .settingsLink {
@@ -264,6 +258,8 @@
   border-radius: 4px;
   object-fit: cover;
   margin-right: 16px;
+  background-color: #282828;
+  flex-shrink: 0;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
@@ -502,13 +498,18 @@
 }
 
 @media (hover: hover) {
-  .controlBtn:hover {
+  .controlBtn:not(:disabled):hover {
     color: var(--text-base);
   }
 }
 
-.controlBtn:active {
+.controlBtn:not(:disabled):active {
   transform: scale(0.95);
+}
+
+.controlBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .playPauseBtn {
@@ -520,12 +521,12 @@
   transition: transform 0.1s, scale 0.1s;
 }
 
-.playPauseBtn:hover {
+.playPauseBtn:not(:disabled):hover {
   transform: scale(1.05);
   color: #000;
 }
 
-.playPauseBtn:active {
+.playPauseBtn:not(:disabled):active {
   transform: scale(0.95);
 }
 
@@ -542,6 +543,7 @@
 .deviceLabel {
   background: transparent;
   border: none;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -550,11 +552,16 @@
   font-size: 0.75rem;
   padding: 6px 10px;
   border-radius: 18px;
-  transition: background-color 0.2s;
+  transition: background-color 0.2s, opacity 0.2s;
 }
 
-.deviceLabel:hover {
+.deviceLabel:not(:disabled):hover {
   background-color: rgba(255, 255, 255, 0.1);
+}
+
+.deviceLabel:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 /* Schedule Items in Sidebar */
@@ -600,6 +607,33 @@
   animation: spin 1s linear infinite;
 }
 
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes pulseMic {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.55;
+    transform: scale(1.12);
+  }
+}
+
+.pulse {
+  animation: pulseMic 1.2s ease-in-out infinite;
+}
+
 /* Equalizer Animation */
 @keyframes equalize {
   0% {
@@ -618,8 +652,6 @@
 .equalizer {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  height: 12px;
   gap: 2px;
   height: 12px;
   margin-left: 6px;
@@ -795,6 +827,13 @@
   .onboardingDescription {
     font-size: 0.85rem;
   }
+
+  .toast {
+    bottom: 125px;
+    padding: 10px 16px;
+    border-radius: 16px;
+    font-size: 0.82rem;
+  }
 }
 
 /* Onboarding Container Adjustments */
@@ -939,16 +978,20 @@
   bottom: 100px;
   left: 50%;
   transform: translateX(-50%);
+  max-width: min(92vw, 640px);
+  width: max-content;
   background-color: #333;
   color: #fff;
   padding: 12px 24px;
   border-radius: 24px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
   font-size: 0.9rem;
+  line-height: 1.4;
   z-index: 2000;
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
   animation: fadeIn 0.3s ease-out;
 }
 
@@ -998,6 +1041,9 @@
   margin-top: 4px;
   font-size: 0.75rem;
   color: var(--accent);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   pointer-events: none;
 }

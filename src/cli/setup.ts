@@ -55,7 +55,7 @@ export async function runInteractiveSetup(): Promise<CLIConfig> {
     const aiProvider: AIProvider = providerChoice === '2' ? 'openai' : 'gemini';
     const defaultModel = aiProvider === 'openai' ? DEFAULT_MODELS.OPENAI : DEFAULT_MODELS.GEMINI;
 
-    let apiKey = currentConfig?.aiApiKey;
+    let apiKey = currentConfig?.aiProvider === aiProvider ? currentConfig?.aiApiKey : undefined;
     if (!apiKey) {
         const providerName = aiProvider === 'openai' ? 'OpenAI API Key' : 'Google Gemini API Key';
         while (!apiKey) {

@@ -31,16 +31,29 @@ export function generateTrackKey(track: Track | SpotifyApi.TrackObjectFull): str
 }
 
 /**
- * Parses time string (e.g. "14:00", "9:30", "2:00 PM", "14:00:00") into minutes from midnight (0 - 1439).
+ * Parses time string (e.g. "14:00", "9:30", "2:00 PM", "14:00:00", "2300", "２３：３０") into minutes from midnight (0 - 1439).
  */
 export function parseTimeToMinutes(timeStr: string): number {
     if (!timeStr) return 0;
-    const isPM = /pm/i.test(timeStr);
-    const isAM = /am/i.test(timeStr);
-    const clean = timeStr.replace(/[^\d:]/g, '');
-    const parts = clean.split(':').map(Number);
-    let hours = parts[0] || 0;
-    const minutes = parts[1] || 0;
+    const ascii = timeStr.replace(/[０-９：]/g, (ch) =>
+        ch === '：' ? ':' : String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
+    );
+    const isPM = /pm/i.test(ascii);
+    const isAM = /am/i.test(ascii);
+    const clean = ascii.replace(/[^\d:]/g, '');
+    if (!clean) return 0;
+
+    let hours = 0;
+    let minutes = 0;
+    if (!clean.includes(':') && clean.length >= 3) {
+        const num = Number(clean.slice(0, 4));
+        hours = Math.floor(num / 100);
+        minutes = num % 100;
+    } else {
+        const parts = clean.split(':').map(Number);
+        hours = parts[0] || 0;
+        minutes = parts[1] || 0;
+    }
     if (isPM && hours < 12) hours += 12;
     if (isAM && hours === 12) hours = 0;
     return (hours % 24) * 60 + (minutes % 60);

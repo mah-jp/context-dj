@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import styles from './page.module.css';
 import { SpotifyAuth } from '../../lib/spotify-auth';
@@ -10,6 +10,14 @@ import { getStorageItem, setStorageItem, removeStorageItem, getStoredJSON, setSt
 import { usePlayerActions } from '../../context/PlayerContext';
 import PrivacyNotice from '../../components/PrivacyNotice';
 import { ArrowLeft, Github } from 'lucide-react';
+
+const subscribeNoop = () => () => {};
+
+function getClientRedirectUri(): string {
+    const origin = window.location.origin;
+    const pathname = window.location.pathname.replace(/\/settings\/?$/, '') || '/';
+    return `${origin}${pathname}`;
+}
 
 export default function Settings() {
     const { reloadConfig } = usePlayerActions();
@@ -21,10 +29,17 @@ export default function Settings() {
     const [geminiKey, setGeminiKey] = useState(() => getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, ''));
     const [geminiModel, setGeminiModel] = useState(() => getStorageItem(STORAGE_KEYS.GEMINI_MODEL, DEFAULT_MODELS.GEMINI));
     const [aiProvider, setAiProvider] = useState<AIProvider>(() => {
-        const savedProvider = getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '') as AIProvider;
-        return savedProvider === 'gemini' ? 'gemini' : 'openai';
+        const savedProvider = getStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, '').trim();
+        if (savedProvider === 'gemini' || savedProvider === 'openai') {
+            return savedProvider;
+        }
+        const hasGemini = Boolean(getStorageItem(STORAGE_KEYS.GEMINI_API_KEY, '').trim());
+        const hasOpenAi = Boolean(getStorageItem(STORAGE_KEYS.OPENAI_API_KEY, '').trim());
+        return hasGemini && !hasOpenAi ? 'gemini' : DEFAULTS.AI_PROVIDER;
     });
     const [status, setStatus] = useState('');
+    const redirectUri = useSyncExternalStore(subscribeNoop, getClientRedirectUri, () => '');
+    const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [personalPref, setPersonalPref] = useState(() => getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, ''));
     const [prefHistory, setPrefHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, []));
     const [showPrefHistory, setShowPrefHistory] = useState(false);
@@ -40,36 +55,67 @@ export default function Settings() {
         return savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true';
     });
 
+    const showStatusMessage = (msg: string) => {
+        setStatus(msg);
+        if (statusTimerRef.current) {
+            clearTimeout(statusTimerRef.current);
+        }
+        statusTimerRef.current = setTimeout(() => {
+            setStatus('');
+            statusTimerRef.current = null;
+        }, 3000);
+    };
+
+    useEffect(() => {
+        return () => {
+            if (statusTimerRef.current) {
+                clearTimeout(statusTimerRef.current);
+            }
+        };
+    }, []);
+
     const handleSave = () => {
-        setStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, spotifyClientId);
-        setStorageItem(STORAGE_KEYS.OPENAI_API_KEY, openAiKey);
-        setStorageItem(STORAGE_KEYS.OPENAI_MODEL, openAiModel);
-        setStorageItem(STORAGE_KEYS.GEMINI_API_KEY, geminiKey);
-        setStorageItem(STORAGE_KEYS.GEMINI_MODEL, geminiModel);
+        const cleanClientId = spotifyClientId.trim();
+        const cleanOpenAiKey = openAiKey.trim();
+        const cleanOpenAiModel = openAiModel.trim() || DEFAULT_MODELS.OPENAI;
+        const cleanGeminiKey = geminiKey.trim();
+        const cleanGeminiModel = geminiModel.trim() || DEFAULT_MODELS.GEMINI;
+        const cleanPersonalPref = personalPref.trim();
+
+        setSpotifyClientId(cleanClientId);
+        setOpenAiKey(cleanOpenAiKey);
+        setOpenAiModel(cleanOpenAiModel);
+        setGeminiKey(cleanGeminiKey);
+        setGeminiModel(cleanGeminiModel);
+        setPersonalPref(cleanPersonalPref);
+
+        setStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, cleanClientId);
+        setStorageItem(STORAGE_KEYS.OPENAI_API_KEY, cleanOpenAiKey);
+        setStorageItem(STORAGE_KEYS.OPENAI_MODEL, cleanOpenAiModel);
+        setStorageItem(STORAGE_KEYS.GEMINI_API_KEY, cleanGeminiKey);
+        setStorageItem(STORAGE_KEYS.GEMINI_MODEL, cleanGeminiModel);
         setStorageItem(STORAGE_KEYS.SELECTED_AI_PROVIDER, aiProvider);
-        setStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, personalPref);
+        setStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, cleanPersonalPref);
         setStorageItem(STORAGE_KEYS.VOICE_INPUT_LANG, voiceLang);
         setStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE, String(backgroundKeepAlive));
         setStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, String(aiFilteringEnabled));
 
-        if (personalPref.trim()) {
-            const newHistory = [personalPref, ...prefHistory.filter(h => h !== personalPref)].slice(0, 10);
+        if (cleanPersonalPref) {
+            const newHistory = [cleanPersonalPref, ...prefHistory.filter(h => h !== cleanPersonalPref)].slice(0, 10);
             setPrefHistory(newHistory);
             setStoredJSON(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY, newHistory);
         }
 
         reloadConfig();
 
-        setStatus('Settings saved! (設定を保存しました)');
-        setTimeout(() => setStatus(''), 3000);
+        showStatusMessage('Settings saved! (設定を保存しました)');
     };
 
     const handleLogout = () => {
         if (confirm('Are you sure you want to log out from Spotify?\n(Spotifyからログアウトしますか？)')) {
             SpotifyAuth.logout();
             reloadConfig();
-            setStatus('Logged out from Spotify. (ログアウトしました)');
-            setTimeout(() => setStatus(''), 3000);
+            showStatusMessage('Logged out from Spotify. (ログアウトしました)');
         }
     };
 
@@ -107,8 +153,16 @@ export default function Settings() {
                         placeholder="Your Spotify App Client ID"
                     />
                     <p className={styles.description}>
-                        Required for playback. Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" className={styles.primaryLink}>developer.spotify.com</a><br />
+                        Required for playback. Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer" className={styles.primaryLink}>developer.spotify.com</a><br />
                         <span className={styles.subDescription}>音楽再生に必要です。公式サイトでアプリを作成しIDを取得してください。</span>
+                        {redirectUri && (
+                            <>
+                                <br />
+                                <span className={styles.subDescription}>
+                                    Redirect URI: <code style={{ color: 'var(--primary)', userSelect: 'all' }}>{redirectUri}</code>
+                                </span>
+                            </>
+                        )}
                     </p>
                     <button
                         onClick={handleLogout}
@@ -369,8 +423,7 @@ export default function Settings() {
                             onClick={() => {
                                 if (confirm('Are you sure you want to clear the main chat prompt history?\n(チャット履歴を削除しますか？)')) {
                                     removeStorageItem(STORAGE_KEYS.PROMPT_HISTORY);
-                                    setStatus('Chat history cleared! (チャット履歴を削除しました)');
-                                    setTimeout(() => setStatus(''), 3000);
+                                    showStatusMessage('Chat history cleared! (チャット履歴を削除しました)');
                                 }
                             }}
                             className={styles.dangerBtn}
@@ -384,8 +437,7 @@ export default function Settings() {
                                 if (confirm('Are you sure you want to clear your personal preferences history?\n(設定履歴を削除しますか？)')) {
                                     removeStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE_HISTORY);
                                     setPrefHistory([]);
-                                    setStatus('References history cleared! (設定履歴を削除しました)');
-                                    setTimeout(() => setStatus(''), 3000);
+                                    showStatusMessage('Preferences history cleared! (設定履歴を削除しました)');
                                 }
                             }}
                             className={`${styles.dangerBtn} ${styles.dangerBtnDark}`}

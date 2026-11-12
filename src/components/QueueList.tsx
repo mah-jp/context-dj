@@ -1,5 +1,4 @@
 import styles from '../app/page.module.css';
-import { DJCore } from '../lib/dj-core';
 import { Bot, AlertTriangle, Anchor } from 'lucide-react';
 import Onboarding from './Onboarding';
 import { Track } from '../lib/types';
@@ -14,7 +13,7 @@ interface QueueListProps {
     showLogs: () => void;
     queue: Track[];
     showNotes: boolean;
-    djCore: DJCore | null;
+    onSelectTrack: (index: number) => void;
 }
 
 export default function QueueList({
@@ -27,7 +26,7 @@ export default function QueueList({
     showLogs,
     queue,
     showNotes,
-    djCore
+    onSelectTrack,
 }: QueueListProps) {
     return (
         <div className={styles.queueArea}>
@@ -74,19 +73,18 @@ export default function QueueList({
                             <div
                                 key={`${track.uri || track.id || 'queue'}-${i}`}
                                 className={styles.queueItem}
-                                onClick={() => {
-                                    if (!djCore) return;
-                                    djCore.playFromQueueIndex(i, queue).catch((err) => {
-                                        console.error('Failed to play selected queue track:', err);
-                                    });
-                                }}
+                                onClick={() => onSelectTrack(i)}
                             >
                                 <div className={styles.queueIndex}>{i + 1}</div>
-                                <img
-                                    src={track.album?.images?.[0]?.url || ''}
-                                    className={styles.queueImg}
-                                    alt="art"
-                                />
+                                {track.album?.images?.[0]?.url ? (
+                                    <img
+                                        src={track.album.images[0].url}
+                                        className={styles.queueImg}
+                                        alt=""
+                                    />
+                                ) : (
+                                    <div className={styles.queueImg} aria-hidden="true" />
+                                )}
                                 <div className={styles.queueMeta}>
                                     <div className={styles.queueTitle}>
                                         <span>{track.name}</span>

@@ -57,7 +57,8 @@ export function loadConfig(): CLIConfig | null {
 }
 
 export function saveConfig(updates: Partial<CLIConfig>): CLIConfig {
-    const dir = getConfigDir();
+    const configPath = getConfigPath();
+    const dir = path.dirname(configPath);
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -73,7 +74,6 @@ export function saveConfig(updates: Partial<CLIConfig>): CLIConfig {
         ...updates
     };
 
-    const configPath = getConfigPath();
     fs.writeFileSync(configPath, JSON.stringify(nextConfig, null, 2), 'utf-8');
     return nextConfig;
 }

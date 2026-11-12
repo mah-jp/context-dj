@@ -3,6 +3,9 @@ import path from 'node:path';
 import { getConfigDir } from './config';
 
 export function getHistoryPath(): string {
+    if (process.env.CONTEXT_DJ_HISTORY) {
+        return process.env.CONTEXT_DJ_HISTORY;
+    }
     return path.join(getConfigDir(), 'history.json');
 }
 
@@ -11,9 +14,11 @@ export class RequestHistory {
     private pointer: number = 0;
     private draft: string = '';
     private maxItems: number;
+    private filePath: string | null;
 
-    constructor(initialHistory: string[] = [], maxItems = 100) {
+    constructor(initialHistory: string[] = [], maxItems = 100, filePath: string | null = null) {
         this.maxItems = maxItems;
+        this.filePath = filePath;
         this.history = initialHistory.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
         if (this.history.length > this.maxItems) {
             this.history = this.history.slice(-this.maxItems);
@@ -21,29 +26,29 @@ export class RequestHistory {
         this.pointer = this.history.length;
     }
 
-    static load(maxItems = 100): RequestHistory {
+    static load(maxItems = 100, filePath: string = getHistoryPath()): RequestHistory {
         try {
-            const filePath = getHistoryPath();
             if (fs.existsSync(filePath)) {
                 const raw = fs.readFileSync(filePath, 'utf-8');
                 const parsed = JSON.parse(raw);
                 if (Array.isArray(parsed)) {
-                    return new RequestHistory(parsed, maxItems);
+                    return new RequestHistory(parsed, maxItems, filePath);
                 }
             }
         } catch {
             // Ignore load errors and start with clean history
         }
-        return new RequestHistory([], maxItems);
+        return new RequestHistory([], maxItems, filePath);
     }
 
     save(): void {
+        if (!this.filePath) return;
         try {
-            const dir = getConfigDir();
+            const dir = path.dirname(this.filePath);
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            fs.writeFileSync(getHistoryPath(), JSON.stringify(this.history, null, 2), 'utf-8');
+            fs.writeFileSync(this.filePath, JSON.stringify(this.history, null, 2), 'utf-8');
         } catch {
             // Best-effort write
         }

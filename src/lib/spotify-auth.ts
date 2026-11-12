@@ -11,6 +11,16 @@ interface TokenResponse {
 }
 
 export class SpotifyAuth {
+    private static lastError: string | null = null;
+
+    static getLastError(): string | null {
+        return this.lastError;
+    }
+
+    static clearLastError(): void {
+        this.lastError = null;
+    }
+
     static getRedirectUri() {
         if (typeof window !== 'undefined') {
             // Remove query params and hash to get the base app URL
@@ -85,16 +95,19 @@ export class SpotifyAuth {
 
     // Handle Callback from Spotify
     static async handleCallback(clientId: string, code: string, returnedState?: string | null): Promise<string | null> {
+        this.lastError = null;
         const codeVerifier = getStorageItem(STORAGE_KEYS.SPOTIFY_VERIFIER, '');
         const savedState = getStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE, '');
         const redirectUri = this.getRedirectUri();
 
         if (!codeVerifier) {
+            this.lastError = 'Spotify login verifier missing or expired. Please try logging in again. (ログイン検証情報が見つかりません。もう一度ログインしてください)';
             console.error('No code verifier found');
             return null;
         }
 
-        if (savedState && returnedState !== undefined && returnedState !== null && savedState !== returnedState) {
+        if (savedState && (!returnedState || savedState !== returnedState)) {
+            this.lastError = 'Spotify OAuth state mismatch. Please try logging in again. (認証状態の一致確認に失敗しました。もう一度ログインしてください)';
             console.error('OAuth state mismatch. Possible CSRF attempt.');
             return null;
         }
@@ -116,6 +129,15 @@ export class SpotifyAuth {
 
             if (!response.ok) {
                 const errText = await response.text().catch(() => '');
+                let detail = errText;
+                try {
+                    const parsed = JSON.parse(errText) as { error_description?: string; error?: string };
+                    detail = parsed.error_description || parsed.error || errText;
+                } catch {
+                    // Keep raw text when response is not JSON
+                }
+                const cleanDetail = detail.replace(/\s+/g, ' ').trim();
+                this.lastError = `Spotify token exchange failed (${response.status}${cleanDetail ? `: ${cleanDetail}` : ''}). Please check Client ID and Redirect URI (${redirectUri}). (Spotify認証に失敗しました[${response.status}]。Client IDとRedirect URIの設定を確認してください)`;
                 console.error(`Error fetching token (${response.status}):`, errText);
                 return null;
             }
@@ -128,7 +150,10 @@ export class SpotifyAuth {
                 removeStorageItem(STORAGE_KEYS.SPOTIFY_AUTH_STATE);
                 return data.access_token;
             }
+            this.lastError = 'Spotify token response did not contain an access token. (アクセストークンを取得できませんでした)';
         } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.lastError = `Network error during Spotify authentication: ${detail} (Spotify認証中に通信エラーが発生しました)`;
             console.error('Error fetching token:', error);
         }
         return null;

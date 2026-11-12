@@ -122,9 +122,26 @@ describe('DJCore', () => {
     });
 
     describe('Process log management', () => {
-        it('limits process log to 100 entries', () => {
+        it('limits process log to 100 entries in newest-first order and notifies log listeners', () => {
             const dj = new DJCore('fake_token');
-            assert.deepStrictEqual(dj.getProcessLog(), []);
+            let latestNotifiedLogs: string[] = [];
+            const unsubscribe = dj.subscribeLogs((logs) => {
+                latestNotifiedLogs = logs;
+            });
+
+            const djInternal = dj as unknown as { addLog: (msg: string) => void };
+            for (let i = 1; i <= 105; i++) {
+                djInternal.addLog(`Log entry #${i}`);
+            }
+
+            const logs = dj.getProcessLog();
+            assert.strictEqual(logs.length, 100);
+            assert.match(logs[0], /Log entry #105$/);
+            assert.match(logs[99], /Log entry #6$/);
+            assert.strictEqual(latestNotifiedLogs.length, 100);
+            assert.match(latestNotifiedLogs[0], /Log entry #105$/);
+
+            unsubscribe();
         });
     });
 
@@ -1085,6 +1102,231 @@ describe('DJCore', () => {
             assert.strictEqual(stateAfterRapidPrev?.__optimisticFallback, undefined);
             assert.strictEqual(stateAfterRapidPrev?.item?.id, 'dj1');
             assert.strictEqual(dj.isSessionPlaybackActive(), true);
+        });
+
+        it('snaps minor LLM clock-rounding drift (<= 15m) in createSchedule while preserving future start times', async () => {
+            const dj = new DJCore('fake_token');
+            const now = new Date();
+            const plus5 = new Date(now.getTime() + 5 * 60_000);
+            const plus90 = new Date(now.getTime() + 90 * 60_000);
+            const plus180 = new Date(now.getTime() + 180 * 60_000);
+            const fmt = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+            const nowStr = fmt(now);
+            const plus5Str = fmt(plus5);
+            const plus90Str = fmt(plus90);
+            const plus180Str = fmt(plus180);
+
+            let mockGenerated: ScheduleItem[] = [];
+            (dj as unknown as { ai: { generateSchedule: () => Promise<ScheduleItem[]> } }).ai = {
+                generateSchedule: async () => mockGenerated.map(item => ({ ...item })),
+            };
+
+            // Case 1: AI rounds current time 5 minutes ahead for an immediate mood request -> snaps to nowStr
+            mockGenerated = [{ start: plus5Str, end: plus180Str, query: 'ocean walk', queries: ['ocean walk'] }];
+            const snapped = await dj.createSchedule('海を散歩したい気分に合う音楽を');
+            assert.strictEqual(snapped[0].start, nowStr);
+
+            // Case 2: User explicitly requested that start time (even within 15m) -> preserved!
+            mockGenerated = [{ start: plus5Str, end: plus180Str, query: 'piano jazz', queries: ['piano jazz'] }];
+            const explicitNear = await dj.createSchedule(`${plus5Str}からピアノのJazzを聴きたい`);
+            assert.strictEqual(explicitNear[0].start, plus5Str);
+
+            // Case 3: Future schedule block 90 minutes ahead -> preserved (NOT overwritten by old <= 180m bug!)
+            mockGenerated = [{ start: plus90Str, end: plus180Str, query: 'late night jazz', queries: ['late night jazz'] }];
+            const futurePreserved = await dj.createSchedule('今夜はピアノのJazzを聴きたい');
+            assert.strictEqual(futurePreserved[0].start, plus90Str);
+        });
+
+        it('keeps schedule immutable on setSchedule/removeScheduleItem and clears lastQuery when last item is removed', () => {
+            const dj = new DJCore('fake_token');
+            store['dj_last_query'] = 'morning jazz';
+            (dj as unknown as { lastQuery: string | null }).lastQuery = 'morning jazz';
+
+            const input: ScheduleItem[] = [
+                { start: '09:00', end: '12:00', query: 'morning jazz' },
+                { start: '12:00', end: '15:00', query: 'afternoon soul' },
+            ];
+            dj.setSchedule(input, true);
+            const refAfterSet = dj.getSchedule();
+            assert.notStrictEqual(refAfterSet, input);
+
+            const refAfterFirstRemove = dj.removeScheduleItem(0, true);
+            assert.notStrictEqual(refAfterFirstRemove, refAfterSet);
+            assert.strictEqual(refAfterFirstRemove.length, 1);
+            assert.strictEqual(dj.getDJStatus().currentQuery, 'morning jazz');
+
+            const refAfterLastRemove = dj.removeScheduleItem(0, true);
+            assert.strictEqual(refAfterLastRemove.length, 0);
+            assert.strictEqual(dj.getDJStatus().currentQuery, null);
+            assert.strictEqual(store['dj_last_query'], undefined);
+        });
+
+        it('preloads upcoming block silently, deduplicates in-flight preload at slot transition, and invalidates preload on schedule edit', async () => {
+            const dj = new DJCore('fake_token');
+            const now = new Date();
+            const nextMinute = new Date(now.getTime() + 60_000);
+            const endFuture = new Date(now.getTime() + 120 * 60_000);
+            const startPast = new Date(now.getTime() - 60 * 60_000);
+            const fmt = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+            const slot1: ScheduleItem = { start: fmt(startPast), end: fmt(nextMinute), query: 'slot one', queries: ['slot one'] };
+            const slot2: ScheduleItem = { start: fmt(nextMinute), end: fmt(endFuture), query: 'slot two', queries: ['slot two'] };
+
+            const observedStatuses: string[] = [];
+            dj.setStatusCallback((s) => observedStatuses.push(s));
+
+            let searchCalls = 0;
+            let resolvePreload!: (tracks: Track[]) => void;
+
+            const djInternal = dj as unknown as {
+                lastQuery: string | null;
+                spotify: { getMyCurrentPlaybackState: () => Promise<unknown> };
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: (_id: string, uris: string[]) => Promise<void>;
+                    clearLastError: () => void;
+                    getLastError: () => null;
+                };
+                searchTracks: (q: string | string[], prio?: string, ctx?: { silent?: boolean }) => Promise<Track[]>;
+            };
+
+            djInternal.playerClient.getDevices = async () => [{ id: 'dev_1', name: 'Speaker', is_active: true } as SpotifyApi.UserDevice];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {};
+            djInternal.playerClient.clearLastError = () => {};
+            djInternal.playerClient.getLastError = () => null;
+            djInternal.spotify.getMyCurrentPlaybackState = async () => ({
+                is_playing: true,
+                item: makeTrack({ id: 's1', uri: 'spotify:track:s1', name: 'Slot 1 Song', artistName: 'Art' }),
+                device: { id: 'dev_1', name: 'Speaker', is_active: true },
+            });
+
+            let preloadWasSilent = false;
+            djInternal.searchTracks = (q, _prio, ctx) => {
+                searchCalls++;
+                const firstQ = Array.isArray(q) ? q[0] : q;
+                if (firstQ === 'slot two') {
+                    preloadWasSilent = Boolean(ctx?.silent);
+                    return new Promise<Track[]>((resolve) => {
+                        resolvePreload = resolve;
+                    });
+                }
+                return Promise.resolve([makeTrack({ id: 's1', uri: 'spotify:track:s1', name: 'Slot 1 Song', artistName: 'Art' })]);
+            };
+
+            // Seed active session for slot 1
+            dj.setSchedule([slot1, slot2]);
+            dj.getSessionCache().activateDJSession(
+                [
+                    makeTrack({ id: 's1', uri: 'spotify:track:s1', name: 'Slot 1 Song', artistName: 'Art' }),
+                    ...Array.from({ length: 6 }, (_, i) => makeTrack({ id: `q${i}`, uri: `spotify:track:q${i}`, name: `Q${i}`, artistName: 'Art' })),
+                ],
+                true,
+                0
+            );
+            djInternal.lastQuery = 'slot one';
+
+            // Tick 60s before slot2: starts silent in-flight preload without blocking foreground loop
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(preloadWasSilent, true);
+            assert.strictEqual(observedStatuses.some(s => s.includes('AI Filtering')), false);
+
+            // Simulate slot2 becoming active while preload is STILL in flight!
+            const activeSlot2: ScheduleItem = { start: fmt(startPast), end: fmt(endFuture), query: 'slot two', queries: ['slot two'] };
+            (dj as unknown as { schedule: ScheduleItem[] }).schedule = [activeSlot2];
+
+            const transitionPromise = dj.processDJLoop(true, false);
+            // Resolve the in-flight preload -> transition must reuse it without calling searchTracks a second time!
+            resolvePreload([makeTrack({ id: 's2_pre', uri: 'spotify:track:s2_pre', name: 'Preloaded Song', artistName: 'Art' })]);
+            await transitionPromise;
+
+            assert.strictEqual(searchCalls, 1);
+            assert.strictEqual(dj.getSessionCache().getSessionTracks()[0].id, 's2_pre');
+        });
+
+        it('advances optimistically across rapid consecutive next()/previous() calls and rolls back if Spotify command fails', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 't0', uri: 'spotify:track:t0', name: 'T0', artistName: 'Art' }),
+                makeTrack({ id: 't1', uri: 'spotify:track:t1', name: 'T1', artistName: 'Art' }),
+                makeTrack({ id: 't2', uri: 'spotify:track:t2', name: 'T2', artistName: 'Art' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+
+            const dj = new DJCore('fake_token');
+            dj.getSessionCache().setLastPlayingTrack(sessionTracks[0], false);
+            dj.getSessionCache().setSessionStartIndex(0);
+
+            let nextShouldSucceed = true;
+            let prevShouldSucceed = true;
+            const djInternal = dj as unknown as {
+                playerClient: {
+                    next: () => Promise<{ ok: boolean }>;
+                    previous: () => Promise<{ ok: boolean }>;
+                };
+            };
+            djInternal.playerClient.next = async () => ({ ok: nextShouldSucceed });
+            djInternal.playerClient.previous = async () => ({ ok: prevShouldSucceed });
+
+            // Two rapid next() calls before any getPlaybackState() poll -> must reach index 2 (t2)!
+            await dj.next();
+            await dj.next();
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 2);
+            assert.strictEqual(dj.getSessionCache().getLastPlayingTrack()?.id, 't2');
+
+            // Failed previous() rolls back cleanly to index 2 (t2)
+            prevShouldSucceed = false;
+            const failedPrev = await dj.previous();
+            assert.strictEqual(failedPrev.ok, false);
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 2);
+            assert.strictEqual(dj.getSessionCache().getLastPlayingTrack()?.id, 't2');
+
+            // Successful previous() steps back to index 1 (t1), then failed next() rolls back to index 1 (t1)
+            prevShouldSucceed = true;
+            await dj.previous();
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 1);
+            nextShouldSucceed = false;
+            const failedNext = await dj.next();
+            assert.strictEqual(failedNext.ok, false);
+            assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 1);
+            assert.strictEqual(dj.getSessionCache().getLastPlayingTrack()?.id, 't1');
+        });
+
+        it('applies cooldown when restored-session auto-start fails so background loop does not retry-storm every 5s', async () => {
+            const sessionTracks = [
+                makeTrack({ id: 'r1', uri: 'spotify:track:r1', name: 'Restored 1', artistName: 'Art' }),
+            ];
+            store['dj_current_session_tracks'] = JSON.stringify(sessionTracks);
+            store['dj_last_query'] = 'restored query';
+
+            const dj = new DJCore('fake_token');
+            dj.setSchedule([{ start: '00:00', end: '23:59', query: 'restored query' }]);
+
+            let playAttempts = 0;
+            const djInternal = dj as unknown as {
+                spotify: { getMyCurrentPlaybackState: () => Promise<unknown> };
+                playerClient: {
+                    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+                    resolveTargetDevice: () => Promise<string>;
+                    startPlaybackOnDevice: () => Promise<void>;
+                };
+            };
+            djInternal.spotify.getMyCurrentPlaybackState = async () => null;
+            djInternal.playerClient.getDevices = async () => [{ id: 'dev_1', name: 'Asleep Device', is_active: false } as SpotifyApi.UserDevice];
+            djInternal.playerClient.resolveTargetDevice = async () => 'dev_1';
+            djInternal.playerClient.startPlaybackOnDevice = async () => {
+                playAttempts++;
+                throw new Error('404 Device not found');
+            };
+
+            // First background tick tries once and catches error gracefully
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(playAttempts, 1);
+
+            // Immediate second background tick respects 60s cooldown instead of spamming playTracks again
+            await dj.processDJLoop(true, false);
+            assert.strictEqual(playAttempts, 1);
         });
     });
 });

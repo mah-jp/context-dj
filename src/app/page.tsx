@@ -42,10 +42,12 @@ export default function Home() {
     clearError,
     startBackgroundKeepAlive,
     syncUIState,
+    handlePlayQueueIndex,
   } = usePlayerActions();
 
   const [inputText, setInputText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputBarRef = useRef<HTMLDivElement>(null);
 
   const [showHistory, setShowHistory] = useState(false);
   const [showNotes, setShowNotes] = useState(() => getStorageItem(STORAGE_KEYS.SHOW_NOTES) === 'true');
@@ -55,7 +57,7 @@ export default function Home() {
   const [history, setHistory] = useState<string[]>(() => getStoredJSON<string[]>(STORAGE_KEYS.PROMPT_HISTORY, []));
   const [historyIndex, setHistoryIndex] = useState(-1);
 
-  const activeToast = toast || (error ? { msg: `System Message: ${error}`, type: 'error' as const } : null);
+  const activeToast = toast || (error ? { msg: error, type: 'error' as const } : null);
 
   // Derived state for AI/DJ active operations
   const isBusy = status.includes('thinking') ||
@@ -63,6 +65,7 @@ export default function Home() {
     status.includes('Filtering') ||
     status.includes('Curating') ||
     status.includes('Searching') ||
+    status.includes('Finishing preload') ||
     status.includes('Starting');
 
   // Custom Hooks
@@ -78,12 +81,13 @@ export default function Home() {
     setToast,
   });
 
-  // Auto-dismiss local toast
+  // Auto-dismiss local toast (longer duration for error messages)
   useEffect(() => {
     if (!toast) return;
+    const duration = toast.type === 'error' ? 6000 : 4000;
     const timer = setTimeout(() => {
       setToast(null);
-    }, 4000);
+    }, duration);
     return () => clearTimeout(timer);
   }, [toast]);
 
@@ -92,9 +96,30 @@ export default function Home() {
     if (!error) return;
     const timer = setTimeout(() => {
       clearError();
-    }, 4000);
+    }, 6000);
     return () => clearTimeout(timer);
   }, [error, clearError]);
+
+  // Dismiss history dropdown on outside click or Escape
+  useEffect(() => {
+    if (!showHistory) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (inputBarRef.current && !inputBarRef.current.contains(e.target as Node)) {
+        setShowHistory(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowHistory(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      window.addEventListener('keydown', handleEscape);
+    };
+  }, [showHistory]);
 
   // Autosize textarea
   useEffect(() => {
@@ -105,11 +130,14 @@ export default function Home() {
   }, [inputText]);
 
   const handleLogin = () => {
-    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID);
+    const clientId = getStorageItem(STORAGE_KEYS.SPOTIFY_CLIENT_ID, '').trim();
     if (clientId) {
-      SpotifyAuth.login(clientId);
+      void SpotifyAuth.login(clientId);
     } else {
-      alert("Please set Spotify Client ID in settings.\n(設定画面でSpotify Client IDを設定してください)");
+      setToast({
+        msg: 'Please set Spotify Client ID in Settings first. (設定画面でSpotify Client IDを設定してください)',
+        type: 'error',
+      });
     }
   };
 
@@ -152,11 +180,14 @@ export default function Home() {
       }
 
     } catch (e: unknown) {
-
       console.error(e);
-      const errorMsg = e instanceof Error ? e.message : "Failed to contact AI";
+      const errorMsg = e instanceof Error ? e.message : "Failed to contact AI (AIとの通信に失敗しました)";
       setStatus(`⚠️ ${errorMsg}`);
-      setToast({ msg: `Error: ${errorMsg} (エラーが発生しました)`, type: 'error' });
+      const hasJapanese = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(errorMsg);
+      setToast({
+        msg: hasJapanese ? errorMsg : `Error: ${errorMsg} (エラーが発生しました)`,
+        type: 'error',
+      });
     }
   };
 
@@ -239,7 +270,7 @@ export default function Home() {
         <div className={styles.inputColumnWrapper}>
 
           {/* Input Bar */}
-          <div className={styles.inputBar} style={{ width: '100%', position: 'relative' }}>
+          <div ref={inputBarRef} className={styles.inputBar} style={{ width: '100%', position: 'relative' }}>
             <input
               type="file"
               ref={fileInputRef}
@@ -252,7 +283,9 @@ export default function Home() {
             <button
               className={styles.iconBtn}
               onClick={handleCameraClick}
+              disabled={!authorized || isBusy}
               title="Camera/Vision Input"
+              aria-label="Camera or Image Input"
               style={{ color: 'var(--primary)' }}
             >
               <Camera size={20} />
@@ -261,8 +294,10 @@ export default function Home() {
             {/* Voice Input Button (Moved Left) */}
             <button
               onClick={toggleListening}
+              disabled={!authorized || (isBusy && !isListening)}
               className={`${styles.iconBtn} ${styles.voiceBtn}`}
               title={isListening ? "Stop Listening" : "Voice Input"}
+              aria-label={isListening ? "Stop Voice Input" : "Start Voice Input"}
               style={{
                 color: isListening ? '#ef4444' : 'var(--primary)'
               }}
@@ -288,7 +323,9 @@ export default function Home() {
             <button
               className={styles.iconBtn}
               onClick={() => setShowHistory(!showHistory)}
+              disabled={!authorized || history.length === 0}
               title="History"
+              aria-label="Prompt History"
               style={{ color: showHistory ? '#ffec3d' : 'var(--primary)' }}
             >
               <History size={20} />
@@ -298,7 +335,8 @@ export default function Home() {
               className={styles.sendBtn}
               onClick={handleSend}
               title="Send Request"
-              disabled={!authorized || isBusy}
+              aria-label="Send Request"
+              disabled={!authorized || isBusy || !inputText.trim()}
               style={{ color: 'var(--primary)' }}
             >
               {isBusy ? (
@@ -371,7 +409,7 @@ export default function Home() {
           showLogs={() => setShowLogs(true)}
           queue={queue}
           showNotes={showNotes}
-          djCore={djCore}
+          onSelectTrack={handlePlayQueueIndex}
         />
       </div>
 
@@ -382,10 +420,19 @@ export default function Home() {
 
       {/* Toast Notification */}
       {activeToast && (
-        <div className={styles.toast} style={{ borderLeft: `4px solid ${activeToast.type === 'error' ? '#ef4444' : activeToast.type === 'success' ? 'var(--primary)' : '#3b82f6'}` }}>
-          {activeToast.type === 'error' && <XCircle size={20} color="#ef4444" />}
-          {activeToast.type === 'success' && <CheckCircle size={20} color="var(--primary)" />}
-          {activeToast.type === 'info' && <Info size={20} color="#3b82f6" />}
+        <div
+          className={styles.toast}
+          role="status"
+          title="Click to dismiss"
+          onClick={() => {
+            setToast(null);
+            clearError();
+          }}
+          style={{ borderLeft: `4px solid ${activeToast.type === 'error' ? '#ef4444' : activeToast.type === 'success' ? 'var(--primary)' : '#3b82f6'}` }}
+        >
+          {activeToast.type === 'error' && <XCircle size={20} color="#ef4444" style={{ flexShrink: 0 }} />}
+          {activeToast.type === 'success' && <CheckCircle size={20} color="var(--primary)" style={{ flexShrink: 0 }} />}
+          {activeToast.type === 'info' && <Info size={20} color="#3b82f6" style={{ flexShrink: 0 }} />}
           <span>{activeToast.msg}</span>
         </div>
       )}

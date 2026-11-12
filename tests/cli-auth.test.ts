@@ -30,6 +30,30 @@ describe('CLI Auth - extractCodeFromInput', () => {
         const extracted = extractCodeFromInput(urlWithSpaces);
         assert.strictEqual(extracted, 'TRIMMED_CODE');
     });
+
+    test('validates expectedState on full callback URL and rejects mismatched or missing state', () => {
+        const validUrl = 'http://127.0.0.1:8888/callback?code=AQD_VALID&state=expected_123';
+        assert.strictEqual(extractCodeFromInput(validUrl, 'expected_123'), 'AQD_VALID');
+        assert.strictEqual(extractCodeFromInput('AQD_RAW_CODE', 'expected_123'), 'AQD_RAW_CODE');
+
+        assert.throws(
+            () => extractCodeFromInput('http://127.0.0.1:8888/callback?code=AQD_BAD&state=wrong_state', 'expected_123'),
+            /state mismatch/i
+        );
+        assert.throws(
+            () => extractCodeFromInput('http://127.0.0.1:8888/callback?code=AQD_NO_STATE', 'expected_123'),
+            /state mismatch/i
+        );
+    });
+
+    test('surfaces explicit OAuth error parameter and rejects bare URLs without code', () => {
+        assert.throws(
+            () => extractCodeFromInput('http://127.0.0.1:8888/callback?error=access_denied&state=s1', 's1'),
+            /access_denied/
+        );
+        assert.strictEqual(extractCodeFromInput('http://127.0.0.1:8888/callback'), '');
+        assert.strictEqual(extractCodeFromInput('   '), '');
+    });
 });
 
 describe('CLI Config - isConfigured', () => {
@@ -121,6 +145,37 @@ describe('CLI Config - isConfigured', () => {
                 process.env.CONTEXT_DJ_CONFIG = prevEnv;
             }
             fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    test('getValidSpotifyToken formats JSON error_description cleanly on refresh failure', async () => {
+        const origFetch = globalThis.fetch;
+        try {
+            globalThis.fetch = (async () => ({
+                ok: false,
+                status: 400,
+                text: async () => JSON.stringify({ error: 'invalid_grant', error_description: 'Refresh token revoked' }),
+            } as unknown as Response)) as typeof fetch;
+
+            const config: CLIConfig = {
+                spotifyClientId: 'cli_client',
+                spotifyRefreshToken: 'revoked_refresh',
+                spotifyAccessToken: 'expired_token',
+                spotifyExpiresAt: Date.now() - 1000,
+                aiProvider: 'gemini',
+                aiApiKey: 'key_123',
+            };
+
+            await assert.rejects(
+                () => getValidSpotifyToken(config),
+                (err: Error) => {
+                    assert.match(err.message, /HTTP 400/);
+                    assert.match(err.message, /invalid_grant: Refresh token revoked/);
+                    return true;
+                }
+            );
+        } finally {
+            globalThis.fetch = origFetch;
         }
     });
 });

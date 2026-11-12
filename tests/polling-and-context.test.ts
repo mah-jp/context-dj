@@ -1,7 +1,16 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { DJCore } from '../src/lib/dj-core';
-import { isSameTrackDisplay, isSameDeviceList } from '../src/context/PlayerContext';
+import {
+    isSameTrackDisplay,
+    isSameDeviceList,
+    resolveAIConfigFromStorage,
+    computeSetupStatus,
+    shouldShowOnboarding,
+    applyStoredConfigToDJ,
+} from '../src/context/PlayerContext';
+import { classifySpeechRecognitionError } from '../src/hooks/useVoiceInput';
+import { DEFAULT_MODELS, STORAGE_KEYS } from '../src/lib/constants';
 import { computeNextUIPollDelay, createDJPollingController } from '../src/hooks/useDJPollingLoops';
 import { SpotifyAuth } from '../src/lib/spotify-auth';
 import { SpotifyApiErrorInfo, Track } from '../src/lib/types';
@@ -258,5 +267,78 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
             controller.stop();
             SpotifyAuth.refreshToken = origRefresh;
         }
+    });
+
+    it('unifies AI provider/key resolution across computeSetupStatus and applyStoredConfigToDJ and clears stale AI on key removal', async () => {
+        const dj = new DJCore('fake_token');
+
+        // 1. Legacy fallback when SELECTED_AI_PROVIDER is not yet stored -> picks Gemini key & default model
+        store[STORAGE_KEYS.SPOTIFY_CLIENT_ID] = '  cid_123  ';
+        store[STORAGE_KEYS.GEMINI_API_KEY] = '  AIza_test  ';
+        store[STORAGE_KEYS.GEMINI_MODEL] = '   ';
+        const resolvedLegacy = resolveAIConfigFromStorage();
+        assert.deepStrictEqual(resolvedLegacy, {
+            provider: 'gemini',
+            apiKey: 'AIza_test',
+            model: DEFAULT_MODELS.GEMINI,
+        });
+        assert.deepStrictEqual(computeSetupStatus(), { hasClientId: true, hasAiKey: true });
+        applyStoredConfigToDJ(dj);
+
+        // 2. User explicitly switches provider to 'openai' without setting OPENAI_API_KEY ->
+        // BOTH computeSetupStatus and applyStoredConfigToDJ agree AI is unconfigured, and dj.clearAI() removes stale client!
+        store[STORAGE_KEYS.SELECTED_AI_PROVIDER] = 'openai';
+        assert.strictEqual(resolveAIConfigFromStorage(), null);
+        assert.deepStrictEqual(computeSetupStatus(), { hasClientId: true, hasAiKey: false });
+        applyStoredConfigToDJ(dj);
+        await assert.rejects(
+            async () => dj.createSchedule('play jazz'),
+            /AI not initialized/
+        );
+    });
+
+    it('derives shouldShowOnboarding across all 3 setup checklist steps without reload flash', () => {
+        // Step 1 incomplete (no Client ID)
+        assert.strictEqual(
+            shouldShowOnboarding({ setupStatus: { hasClientId: false, hasAiKey: false }, authorized: false, isAuthPending: false }),
+            true
+        );
+
+        // Step 1 complete, Step 2 incomplete (missing AI key) -> must keep Onboarding visible even if authorized
+        assert.strictEqual(
+            shouldShowOnboarding({ setupStatus: { hasClientId: true, hasAiKey: false }, authorized: true, isAuthPending: false }),
+            true
+        );
+
+        // Step 1 & 2 complete, Step 3 incomplete (not logged in, no pending token refresh) -> must show Onboarding Step 3 Login!
+        assert.strictEqual(
+            shouldShowOnboarding({ setupStatus: { hasClientId: true, hasAiKey: true }, authorized: false, isAuthPending: false }),
+            true
+        );
+
+        // Step 1 & 2 complete, token refresh or OAuth callback in flight -> suppress Onboarding flash!
+        assert.strictEqual(
+            shouldShowOnboarding({ setupStatus: { hasClientId: true, hasAiKey: true }, authorized: false, isAuthPending: true }),
+            false
+        );
+
+        // All 3 steps complete -> show main Queue UI
+        assert.strictEqual(
+            shouldShowOnboarding({ setupStatus: { hasClientId: true, hasAiKey: true }, authorized: true, isAuthPending: false }),
+            false
+        );
+    });
+
+    it('classifies Web Speech API errors into concrete bilingual hints and ignores benign aborts', () => {
+        assert.strictEqual(classifySpeechRecognitionError(undefined), null);
+        assert.strictEqual(classifySpeechRecognitionError('no-speech'), null);
+        assert.strictEqual(classifySpeechRecognitionError('aborted'), null);
+
+        assert.match(classifySpeechRecognitionError('not-allowed') || '', /マイクへのアクセスが拒否/);
+        assert.match(classifySpeechRecognitionError('service-not-allowed') || '', /Microphone access was denied/);
+        assert.match(classifySpeechRecognitionError('audio-capture') || '', /マイクが見つかりません/);
+        assert.match(classifySpeechRecognitionError('network') || '', /ネットワークエラー/);
+        assert.match(classifySpeechRecognitionError('language-not-supported') || '', /サポートされていません/);
+        assert.match(classifySpeechRecognitionError('bad-grammar') || '', /bad-grammar/);
     });
 });

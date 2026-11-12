@@ -46,16 +46,24 @@ export class DJRunner {
             activeDevice: null,
         };
 
-        // Attach DJ state, log, and playback hooks
+        // Attach DJ state, log, error, and playback hooks
         this.djCore.subscribe((snapshot) => {
             this.updateState({
                 status: snapshot.status,
                 schedule: snapshot.schedule,
-                currentThought: snapshot.currentThought || this.state.currentThought,
+                currentThought: snapshot.currentThought ?? null,
             });
         });
         this.djCore.subscribeLogs((logs) => {
             this.updateState({ logs });
+        });
+        this.djCore.subscribeErrors((errMsg, errInfo) => {
+            this.updateState({ status: `⚠️ ${errMsg}` });
+            if (errInfo?.category === 'auth_expired') {
+                void this.ensureFreshToken().catch((err) => {
+                    console.error('[DJRunner] Token refresh after 401 failed:', err);
+                });
+            }
         });
         this.djCore.setOnTracksPlayedCallback((tracks) => {
             if (tracks.length > 0) {
@@ -228,7 +236,7 @@ export class DJRunner {
                 playbackState: effectivePlayback,
                 currentTrack: track,
                 activeDevice: nextActiveDevice,
-                currentThought: djStatus.currentThought || this.state.currentThought,
+                currentThought: djStatus.currentThought ?? null,
                 logs: this.djCore.getProcessLog(),
             });
             return playback;
@@ -287,8 +295,9 @@ export class DJRunner {
     }
 
     async resume() {
+        const playTimeBefore = this.djCore.getLastPlayTime();
         const res = await this.djCore.resume();
-        if (res.ok) {
+        if (res.ok && this.djCore.getLastPlayTime() === playTimeBefore) {
             await this.convergence.syncUntilConverged(
                 { expectedIsPlaying: true },
                 () => this.pollPlayback()

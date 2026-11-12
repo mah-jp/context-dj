@@ -235,7 +235,7 @@ export class TrackSearchPipeline {
 
     async performAIFiltering(
         candidates: Track[],
-        context?: { userRequest?: string; thought?: string }
+        context?: SearchPipelineContext
     ): Promise<Track[]> {
         const config = this.deps.getConfig();
         const ai = this.deps.getAI();
@@ -244,7 +244,10 @@ export class TrackSearchPipeline {
             return candidates;
         }
 
-        this.deps.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
+        const isSilent = Boolean(context.silent);
+        if (!isSilent) {
+            this.deps.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
+        }
         this.deps.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
 
         try {
@@ -281,7 +284,9 @@ export class TrackSearchPipeline {
             }
 
             this.deps.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
-            this.deps.updateStatus('Ready');
+            if (!isSilent) {
+                this.deps.updateStatus('Ready');
+            }
 
             if (qualified.length > 0) {
                 qualified.sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -293,7 +298,9 @@ export class TrackSearchPipeline {
         } catch (e) {
             this.deps.addLog(`⚠️ AI Filtering failed. Using all candidates.`);
             console.error(e);
-            this.deps.updateStatus('Ready');
+            if (!isSilent) {
+                this.deps.updateStatus('Ready');
+            }
             return candidates;
         }
     }

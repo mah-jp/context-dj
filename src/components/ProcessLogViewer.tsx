@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { X, Terminal } from 'lucide-react';
 import { usePlayerLogs } from '../context/PlayerContext';
 
@@ -10,32 +11,50 @@ export default function ProcessLogViewer({ logs: logsProp, onClose }: ProcessLog
     const { logs: contextLogs } = usePlayerLogs();
     const logs = logsProp ?? contextLogs;
 
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                onClose();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [onClose]);
 
     return (
-        <div style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0,0,0,0.7)',
-            zIndex: 3000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            backdropFilter: 'blur(4px)'
-        }}>
-            <div style={{
-                background: '#1e1e1e',
-                width: '90%',
-                maxWidth: '600px',
-                height: '80vh',
-                borderRadius: '8px',
+        <div
+            onClick={onClose}
+            role="dialog"
+            aria-modal="true"
+            aria-label="DJ Process Log"
+            style={{
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                background: 'rgba(0,0,0,0.7)',
+                zIndex: 3000,
                 display: 'flex',
-                flexDirection: 'column',
-                boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
-                border: '1px solid #333'
-            }}>
+                alignItems: 'center',
+                justifyContent: 'center',
+                backdropFilter: 'blur(4px)'
+            }}
+        >
+            <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                    background: '#1e1e1e',
+                    width: '90%',
+                    maxWidth: '600px',
+                    height: '80vh',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
+                    border: '1px solid #333'
+                }}
+            >
                 {/* Header */}
                 <div style={{
                     padding: '16px',
@@ -50,7 +69,7 @@ export default function ProcessLogViewer({ logs: logsProp, onClose }: ProcessLog
                         <Terminal size={20} />
                         <span>DJ Process Log</span>
                     </div>
-                    <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}>
+                    <button onClick={onClose} aria-label="Close Process Log" style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}>
                         <X size={20} />
                     </button>
                 </div>

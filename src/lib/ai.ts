@@ -74,6 +74,62 @@ function isValidStage(stage: unknown): stage is NonNullable<TrackEvaluation['sta
     return typeof stage === 'string' && VALID_STAGES.has(stage as TrackEvaluation['stage']);
 }
 
+function extractCleanErrorDetail(rawText: string): string {
+    if (!rawText) return '';
+    try {
+        const parsed = JSON.parse(rawText) as {
+            error?: { message?: string; status?: string } | string;
+            message?: string;
+        };
+        if (typeof parsed.error === 'object' && parsed.error?.message) {
+            return parsed.error.message.replace(/\s+/g, ' ').trim();
+        }
+        if (typeof parsed.error === 'string') {
+            return parsed.error.replace(/\s+/g, ' ').trim();
+        }
+        if (typeof parsed.message === 'string') {
+            return parsed.message.replace(/\s+/g, ' ').trim();
+        }
+    } catch {
+        // Not JSON; sanitize whitespace directly
+    }
+    return rawText.replace(/\s+/g, ' ').trim();
+}
+
+function getAIErrorJapaneseHint(status: number | undefined, modelName: string, detail: string): string {
+    if (status === 400 || /api_key_invalid|api key not valid/i.test(detail)) {
+        return 'APIキーまたはリクエスト形式が無効です。設定画面でAPIキーとモデル名を確認してください';
+    }
+    if (status === 401 || status === 403) {
+        return 'APIキーが無効か権限がありません。設定画面でAPIキーを確認してください';
+    }
+    if (status === 404) {
+        return `指定されたモデル "${modelName}" が見つかりません。設定画面のモデル名を確認してください`;
+    }
+    if (status === 429) {
+        return 'AI APIのレート制限または利用枠の上限に達しました。しばらく待つかプランを確認してください';
+    }
+    if (status !== undefined && status >= 500) {
+        return 'AIプロバイダー側で一時的なサーバーエラーが発生しました。しばらく待ってから再試行してください';
+    }
+    return 'AI通信エラーが発生しました。ネットワーク接続と設定を確認してください';
+}
+
+export function formatAIProviderError(
+    provider: AIProvider,
+    modelName: string,
+    status: number | undefined,
+    statusText: string,
+    rawDetail: string
+): Error {
+    const cleanDetail = extractCleanErrorDetail(rawDetail);
+    const jpHint = getAIErrorJapaneseHint(status, modelName, cleanDetail);
+    const providerLabel = provider === 'gemini' ? 'Gemini API Error' : 'OpenAI API Error';
+    const statusPart = status !== undefined ? `: ${status}${statusText ? ` ${statusText}` : ''}` : '';
+    const detailPart = cleanDetail ? ` - ${cleanDetail}` : '';
+    return new Error(`${providerLabel}${statusPart}${detailPart} (${jpHint})`);
+}
+
 export class AIService {
     private openai?: OpenAI;
     private storedKey?: string; // API Key for REST usage
@@ -82,20 +138,24 @@ export class AIService {
 
     constructor(backend: AIProvider, apiKey: string, modelName?: string) {
         this.backend = backend;
-        if (modelName) {
-            this.modelName = modelName;
+        const trimmedModel = modelName?.trim();
+        if (trimmedModel) {
+            this.modelName = trimmedModel;
         } else if (backend === 'openai') {
             this.modelName = DEFAULT_MODELS.OPENAI;
+        } else {
+            this.modelName = DEFAULT_MODELS.GEMINI;
         }
 
+        const trimmedKey = apiKey.trim();
         if (backend === 'openai') {
             this.openai = new OpenAI({
-                apiKey: apiKey,
+                apiKey: trimmedKey,
                 dangerouslyAllowBrowser: true // Client-side use
             });
         } else {
             // For REST API usage, store the key directly
-            this.storedKey = apiKey;
+            this.storedKey = trimmedKey;
         }
     }
 
@@ -123,15 +183,26 @@ export class AIService {
         let responseText = '';
 
         if (this.backend === 'openai' && this.openai) {
-            const completion = await this.openai.chat.completions.create({
-                messages: [
-                    { role: "system", content: options.systemPrompt },
-                    { role: "user", content: options.userPrompt }
-                ],
-                model: this.modelName,
-                response_format: { type: "json_object" }
-            });
-            responseText = completion.choices[0].message.content || '[]';
+            try {
+                const completion = await this.openai.chat.completions.create({
+                    messages: [
+                        { role: "system", content: options.systemPrompt },
+                        { role: "user", content: options.userPrompt }
+                    ],
+                    model: this.modelName,
+                    response_format: { type: "json_object" }
+                });
+                responseText = completion.choices[0]?.message?.content || '[]';
+            } catch (err) {
+                const maybeApiErr = err as { status?: number; statusCode?: number; message?: string };
+                const status = typeof maybeApiErr?.status === 'number'
+                    ? maybeApiErr.status
+                    : typeof maybeApiErr?.statusCode === 'number'
+                        ? maybeApiErr.statusCode
+                        : undefined;
+                const detail = err instanceof Error ? err.message : String(err);
+                throw formatAIProviderError('openai', this.modelName, status, '', detail);
+            }
         } else if (this.backend === 'gemini') {
             const response = await fetch(this.getGeminiEndpoint(), {
                 method: 'POST',
@@ -144,7 +215,7 @@ export class AIService {
 
             if (!response.ok) {
                 const errText = await response.text().catch(() => '');
-                throw new Error(`Gemini API Error: ${response.status} ${response.statusText || ''} - ${errText} (Gemini APIエラーが発生しました)`);
+                throw formatAIProviderError('gemini', this.modelName, response.status, response.statusText || '', errText);
             }
 
             const data = await response.json();
@@ -233,19 +304,29 @@ export class AIService {
                 }
             }
 
-            return list.map(item => {
-                const resolvedQueries = Array.isArray(item.queries) && item.queries.length > 0
-                    ? item.queries
-                    : (item.query ? [item.query] : []);
-                return {
-                    ...item,
-                    start: normalizeTimeString(item.start || '00:00'),
-                    end: normalizeTimeString(item.end || '23:59'),
-                    query: item.query || resolvedQueries[0] || '',
-                    queries: resolvedQueries,
-                    userRequest
-                };
-            });
+            return list
+                .filter((item): item is RawScheduleItem => Boolean(item && typeof item === 'object'))
+                .map(item => {
+                    const cleanedQueries = Array.isArray(item.queries)
+                        ? item.queries.filter((q): q is string => typeof q === 'string').map(q => q.trim()).filter(Boolean)
+                        : [];
+                    const cleanedSingleQuery = typeof item.query === 'string' ? item.query.trim() : '';
+                    const cleanedPriority = typeof item.priorityTrack === 'string' ? item.priorityTrack.trim() : undefined;
+                    const fallbackQuery = cleanedSingleQuery || cleanedPriority || userRequest.trim();
+                    const resolvedQueries = cleanedQueries.length > 0
+                        ? cleanedQueries
+                        : (fallbackQuery ? [fallbackQuery] : []);
+                    return {
+                        ...item,
+                        start: normalizeTimeString(item.start || '00:00'),
+                        end: normalizeTimeString(item.end || '23:59'),
+                        query: cleanedSingleQuery || resolvedQueries[0] || '',
+                        queries: resolvedQueries,
+                        ...(cleanedPriority ? { priorityTrack: cleanedPriority } : {}),
+                        userRequest
+                    };
+                })
+                .filter(item => item.queries.length > 0 || Boolean(item.query));
 
         } catch (error) {
             console.error('AI Generation Error:', error);
@@ -385,24 +466,35 @@ Instructions:
         try {
             if (this.backend === 'openai' && this.openai) {
                 // OpenAI Vision
-                const response = await this.openai.chat.completions.create({
-                    model: this.modelName || DEFAULT_MODELS.OPENAI,
-                    messages: [
-                        {
-                            role: "user",
-                            content: [
-                                { type: "text", text: VISION_PROMPT },
-                                {
-                                    type: "image_url",
-                                    image_url: {
-                                        "url": `data:${mimeType};base64,${base64Image}`,
+                try {
+                    const response = await this.openai.chat.completions.create({
+                        model: this.modelName || DEFAULT_MODELS.OPENAI,
+                        messages: [
+                            {
+                                role: "user",
+                                content: [
+                                    { type: "text", text: VISION_PROMPT },
+                                    {
+                                        type: "image_url",
+                                        image_url: {
+                                            "url": `data:${mimeType};base64,${base64Image}`,
+                                        },
                                     },
-                                },
-                            ],
-                        },
-                    ],
-                });
-                return response.choices[0].message.content || 'No description.';
+                                ],
+                            },
+                        ],
+                    });
+                    return response.choices[0]?.message?.content?.trim() || 'No description.';
+                } catch (err) {
+                    const maybeApiErr = err as { status?: number; statusCode?: number; message?: string };
+                    const status = typeof maybeApiErr?.status === 'number'
+                        ? maybeApiErr.status
+                        : typeof maybeApiErr?.statusCode === 'number'
+                            ? maybeApiErr.statusCode
+                            : undefined;
+                    const detail = err instanceof Error ? err.message : String(err);
+                    throw formatAIProviderError('openai', this.modelName, status, '', detail);
+                }
             } else if (this.backend === 'gemini') {
                 // Gemini Vision
                 const response = await fetch(this.getGeminiEndpoint(), {
@@ -419,12 +511,12 @@ Instructions:
                 });
 
                 if (!response.ok) {
-                    const err = await response.text();
-                    throw new Error(`Gemini Vision Error: ${response.status} - ${err}`);
+                    const err = await response.text().catch(() => '');
+                    throw formatAIProviderError('gemini', this.modelName, response.status, response.statusText || '', err);
                 }
 
                 const data = await response.json();
-                return data.candidates?.[0]?.content?.parts?.[0]?.text || 'No description.';
+                return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No description.';
             }
         } catch (e) {
             console.error('Vision Analysis Failed:', e);

@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test';
-import assert from 'node:assert';
-import { RequestHistory } from '../src/cli/history';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { RequestHistory, getHistoryPath } from '../src/cli/history';
 
 describe('CLI RequestHistory', () => {
     it('initializes with empty history and handles navigation safely', () => {
@@ -68,5 +71,48 @@ describe('CLI RequestHistory', () => {
 
         // Next UpArrow should return 'third'
         assert.strictEqual(history.getPrevious(''), 'third');
+    });
+
+    it('persists and reloads history via CONTEXT_DJ_HISTORY without touching real home config', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'context-dj-history-test-'));
+        const customHistoryPath = path.join(tmpDir, 'nested', 'history.json');
+        const prevEnv = process.env.CONTEXT_DJ_HISTORY;
+        process.env.CONTEXT_DJ_HISTORY = customHistoryPath;
+
+        try {
+            assert.strictEqual(getHistoryPath(), customHistoryPath);
+
+            // Loading when file does not exist yet returns empty history
+            const loadedEmpty = RequestHistory.load(3);
+            assert.deepStrictEqual(loadedEmpty.getItems(), []);
+
+            // Adding items persists to customHistoryPath (creating parent directory automatically)
+            loadedEmpty.add('morning jazz');
+            loadedEmpty.add('evening ambient');
+            assert.strictEqual(fs.existsSync(customHistoryPath), true);
+
+            const reloaded = RequestHistory.load(3);
+            assert.deepStrictEqual(reloaded.getItems(), ['morning jazz', 'evening ambient']);
+
+            // In-memory constructor (filePath = null) does not overwrite disk file
+            const inMemoryOnly = new RequestHistory(['ephemeral']);
+            inMemoryOnly.add('ephemeral 2');
+            assert.deepStrictEqual(
+                JSON.parse(fs.readFileSync(customHistoryPath, 'utf-8')),
+                ['morning jazz', 'evening ambient']
+            );
+
+            // Corrupted JSON file degrades gracefully to empty history
+            fs.writeFileSync(customHistoryPath, '{broken json', 'utf-8');
+            const recovered = RequestHistory.load(3);
+            assert.deepStrictEqual(recovered.getItems(), []);
+        } finally {
+            if (prevEnv === undefined) {
+                delete process.env.CONTEXT_DJ_HISTORY;
+            } else {
+                process.env.CONTEXT_DJ_HISTORY = prevEnv;
+            }
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
     });
 });
