@@ -5,6 +5,7 @@ import {
     evaluateTransitionGuard,
     PlaybackConvergenceController,
 } from '../src/lib/playback-sync';
+import { PLAYBACK_CONSTANTS } from '../src/lib/constants';
 
 function makePlaybackState(overrides: {
     uri?: string;
@@ -276,6 +277,47 @@ describe('playback-sync', () => {
             assert.strictEqual(res2, true);
             assert.strictEqual(firstLoopCalls, 0);
             assert.strictEqual(secondLoopCalls, 1);
+        });
+
+        it('keeps total CONVERGENCE_BACKOFF_MS longer than STARTUP_GRACE_MS so empty-swing playback reconciles against real server state instead of synthetic __optimisticFallback', async () => {
+            const totalBackoffMs = PLAYBACK_CONSTANTS.CONVERGENCE_BACKOFF_MS.reduce((acc, ms) => acc + ms, 0);
+            assert.ok(
+                totalBackoffMs > PLAYBACK_CONSTANTS.STARTUP_GRACE_MS,
+                `Expected total convergence backoff (${totalBackoffMs}ms) > STARTUP_GRACE_MS (${PLAYBACK_CONSTANTS.STARTUP_GRACE_MS}ms)`
+            );
+            assert.ok(
+                totalBackoffMs < PLAYBACK_CONSTANTS.TRANSITION_GUARD_TTL_MS,
+                `Expected total convergence backoff (${totalBackoffMs}ms) < TRANSITION_GUARD_TTL_MS (${PLAYBACK_CONSTANTS.TRANSITION_GUARD_TTL_MS}ms)`
+            );
+
+            // Simulate empty-swing startup: first 3 polls fall inside STARTUP_GRACE_MS (__optimisticFallback),
+            // final polls after STARTUP_GRACE_MS return real paused state (is_playing: false).
+            const controller = new PlaybackConvergenceController();
+            const pollStates = [
+                makePlaybackState({ uri: 'spotify:track:dj1', isPlaying: true, optimisticFallback: true }),
+                makePlaybackState({ uri: 'spotify:track:dj1', isPlaying: true, optimisticFallback: true }),
+                makePlaybackState({ uri: 'spotify:track:old_song', isPlaying: false, optimisticFallback: false }),
+            ];
+            let idx = 0;
+            let lastObservedReconciledPlayState: boolean | null = null;
+
+            const converged = await controller.syncUntilConverged(
+                { expectedTrackUri: 'spotify:track:dj1', expectedIsPlaying: true },
+                async () => {
+                    const st = pollStates[Math.min(idx++, pollStates.length - 1)];
+                    const guard = controller.inspectState(st);
+                    if (!guard.suppressPlayStateUpdate) {
+                        lastObservedReconciledPlayState = st.is_playing;
+                    }
+                    return st;
+                },
+                { backoffMs: [5, 10, 15], ttlMs: 100 }
+            );
+
+            assert.strictEqual(converged, false);
+            assert.strictEqual(controller.getPendingTransition(), null);
+            // Exhaustion reconciliation inside syncUntilConverged read real server state (is_playing: false) instead of synthetic true!
+            assert.strictEqual(lastObservedReconciledPlayState, false);
         });
     });
 });

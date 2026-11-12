@@ -10,6 +10,11 @@ import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
 import { useIsHydrated } from '../hooks/useIsHydrated';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
 import {
+    isMobileBrowserEnvironment,
+    selectTargetSpotifyDevice,
+    shouldSuppressBackgroundKeepAlive,
+} from '../lib/spotify-player-client';
+import {
     generateTrackKey,
     getScheduleItemSignature,
     isWaitingForScheduleStart,
@@ -310,13 +315,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const stopBackgroundKeepAlive = useCallback(() => {
         if (backgroundAudioRef.current) {
+            const audio = backgroundAudioRef.current;
+            backgroundAudioRef.current = null;
             try {
-                backgroundAudioRef.current.pause();
-                backgroundAudioRef.current.currentTime = 0;
+                audio.pause();
+                audio.currentTime = 0;
+                audio.src = '';
+                if (typeof audio.load === 'function') {
+                    audio.load();
+                }
             } catch {
                 // Ignore audio cleanup errors
             }
-            backgroundAudioRef.current = null;
             console.log("🔇 Background Keep-Alive Audio Stopped");
         }
     }, []);
@@ -392,17 +402,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 ? djRef.current.isSessionPlaybackActive()
                 : false;
 
-            // If ContextDJ has an active session and Spotify is merely paused/idle on a leftover external track or non-track media,
-            // do not overwrite ContextDJ's current session track with the paused external state.
-            const isPausedForeignTrackInSession = Boolean(
-                isSessionActive &&
-                !playbackState?.is_playing &&
-                (!rawTrackItem || djRef.current.findTrackIndexInSession(rawTrackItem) === -1)
+            const hasExternalContextUri = Boolean(playbackState?.context?.uri);
+            const isRawTrackInSession = Boolean(
+                !hasExternalContextUri &&
+                rawTrackItem &&
+                djRef.current.findTrackIndexInSession(rawTrackItem) >= 0
             );
-            const currentTrackItem = isPausedForeignTrackInSession
-                ? (currentTrackRef.current && djRef.current.findTrackIndexInSession(currentTrackRef.current) >= 0
+            // If ContextDJ has an active session and Spotify is paused/idle on a leftover external track
+            // OR playing a leftover external track while ContextDJ's session has not yet been confirmed on the device,
+            // keep ContextDJ's session track & show Play (not Pause) so pressing Play starts ContextDJ Track 1 immediately.
+            const isForeignOrIdleInSession = Boolean(
+                isSessionActive &&
+                !playbackState?.__optimisticFallback &&
+                !isRawTrackInSession
+            );
+            const sessionTracks = djRef.current.getSessionCache().getSessionTracks();
+            const sessionStartIdx = djRef.current.getSessionCache().getSessionStartIndex();
+            const authoritativeSessionTrack =
+                sessionTracks[sessionStartIdx] ??
+                (currentTrackRef.current && djRef.current.findTrackIndexInSession(currentTrackRef.current) >= 0
                     ? currentTrackRef.current
-                    : (djRef.current.getSessionCache().getSessionTracks()[djRef.current.getSessionCache().getSessionStartIndex()] ?? null))
+                    : null);
+            const currentTrackItem = isForeignOrIdleInSession
+                ? authoritativeSessionTrack
                 : rawTrackItem;
 
             const currentTrackUri = currentTrackItem?.uri || null;
@@ -457,6 +479,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 updateDevicesState(currentDevices);
             }
 
+            if (
+                backgroundAudioRef.current &&
+                shouldSuppressBackgroundKeepAlive({
+                    isMobile: isMobileBrowserEnvironment(),
+                    devices: latestDevices,
+                    preferredDeviceId: typeof djRef.current.getPreferredDeviceId === 'function'
+                        ? djRef.current.getPreferredDeviceId()
+                        : null,
+                    activeDeviceType: !playbackState?.__optimisticFallback ? playbackState?.device?.type ?? null : null,
+                })
+            ) {
+                stopBackgroundKeepAlive();
+            }
+
             // Determine Device Name (suppress stale device revert while device transfer is converging,
             // and never overwrite a real device name with synthetic startup fallback 'Connecting...')
             if (!guard.suppressDeviceUpdate) {
@@ -464,8 +500,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (playbackState && playbackState.device && !playbackState.__optimisticFallback) {
                     activeDeviceName = playbackState.device.name;
                 } else if (latestDevices.length > 0) {
-                    const activeD = latestDevices.find(d => d.is_active);
-                    if (activeD) activeDeviceName = activeD.name;
+                    const activeD = latestDevices.find(d => d.is_active && !d.is_restricted) || latestDevices.find(d => d.is_active);
+                    if (activeD) {
+                        activeDeviceName = activeD.name;
+                    } else {
+                        const targetD = selectTargetSpotifyDevice(latestDevices, {
+                            preferredDeviceId: typeof djRef.current.getPreferredDeviceId === 'function'
+                                ? djRef.current.getPreferredDeviceId()
+                                : null,
+                            isMobile: isMobileBrowserEnvironment(),
+                        });
+                        if (targetD) activeDeviceName = targetD.name;
+                    }
                 } else if (playbackState?.device?.name && !deviceNameRef.current) {
                     activeDeviceName = playbackState.device.name;
                 }
@@ -479,7 +525,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (!guard.suppressTrackUpdate) {
                     const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
                     currentTrackRef.current = finalTrack;
-                    const shouldUpdateSessionCache = Boolean(playbackState && !playbackState.__optimisticFallback && !isPausedForeignTrackInSession);
+                    const shouldUpdateSessionCache = Boolean(playbackState && !playbackState.__optimisticFallback && !isForeignOrIdleInSession);
                     setCurrentTrack(prev => {
                         if (isSameTrackDisplay(prev, finalTrack)) {
                             return prev;
@@ -489,7 +535,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     });
                 }
                 if (!guard.suppressPlayStateUpdate) {
-                    updateIsPlaying(Boolean(playbackState?.is_playing));
+                    updateIsPlaying(!isForeignOrIdleInSession && Boolean(playbackState?.is_playing));
                 }
             } else if (!guard.suppressTrackUpdate) {
                 const isNonTrackMedia = Boolean(
@@ -499,7 +545,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                             playbackState.currently_playing_type !== 'track' &&
                             playbackState.currently_playing_type !== 'unknown'))
                 );
-                if (isNonTrackMedia && (!isSessionActive || playbackState?.is_playing)) {
+                if (isNonTrackMedia && (!isSessionActive || (!isForeignOrIdleInSession && playbackState?.is_playing))) {
                     currentTrackRef.current = null;
                     setCurrentTrack(null);
                     persistPlayingTrack(null, true);
@@ -519,7 +565,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             console.error("Error in syncUIState:", syncErr);
             return null;
         }
-    }, [updateQueueState, updateDevicesState, updateDeviceName, updateIsPlaying, persistPlayingTrack]);
+    }, [stopBackgroundKeepAlive, updateQueueState, updateDevicesState, updateDeviceName, updateIsPlaying, persistPlayingTrack]);
 
     const attachDJInstance = useCallback((token: string) => {
         if (djRef.current) {
@@ -568,6 +614,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         dj.setOnTracksPlayedCallback((tracks) => {
             if (tracks.length > 0) {
+                setError(null);
                 const first = tracks[0];
                 currentTrackRef.current = first;
                 setCurrentTrack(first);
@@ -826,6 +873,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // Memoized Handlers
     const startBackgroundKeepAlive = useCallback(() => {
         if (getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) !== 'true') return;
+        if (
+            shouldSuppressBackgroundKeepAlive({
+                isMobile: isMobileBrowserEnvironment(),
+                devices: devicesRef.current,
+                preferredDeviceId: typeof djRef.current?.getPreferredDeviceId === 'function'
+                    ? djRef.current.getPreferredDeviceId()
+                    : null,
+            })
+        ) {
+            stopBackgroundKeepAlive();
+            return;
+        }
 
         if (!backgroundAudioRef.current) {
             const SILENT_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAAtAAADgAAAB5WFb4AAABAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMAAA//uQZAAAAAAA0gAAAAABBQAA0gAAAAEAABAAAAAAAABAAAAAAAAAAAAAAP/7kGQAAAAAADSAAAAAAAEAAADSAAAAAQAAEAAAAAAAQAAAAAAAAAAAAAA//uQZAAAAAAA0gAAAAAAAQAAANIAAAABAAAQAAAAAAAQAAAAAAAAAAAAAAD/+5BkAAAAAADSAAAAAAABAAAA0gAAAAEAABAAAAAAAEAAAAAAAAAAAAAAA//uQZAAAAAAA0gAAAAAAAQAAANIAAAABAAAQAAAAAAAQAAAAAAAAAAAAAAA==';
@@ -839,7 +898,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             console.warn("Background audio auto-play blocked. User interaction required.", e);
         });
         console.log("🔊 Background Keep-Alive Audio Started");
-    }, []);
+    }, [stopBackgroundKeepAlive]);
 
     const handleNext = useCallback(async () => {
         startBackgroundKeepAlive();
@@ -860,18 +919,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastTrackUriRef.current = expectedNextUri;
                 updateQueueState(remaining);
             }
+            const playTimeBefore = djRef.current.getLastPlayTime();
             const res = await djRef.current.next();
             if (res.ok) {
-                void convergenceRef.current.syncUntilConverged(
-                    expectedNextUri
-                        ? {
-                            expectedTrackUri: expectedNextUri,
-                            expectedTrackKey: expectedNextKey,
-                            departedTrackUri: previousUri,
-                        }
-                        : { departedTrackUri: previousUri },
-                    syncUIState
-                );
+                if (djRef.current.getLastPlayTime() === playTimeBefore) {
+                    void convergenceRef.current.syncUntilConverged(
+                        expectedNextUri
+                            ? {
+                                expectedTrackUri: expectedNextUri,
+                                expectedTrackKey: expectedNextKey,
+                                departedTrackUri: previousUri,
+                            }
+                            : { departedTrackUri: previousUri },
+                        syncUIState
+                    );
+                }
             } else if (currentQueue.length > 0) {
                 // Revert optimistic track & queue shift if skip failed
                 currentTrackRef.current = previousTrack;
@@ -888,8 +950,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (djRef.current) {
             const previousUri = lastTrackUriRef.current;
             const previousProgressMs = lastProgressMsRef.current;
+            const playTimeBefore = djRef.current.getLastPlayTime();
             const res = await djRef.current.previous();
-            if (res.ok) {
+            if (res.ok && djRef.current.getLastPlayTime() === playTimeBefore) {
                 void convergenceRef.current.syncUntilConverged(
                     {
                         departedTrackUri: previousUri,
@@ -998,12 +1061,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (targetDevice?.name) {
                 updateDeviceName(targetDevice.name);
             }
-            const hadPendingStart = typeof djRef.current.hasPendingStartRetry === 'function'
-                ? djRef.current.hasPendingStartRetry()
-                : false;
+            if (
+                backgroundAudioRef.current &&
+                shouldSuppressBackgroundKeepAlive({
+                    isMobile: isMobileBrowserEnvironment(),
+                    devices: devicesRef.current,
+                    preferredDeviceId: deviceId,
+                    activeDeviceType: targetDevice?.type ?? null,
+                })
+            ) {
+                stopBackgroundKeepAlive();
+            }
+            const shouldStartSessionOnNewDevice =
+                (typeof djRef.current.hasPendingStartRetry === 'function' && djRef.current.hasPendingStartRetry()) ||
+                (
+                    typeof djRef.current.hasConfirmedPlayback === 'function' &&
+                    !djRef.current.hasConfirmedPlayback() &&
+                    typeof djRef.current.isSessionPlaybackActive === 'function' &&
+                    djRef.current.isSessionPlaybackActive()
+                );
             const res = await djRef.current.setActiveDevice(deviceId);
             if (res.ok) {
-                if (hadPendingStart) {
+                if (shouldStartSessionOnNewDevice) {
                     void djRef.current.processDJLoop(true, false).catch((err) => {
                         console.warn('Immediate playback retry after device switch failed:', err);
                     });
@@ -1016,7 +1095,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 updateDeviceName(prevDeviceName);
             }
         }
-    }, [syncUIState, updateDeviceName]);
+    }, [stopBackgroundKeepAlive, syncUIState, updateDeviceName]);
 
     const clearError = useCallback(() => setError(null), []);
 

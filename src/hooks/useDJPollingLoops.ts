@@ -69,6 +69,7 @@ export function createDJPollingController({
     let isUILoopRunning = false;
     let isDJLoopRunning = false;
     let pendingForceAll = false;
+    let pendingForegroundDJRun = false;
     let lastResumeSyncTime = 0;
     let lastTokenRefreshAttemptTime = 0;
 
@@ -176,6 +177,8 @@ export function createDJPollingController({
             djTimerId = null;
         }
 
+        const prevLastPlayTime = typeof djCore.getLastPlayTime === 'function' ? djCore.getLastPlayTime() : 0;
+
         try {
             const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
             djCore.updateConfig({
@@ -192,6 +195,17 @@ export function createDJPollingController({
         }
 
         if (isCancelled) return;
+
+        const latestPlayTime = typeof djCore.getLastPlayTime === 'function' ? djCore.getLastPlayTime() : 0;
+        if (latestPlayTime > prevLastPlayTime && !isDocumentHidden()) {
+            void runUILoop({ forceAll: true });
+        }
+
+        if (pendingForegroundDJRun && !isDocumentHidden()) {
+            pendingForegroundDJRun = false;
+            void runDJLoop();
+            return;
+        }
 
         const isHidden = isDocumentHidden();
         const nextDelay: number = isHidden ? djLoopBackgroundIntervalMs : djLoopIntervalMs;
@@ -216,9 +230,15 @@ export function createDJPollingController({
 
         clearTimers();
 
+        if (typeof djCore.notifyForegrounded === 'function') {
+            djCore.notifyForegrounded();
+        }
+
         void runUILoop({ forceAll: true });
         if (!isDJLoopRunning) {
             void runDJLoop();
+        } else {
+            pendingForegroundDJRun = true;
         }
     };
 

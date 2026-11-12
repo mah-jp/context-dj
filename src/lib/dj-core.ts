@@ -81,6 +81,8 @@ export class DJCore {
     } | null = null;
     private lastKnownIsPlaying: boolean | null = null;
     private loggedStandbyStart: string | null = null;
+    private userExplicitlyPaused = false;
+    private pendingForegroundRecovery = false;
 
     constructor(accessToken: string) {
         this.spotify = new SpotifyWebApi();
@@ -323,15 +325,65 @@ export class DJCore {
         return this.playerClient.getDevices();
     }
 
+    hasConfirmedPlayback(): boolean {
+        return this.hasConfirmedSessionPlayback;
+    }
+
+    getPreferredDeviceId(): string | null {
+        return typeof this.playerClient.getPreferredDeviceId === 'function'
+            ? this.playerClient.getPreferredDeviceId()
+            : null;
+    }
+
     hasPendingStartRetry(): boolean {
         return Boolean(this.lastStartFailure && this.lastStartFailure.cachedTracks.length > 0);
     }
 
+    notifyForegrounded() {
+        this.pendingForegroundRecovery = true;
+        if (
+            this.lastStartFailure &&
+            this.lastStartFailure.category !== 'forbidden' &&
+            this.lastStartFailure.category !== 'rate_limited'
+        ) {
+            this.lastStartFailure.timestamp = 0;
+        }
+        if (!this.hasConfirmedSessionPlayback && !this.userExplicitlyPaused) {
+            this.lastRefillAttemptTime = 0;
+        }
+    }
+
+    private reconcilePendingStartFailureAfterManualPlay() {
+        if (!this.lastStartFailure) return;
+        const failedSig = this.lastStartFailure.signature;
+        this.lastStartFailure = null;
+        if (this.schedule.length > 0 && !isWaitingForScheduleStart(this.schedule)) {
+            const activeItem = this.getEffectiveItemForPlayback();
+            const activeSig = activeItem ? getScheduleItemSignature(activeItem) : null;
+            if (activeSig && activeSig === failedSig && !this.lastQuery) {
+                this.lastQuery = activeSig;
+                setStorageItem(STORAGE_KEYS.DJ_LAST_QUERY, activeSig);
+            }
+        }
+        if (this.statusText.startsWith('⚠️')) {
+            this.updateStatus('Ready');
+        } else {
+            this.notifyStateListeners();
+        }
+    }
+
     async setActiveDevice(deviceId: string) {
         const res = await this.playerClient.setActiveDevice(deviceId);
-        if (res.ok && this.lastStartFailure) {
-            // Allow immediate retry on newly selected device while keeping cached curated tracks
-            this.lastStartFailure.timestamp = 0;
+        if (res.ok) {
+            if (this.lastStartFailure) {
+                // Allow immediate retry on newly selected device while keeping cached curated tracks
+                this.lastStartFailure.timestamp = 0;
+            }
+            if (!this.hasConfirmedSessionPlayback && !this.userExplicitlyPaused && this.isSessionPlaybackActive()) {
+                this.lastRefillAttemptTime = 0;
+                this.pendingForegroundRecovery = true;
+                this.sessionCache.setLastPlayTime(0);
+            }
         }
         return res;
     }
@@ -351,6 +403,7 @@ export class DJCore {
         const prevPlayTime = this.sessionCache.getLastPlayTime();
         const prevPlayingTrack = this.sessionCache.getLastPlayingTrack();
         const prevConfirmed = this.sessionCache.getHasConfirmedSessionPlayback();
+        const prevInitiated = this.sessionCache.getHasInitiatedSessionInRuntime();
         const prevExternal = this.sessionCache.getIsExternalContextActive();
         const prevKnownPlaying = this.lastKnownIsPlaying;
 
@@ -358,6 +411,7 @@ export class DJCore {
         const startIdx = options?.sessionStartIndex ?? 0;
 
         if (isDJSession) {
+            this.userExplicitlyPaused = false;
             this.sessionCache.activateDJSession(sessionList, false, startIdx);
         }
 
@@ -376,6 +430,7 @@ export class DJCore {
 
             if (isDJSession) {
                 this.sessionCache.activateDJSession(sessionList, true, startIdx);
+                this.reconcilePendingStartFailureAfterManualPlay();
             } else {
                 this.sessionCache.activateExternalContext(true, true);
             }
@@ -384,12 +439,26 @@ export class DJCore {
             }
         } catch (error) {
             if (playGen === this.playbackGeneration && isDJSession) {
-                this.sessionCache.setSessionTracks(prevTracks, false, prevStartIndex);
-                this.sessionCache.setLastPlayTime(prevPlayTime);
-                this.sessionCache.setLastPlayingTrack(prevPlayingTrack, false);
-                this.sessionCache.setHasConfirmedSessionPlayback(prevConfirmed);
-                this.sessionCache.setIsExternalContextActive(prevExternal);
-                this.lastKnownIsPlaying = prevKnownPlaying;
+                const isMidSessionJump = Boolean(prevConfirmed && prevTracks.length > 0 && options?.fullSessionTracks);
+                if (isMidSessionJump) {
+                    this.sessionCache.setSessionTracks(prevTracks, false, prevStartIndex);
+                    this.sessionCache.setLastPlayTime(prevPlayTime);
+                    this.sessionCache.setLastPlayingTrack(prevPlayingTrack, false);
+                    this.sessionCache.setHasConfirmedSessionPlayback(prevConfirmed);
+                    this.sessionCache.setHasInitiatedSessionInRuntime(prevInitiated);
+                    this.sessionCache.setIsExternalContextActive(prevExternal);
+                    this.lastKnownIsPlaying = prevKnownPlaying;
+                } else {
+                    // Preserve newly curated session tracks (e.g. on 404 asleep device) so UI keeps the list
+                    // and pressing Play or returning to the browser starts Track 1 immediately without re-searching.
+                    this.sessionCache.setSessionTracks(sessionList, true, startIdx);
+                    this.sessionCache.setHasInitiatedSessionInRuntime(sessionList.length > 0);
+                    this.sessionCache.setLastPlayTime(0);
+                    this.sessionCache.setLastPlayingTrack(sessionList[startIdx] ?? null, true);
+                    this.sessionCache.setHasConfirmedSessionPlayback(false);
+                    this.sessionCache.setIsExternalContextActive(false);
+                    this.lastKnownIsPlaying = false;
+                }
             }
             console.error('Playback error:', error);
             throw error;
@@ -673,6 +742,8 @@ export class DJCore {
         if (this.activeLoopCount > 0 && !force) {
             return;
         }
+        const isForegroundRecovery = this.pendingForegroundRecovery;
+        this.pendingForegroundRecovery = false;
         this.activeLoopCount++;
 
         try {
@@ -742,17 +813,25 @@ export class DJCore {
                 if (force) {
                     this.invalidatePreload();
                     this.lastStartFailure = null;
-                } else if (
-                    this.lastStartFailure &&
-                    this.lastStartFailure.signature === querySignature &&
-                    Date.now() - this.lastStartFailure.timestamp < this.lastStartFailure.retryAfterMs
-                ) {
-                    return;
+                } else {
+                    const bypassFailureBackoff =
+                        isForegroundRecovery &&
+                        this.lastStartFailure?.category !== 'forbidden' &&
+                        this.lastStartFailure?.category !== 'rate_limited';
+                    if (
+                        !bypassFailureBackoff &&
+                        this.lastStartFailure &&
+                        this.lastStartFailure.signature === querySignature &&
+                        Date.now() - this.lastStartFailure.timestamp < this.lastStartFailure.retryAfterMs
+                    ) {
+                        return;
+                    }
                 }
 
                 const currentGen = ++this.playbackGeneration;
                 this.playerClient.clearLastError();
-                const devices = await this.getDevices();
+                const rawDevices = await this.getDevices();
+                const devices = rawDevices.filter(d => !d.is_restricted);
                 if (devices.length === 0) {
                     this.lastQuery = null;
                     removeStorageItem(STORAGE_KEYS.DJ_LAST_QUERY);
@@ -783,6 +862,7 @@ export class DJCore {
                 this.notifyStateListeners();
 
                 this.addLog("──────── New Session Started ────────");
+                this.userExplicitlyPaused = false;
                 this.sessionCache.resetSessionPlayedHistory();
 
                 let tracks: Track[] = [];
@@ -891,17 +971,46 @@ export class DJCore {
                     throw e;
                 }
             } else {
-                // Same context: Check for Auto-Refill (Okawari)
-                await this.checkAndRefillQueue(queriesToUse, currentItem);
+                // Same context: Check for Auto-Refill (Okawari) or unconfirmed-session recovery
+                await this.checkAndRefillQueue(queriesToUse, currentItem, isForegroundRecovery);
             }
         } finally {
             this.activeLoopCount = Math.max(0, this.activeLoopCount - 1);
         }
     }
 
-    // --- Auto-Refill Logic ---
+    // --- Auto-Refill & Unconfirmed Session Recovery Logic ---
 
-    private async checkAndRefillQueue(queries: string[], currentItem: ScheduleItem) {
+    private async tryStartPendingSessionTracks(expectedGen: number) {
+        const rawDevices = await this.getDevices();
+        const devices = rawDevices.filter(d => !d.is_restricted);
+        if (devices.length === 0 || expectedGen !== this.playbackGeneration || !this.isSessionPlaybackActive()) {
+            return;
+        }
+        const sessionTracks = this.sessionCache.getSessionTracks();
+        const startIdx = this.sessionCache.getSessionStartIndex();
+        const tracksToPlay = sessionTracks.slice(startIdx);
+        if (tracksToPlay.length === 0) {
+            return;
+        }
+        this.lastRefillAttemptTime = Date.now();
+        this.sessionCache.markTracksPlayed(sessionTracks);
+        try {
+            await this.playTracks(tracksToPlay, {
+                isDJSession: true,
+                fullSessionTracks: sessionTracks,
+                sessionStartIndex: startIdx,
+            });
+        } catch (restoreErr) {
+            console.warn("Unconfirmed session auto-start failed (will retry after cooldown or foreground):", restoreErr);
+        }
+    }
+
+    private async checkAndRefillQueue(
+        queries: string[],
+        currentItem: ScheduleItem,
+        isForegroundRecovery: boolean = false
+    ) {
         if (this.isRefilling) return;
 
         // Do not auto-refill if there is no active ContextDJ session (e.g. external Spotify playback took over)
@@ -911,13 +1020,13 @@ export class DJCore {
 
         const now = Date.now();
         const REFILL_COOLDOWN_MS = 60 * 1000;
-        if (now - this.lastRefillAttemptTime < REFILL_COOLDOWN_MS) {
+        const bypassCooldownForUnconfirmedForeground =
+            isForegroundRecovery && !this.hasConfirmedSessionPlayback && !this.userExplicitlyPaused;
+        if (!bypassCooldownForUnconfirmedForeground && now - this.lastRefillAttemptTime < REFILL_COOLDOWN_MS) {
             return;
         }
 
         const refillGen = this.playbackGeneration;
-        const hadConfirmedBeforeCheck = this.hasConfirmedSessionPlayback;
-        const lastPlayTimeBeforeCheck = this.lastPlayTime;
         const playback = await this.getPlaybackState();
 
         // Re-verify session and generation are still active after getPlaybackState()
@@ -925,38 +1034,52 @@ export class DJCore {
             return;
         }
 
-        if (!playback || !playback.is_playing) {
-            // If session tracks were restored from storage (never started or confirmed in this runtime)
-            // and Spotify is idle or paused on a non-session track, start playing the restored session tracks
-            if (!hadConfirmedBeforeCheck && lastPlayTimeBeforeCheck === 0) {
-                const isPausedOnSessionTrack = Boolean(
-                    playback?.item &&
-                    playback.item.type === 'track' &&
-                    !playback.context?.uri &&
-                    this.sessionCache.findTrackIndexInSession(playback.item as Track) >= 0
-                );
-                if (!isPausedOnSessionTrack) {
-                    const devices = await this.getDevices();
-                    if (devices.length > 0 && refillGen === this.playbackGeneration && this.isSessionPlaybackActive()) {
-                        const sessionTracks = this.sessionCache.getSessionTracks();
-                        const startIdx = this.sessionCache.getSessionStartIndex();
-                        const tracksToPlay = sessionTracks.slice(startIdx);
-                        if (tracksToPlay.length > 0) {
-                            this.lastRefillAttemptTime = Date.now();
-                            this.sessionCache.markTracksPlayed(sessionTracks);
-                            try {
-                                await this.playTracks(tracksToPlay, {
-                                    isDJSession: true,
-                                    fullSessionTracks: sessionTracks,
-                                    sessionStartIndex: startIdx,
-                                });
-                            } catch (restoreErr) {
-                                console.warn("Restored session auto-start failed (will retry after cooldown):", restoreErr);
-                            }
-                        }
+        // Never run Okawari refill before Track 1 of the session has ever been confirmed playing;
+        // instead, recover unconfirmed sessions (restored from storage or missed initial mobile wake-up).
+        if (!this.hasConfirmedSessionPlayback) {
+            if (this.userExplicitlyPaused) {
+                return;
+            }
+
+            const initiatedInRuntime = this.sessionCache.getHasInitiatedSessionInRuntime();
+            const currentLastPlayTime = this.lastPlayTime;
+            const elapsedSincePlay = currentLastPlayTime > 0 ? Date.now() - currentLastPlayTime : Infinity;
+
+            if (!initiatedInRuntime) {
+                if (!playback || !playback.is_playing) {
+                    const isPausedOnSessionTrack = Boolean(
+                        playback?.item &&
+                        playback.item.type === 'track' &&
+                        !playback.context?.uri &&
+                        this.sessionCache.findTrackIndexInSession(playback.item as Track) >= 0
+                    );
+                    if (!isPausedOnSessionTrack) {
+                        await this.tryStartPendingSessionTracks(refillGen);
                     }
                 }
+                return;
             }
+
+            const canRecoverNow = isForegroundRecovery
+                ? elapsedSincePlay >= 1500
+                : (!playback?.__optimisticFallback && elapsedSincePlay >= PLAYBACK_CONSTANTS.STARTUP_GRACE_MS);
+
+            const shouldRecoverEmptySwing =
+                canRecoverNow &&
+                (
+                    !playback ||
+                    Boolean(playback.__optimisticFallback) ||
+                    !playback.is_playing ||
+                    (currentLastPlayTime > 0 && elapsedSincePlay < 10 * 60 * 1000)
+                );
+
+            if (shouldRecoverEmptySwing) {
+                await this.tryStartPendingSessionTracks(refillGen);
+            }
+            return;
+        }
+
+        if (!playback || !playback.is_playing) {
             return;
         }
 
@@ -1040,9 +1163,13 @@ export class DJCore {
         const now = Date.now();
 
         if (sessionTracks.length > 0 && !this.isExternalContextActive) {
-            const isInStartupGrace = !this.hasConfirmedSessionPlayback &&
+            const isUnconfirmedRuntimeSession =
+                !this.hasConfirmedSessionPlayback &&
+                this.sessionCache.getHasInitiatedSessionInRuntime();
+            const isInStartupGrace =
+                isUnconfirmedRuntimeSession &&
                 this.lastPlayTime > 0 &&
-                (now - this.lastPlayTime < 15000);
+                (now - this.lastPlayTime < PLAYBACK_CONSTANTS.STARTUP_GRACE_MS);
 
             if (activeTrack) {
                 const foundIndex = this.sessionCache.findTrackIndexInSession(activeTrack);
@@ -1055,16 +1182,16 @@ export class DJCore {
                         .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
                 }
 
-                if (isInStartupGrace || this.lastKnownIsPlaying === false) {
+                if (isUnconfirmedRuntimeSession || this.lastKnownIsPlaying === false) {
                     return sessionTracks
                         .slice(sessionStartIndex + 1)
                         .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
                 }
 
-                // Active track is not in sessionTracks, Spotify is actively playing, and startup grace has passed:
+                // Active track is not in sessionTracks, Spotify is actively playing, and session was already confirmed (or restored from storage):
                 // User switched playback externally in the Spotify app -> prioritize Spotify's live queue.
                 this.handleExternalPlaybackDetected(activeTrack);
-            } else if (isInStartupGrace || this.lastKnownIsPlaying === false) {
+            } else if (isUnconfirmedRuntimeSession || this.lastKnownIsPlaying === false) {
                 return sessionTracks
                     .slice(sessionStartIndex + 1)
                     .map(t => this.sessionCache.enrichTrackWithCachedMetadata(t));
@@ -1138,20 +1265,54 @@ export class DJCore {
                 ? this.sessionCache.findTrackIndexInSession(state.item as Track)
                 : -1;
             const isCurrentItemInSession = sessionIndex >= 0;
-            const isWaitingForStartupSwitch = !this.hasConfirmedSessionPlayback &&
+            const isUnconfirmedRuntimeSession =
+                !this.hasConfirmedSessionPlayback &&
+                this.sessionCache.getHasInitiatedSessionInRuntime();
+            const isWaitingForStartupSwitch =
+                isUnconfirmedRuntimeSession &&
+                !this.userExplicitlyPaused &&
                 this.lastPlayTime > 0 &&
-                (now - this.lastPlayTime < 6000);
+                (now - this.lastPlayTime < PLAYBACK_CONSTANTS.STARTUP_GRACE_MS);
             const hasReachedStartTrack = isCurrentItemInSession && (
                 this.hasConfirmedSessionPlayback ||
                 !isWaitingForStartupSwitch ||
                 sessionIndex === sessionStartIndex
             );
+            // Guard against transient cloud-side progress_ms === 0 responses in the first 1.2s
+            // before the mobile OS has actually granted audio focus and started advancing audio.
+            const isPrematureZeroProgressMirage = Boolean(
+                isUnconfirmedRuntimeSession &&
+                typeof state?.progress_ms === 'number' &&
+                state.progress_ms === 0 &&
+                this.lastPlayTime > 0 &&
+                (now - this.lastPlayTime < 1200)
+            );
 
-            if (hasReachedStartTrack && isSpotifyPlaying) {
+            if (hasReachedStartTrack && isSpotifyPlaying && !isPrematureZeroProgressMirage) {
+                this.userExplicitlyPaused = false;
                 this.sessionCache.confirmSessionPlayback();
                 this.sessionCache.setSessionStartIndex(sessionIndex);
             } else if (this.hasConfirmedSessionPlayback && isCurrentItemInSession) {
                 this.sessionCache.setSessionStartIndex(sessionIndex);
+            }
+
+            // Normalize shuffle=false / repeat=off only after playback is confirmed AND settled
+            // (>= 1.5s since play or >= 1s into track progress) so mobile stream setup is never interrupted.
+            if (
+                this.hasConfirmedSessionPlayback &&
+                isCurrentItemInSession &&
+                isSpotifyPlaying &&
+                !this.sessionCache.getHasNormalizedSessionModes() &&
+                (
+                    this.lastPlayTime === 0 ||
+                    now - this.lastPlayTime >= 1500 ||
+                    (typeof state?.progress_ms === 'number' && state.progress_ms >= 1000)
+                )
+            ) {
+                this.sessionCache.setHasNormalizedSessionModes(true);
+                if (typeof this.playerClient.ensurePlaybackModes === 'function') {
+                    void this.playerClient.ensurePlaybackModes(state);
+                }
             }
 
             const isInStartupGrace = isWaitingForStartupSwitch;
@@ -1182,19 +1343,30 @@ export class DJCore {
                 }
             }
 
+            // Never wipe unconfirmed runtime sessionTracks on external-playback false positives
+            // before Track 1 of the session has ever been confirmed playing on the device.
+            const canDetectExternalTakeover =
+                this.hasConfirmedSessionPlayback ||
+                !this.sessionCache.getHasInitiatedSessionInRuntime();
+
             if (state && state.item && state.item.type === 'track') {
                 const trackItem = state.item as Track;
                 if (
                     isSpotifyPlaying &&
                     sessionTracks.length > 0 &&
                     !isCurrentItemInSession &&
-                    (this.hasConfirmedSessionPlayback || !this.lastPlayTime || now - this.lastPlayTime >= 15000)
+                    canDetectExternalTakeover
                 ) {
                     this.handleExternalPlaybackDetected(trackItem);
                 }
                 const enriched = this.sessionCache.enrichTrackWithCachedMetadata(trackItem);
                 state.item = enriched;
-                if (isSpotifyPlaying || isCurrentItemInSession || this.isExternalContextActive || sessionTracks.length === 0) {
+                if (
+                    isCurrentItemInSession ||
+                    this.isExternalContextActive ||
+                    sessionTracks.length === 0 ||
+                    (isSpotifyPlaying && canDetectExternalTakeover)
+                ) {
                     this.lastPlayingTrack = enriched;
                 }
                 return state;
@@ -1210,7 +1382,7 @@ export class DJCore {
                 isSpotifyPlaying &&
                 isNonTrackExternal &&
                 sessionTracks.length > 0 &&
-                (this.hasConfirmedSessionPlayback || !this.lastPlayTime || now - this.lastPlayTime >= 15000)
+                canDetectExternalTakeover
             ) {
                 this.handleExternalPlaybackDetected({
                     name: state?.item?.name || state?.currently_playing_type || 'External Media',
@@ -1248,21 +1420,78 @@ export class DJCore {
         };
     }
 
-    async next() {
+    private async shouldStartUnconfirmedSessionViaPlayTracks(): Promise<boolean> {
+        const isUnconfirmedRuntimeSession =
+            !this.hasConfirmedSessionPlayback &&
+            this.sessionCache.getHasInitiatedSessionInRuntime();
+        if (!isUnconfirmedRuntimeSession) {
+            return false;
+        }
+        // If playTracks failed (lastPlayTime === 0, e.g. 404), { uris } never reached Spotify at all.
+        if (this.lastPlayTime === 0) {
+            return true;
+        }
+        // Otherwise playTracks returned 204; inspect whether Spotify actually loaded a session track
+        // or empty-swung and stayed on the previous/external context.
+        try {
+            const state = await this.spotify.getMyCurrentPlaybackState();
+            const hasExternalContextUri = Boolean(state?.context?.uri);
+            const isLoadedInSession = Boolean(
+                !hasExternalContextUri &&
+                state?.device?.is_active &&
+                state?.item &&
+                state.item.type === 'track' &&
+                this.sessionCache.findTrackIndexInSession(state.item as Track) >= 0
+            );
+            return !isLoadedInSession;
+        } catch {
+            return false;
+        }
+    }
+
+    async next(): Promise<SpotifyControlResult> {
         const sessionTracks = this.sessionCache.getSessionTracks();
         const prevStartIndex = this.sessionCache.getSessionStartIndex();
         const prevPlayingTrack = this.lastPlayingTrack;
+        let targetIdx = prevStartIndex;
         let didAdvanceSession = false;
 
         if (sessionTracks.length > 0 && !this.isExternalContextActive) {
             const lastPlaying = this.lastPlayingTrack;
             const currentIdx = lastPlaying ? this.sessionCache.findTrackIndexInSession(lastPlaying) : -1;
             const baseIdx = currentIdx >= 0 ? currentIdx : prevStartIndex;
+            targetIdx = baseIdx;
             if (baseIdx + 1 < sessionTracks.length) {
-                const nextIdx = baseIdx + 1;
-                this.sessionCache.setSessionStartIndex(nextIdx);
-                this.lastPlayingTrack = sessionTracks[nextIdx];
+                targetIdx = baseIdx + 1;
+                this.sessionCache.setSessionStartIndex(targetIdx);
+                this.lastPlayingTrack = sessionTracks[targetIdx];
                 didAdvanceSession = true;
+            }
+
+            // When Track 1 of a newly curated runtime session has never been loaded onto Spotify,
+            // Spotify's server queue still holds the user's old context; start sessionTracks from targetIdx cleanly.
+            if (await this.shouldStartUnconfirmedSessionViaPlayTracks()) {
+                try {
+                    if (typeof this.playerClient.clearLastError === 'function') {
+                        this.playerClient.clearLastError();
+                    }
+                    const tracksToPlay = sessionTracks.slice(targetIdx);
+                    await this.playTracks(tracksToPlay, {
+                        isDJSession: true,
+                        fullSessionTracks: sessionTracks,
+                        sessionStartIndex: targetIdx,
+                    });
+                    return { ok: true, status: 204 };
+                } catch (e) {
+                    if (didAdvanceSession) {
+                        this.sessionCache.setSessionStartIndex(prevStartIndex);
+                        this.sessionCache.setLastPlayingTrack(prevPlayingTrack, true);
+                    }
+                    const classified =
+                        this.playerClient.reportThrownError(e, 'play') ??
+                        (typeof this.playerClient.getLastError === 'function' ? this.playerClient.getLastError() : null);
+                    return { ok: false, status: classified?.status, error: classified ?? undefined };
+                }
             }
         }
         const res = await this.playerClient.next();
@@ -1273,23 +1502,49 @@ export class DJCore {
         return res;
     }
 
-    async previous() {
+    async previous(): Promise<SpotifyControlResult> {
         const sessionTracks = this.sessionCache.getSessionTracks();
         const prevStartIndex = this.sessionCache.getSessionStartIndex();
         const prevPlayingTrack = this.lastPlayingTrack;
         const prevPlayTime = this.sessionCache.getLastPlayTime();
+        let targetIdx = prevStartIndex;
         let didMutateSession = false;
 
         if (sessionTracks.length > 0 && !this.isExternalContextActive) {
             const lastPlaying = this.lastPlayingTrack;
             const currentIdx = lastPlaying ? this.sessionCache.findTrackIndexInSession(lastPlaying) : -1;
             const baseIdx = currentIdx >= 0 ? currentIdx : prevStartIndex;
+            targetIdx = baseIdx;
             if (baseIdx > 0) {
-                const targetIdx = baseIdx - 1;
+                targetIdx = baseIdx - 1;
                 this.sessionCache.setSessionStartIndex(targetIdx);
                 this.lastPlayingTrack = sessionTracks[targetIdx];
                 didMutateSession = true;
             }
+
+            if (await this.shouldStartUnconfirmedSessionViaPlayTracks()) {
+                try {
+                    if (typeof this.playerClient.clearLastError === 'function') {
+                        this.playerClient.clearLastError();
+                    }
+                    const tracksToPlay = sessionTracks.slice(targetIdx);
+                    await this.playTracks(tracksToPlay, {
+                        isDJSession: true,
+                        fullSessionTracks: sessionTracks,
+                        sessionStartIndex: targetIdx,
+                    });
+                    return { ok: true, status: 204 };
+                } catch (e) {
+                    this.sessionCache.setSessionStartIndex(prevStartIndex);
+                    this.sessionCache.setLastPlayingTrack(prevPlayingTrack, true);
+                    this.sessionCache.setLastPlayTime(prevPlayTime);
+                    const classified =
+                        this.playerClient.reportThrownError(e, 'play') ??
+                        (typeof this.playerClient.getLastError === 'function' ? this.playerClient.getLastError() : null);
+                    return { ok: false, status: classified?.status, error: classified ?? undefined };
+                }
+            }
+
             if (!this.hasConfirmedSessionPlayback) {
                 this.sessionCache.setLastPlayTime(0);
                 didMutateSession = true;
@@ -1308,51 +1563,84 @@ export class DJCore {
         const res = await this.playerClient.pause();
         if (res.ok) {
             this.lastKnownIsPlaying = false;
+            this.userExplicitlyPaused = true;
+            if (!this.hasConfirmedSessionPlayback) {
+                this.sessionCache.setLastPlayTime(0);
+            }
         }
         return res;
     }
 
     async resume(): Promise<SpotifyControlResult> {
+        this.userExplicitlyPaused = false;
         const sessionTracks = this.sessionCache.getSessionTracks();
+        if (
+            sessionTracks.length === 0 &&
+            !this.isExternalContextActive &&
+            this.schedule.length > 0 &&
+            !isWaitingForScheduleStart(this.schedule)
+        ) {
+            try {
+                if (typeof this.playerClient.clearLastError === 'function') {
+                    this.playerClient.clearLastError();
+                }
+                await this.processDJLoop(false, true);
+                return { ok: true, status: 204 };
+            } catch (e) {
+                const classified =
+                    this.playerClient.reportThrownError(e, 'play') ??
+                    (typeof this.playerClient.getLastError === 'function' ? this.playerClient.getLastError() : null);
+                return { ok: false, status: classified?.status, error: classified ?? undefined };
+            }
+        }
         if (sessionTracks.length > 0 && !this.isExternalContextActive) {
+            const isUnconfirmedRuntimeSession =
+                !this.hasConfirmedSessionPlayback &&
+                this.sessionCache.getHasInitiatedSessionInRuntime();
             let shouldStartSessionTracks = !this.hasConfirmedSessionPlayback;
 
             // Verify whether Spotify is currently on one of our session tracks on an active device
-            try {
-                const state = await this.spotify.getMyCurrentPlaybackState();
-                const hasExternalContextUri = Boolean(state?.context?.uri);
-                const isCurrentInSession = Boolean(
-                    !hasExternalContextUri &&
-                    state?.device?.is_active &&
-                    state?.item &&
-                    state.item.type === 'track' &&
-                    this.sessionCache.findTrackIndexInSession(state.item as Track) >= 0
-                );
-                if (isCurrentInSession) {
-                    const res = await this.playerClient.resume(
-                        state?.device?.id || this.playerClient.getActiveDeviceId() || undefined
+            // (skipped for unconfirmed runtime sessions so Track 1 always loads the full `{ uris }` queue cleanly).
+            if (!isUnconfirmedRuntimeSession) {
+                try {
+                    const state = await this.spotify.getMyCurrentPlaybackState();
+                    const hasExternalContextUri = Boolean(state?.context?.uri);
+                    const isCurrentInSession = Boolean(
+                        !hasExternalContextUri &&
+                        state?.device?.is_active &&
+                        state?.item &&
+                        state.item.type === 'track' &&
+                        this.sessionCache.findTrackIndexInSession(state.item as Track) >= 0
                     );
-                    if (res.ok) {
-                        this.sessionCache.confirmSessionPlayback();
-                        this.lastKnownIsPlaying = true;
-                        return res;
+                    if (isCurrentInSession) {
+                        const res = await this.playerClient.resume(
+                            state?.device?.id || this.playerClient.getActiveDeviceId() || undefined
+                        );
+                        if (res.ok) {
+                            this.sessionCache.confirmSessionPlayback();
+                            this.lastKnownIsPlaying = true;
+                            return res;
+                        }
                     }
-                }
-                shouldStartSessionTracks = true;
-            } catch {
-                // If state inspection fails and session playback was previously confirmed, try bare resume first
-                if (!shouldStartSessionTracks) {
-                    const res = await this.playerClient.resume(this.playerClient.getActiveDeviceId() || undefined);
-                    if (res.ok) {
-                        this.lastKnownIsPlaying = true;
-                        return res;
+                    shouldStartSessionTracks = true;
+                } catch {
+                    // If state inspection fails and session playback was previously confirmed, try bare resume first
+                    if (!shouldStartSessionTracks) {
+                        const res = await this.playerClient.resume(this.playerClient.getActiveDeviceId() || undefined);
+                        if (res.ok) {
+                            this.lastKnownIsPlaying = true;
+                            return res;
+                        }
                     }
+                    shouldStartSessionTracks = true;
                 }
-                shouldStartSessionTracks = true;
             }
 
             if (shouldStartSessionTracks) {
                 try {
+                    if (typeof this.playerClient.clearLastError === 'function') {
+                        this.playerClient.clearLastError();
+                    }
                     const lastPlaying = this.lastPlayingTrack;
                     const currentIdx = lastPlaying
                         ? this.sessionCache.findTrackIndexInSession(lastPlaying)
@@ -1370,7 +1658,9 @@ export class DJCore {
                         return { ok: true, status: 204 };
                     }
                 } catch (e) {
-                    const classified = this.playerClient.reportThrownError(e, 'play');
+                    const classified =
+                        this.playerClient.reportThrownError(e, 'play') ??
+                        (typeof this.playerClient.getLastError === 'function' ? this.playerClient.getLastError() : null);
                     return { ok: false, status: classified?.status, error: classified ?? undefined };
                 }
             }

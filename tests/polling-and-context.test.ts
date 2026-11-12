@@ -572,4 +572,60 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
         assert.strictEqual(normalizeVoiceLang('pt-BR'), 'ja-JP');
         assert.strictEqual(normalizeVoiceLang(''), 'ja-JP');
     });
+
+    it('createDJPollingController notifies DJCore on foreground return, queues pendingForegroundDJRun when DJ loop is in flight, and syncs UI when DJ loop starts playback', async () => {
+        const dj = new DJCore('fake_token');
+        let foregroundNotified = 0;
+        let simulatedPlayTime = 0;
+        let djLoopRunCount = 0;
+        let resolveFirstDJRun!: () => void;
+        const firstDJRunBlocked = new Promise<void>((r) => {
+            resolveFirstDJRun = r;
+        });
+        const syncCalls: { forceAll?: boolean }[] = [];
+
+        dj.notifyForegrounded = () => {
+            foregroundNotified++;
+        };
+        dj.getLastPlayTime = () => simulatedPlayTime;
+        dj.processDJLoop = async () => {
+            djLoopRunCount++;
+            if (djLoopRunCount === 1) {
+                await firstDJRunBlocked;
+            } else {
+                simulatedPlayTime = 5000;
+            }
+        };
+
+        const controller = createDJPollingController({
+            djCore: dj,
+            syncUIState: async (opts) => {
+                syncCalls.push(opts || {});
+                return null;
+            },
+            onError: () => {},
+            uiPollIntervalMs: 500,
+            djLoopIntervalMs: 500,
+        });
+
+        try {
+            // Start an in-flight DJ loop while tab is hidden, then bring tab to foreground
+            (globalThis as unknown as { document: { visibilityState: string } }).document.visibilityState = 'hidden';
+            const inFlightPromise = controller.runDJLoop();
+
+            (globalThis as unknown as { document: { visibilityState: string } }).document.visibilityState = 'visible';
+            controller.handleVisibilityChange();
+            assert.strictEqual(foregroundNotified, 1);
+
+            // Release first DJ loop -> queued pendingForegroundDJRun executes immediately and advances playTime -> triggers forceAll UI sync!
+            resolveFirstDJRun();
+            await inFlightPromise;
+            await new Promise((r) => setTimeout(r, 25));
+
+            assert.strictEqual(djLoopRunCount, 2);
+            assert.ok(syncCalls.filter((c) => c.forceAll === true).length >= 2);
+        } finally {
+            controller.stop();
+        }
+    });
 });

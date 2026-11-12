@@ -234,6 +234,11 @@ export default function Home() {
         msg: hasJapanese ? errorMsg : `Error: ${errorMsg} (エラーが発生しました)`,
         type: 'error',
       });
+      // If tracks were already curated into the session before a device/playback error (e.g. 404),
+      // sync UI immediately so Track 1 and Up Next are ready for 1-tap Play recovery.
+      if (djCore.isSessionPlaybackActive()) {
+        void syncUIState({ forceAll: true });
+      }
     } finally {
       isSubmittingRef.current = false;
     }

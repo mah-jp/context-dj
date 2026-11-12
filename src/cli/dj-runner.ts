@@ -232,6 +232,25 @@ export class DJRunner {
             const rawTrack = (playback && playback.item && playback.item.type === 'track')
                 ? (playback.item as Track)
                 : null;
+            const isSessionActive = this.djCore.isSessionPlaybackActive();
+            const hasExternalContextUri = Boolean(playback?.context?.uri);
+            const isRawTrackInSession = Boolean(
+                !hasExternalContextUri &&
+                rawTrack &&
+                this.djCore.findTrackIndexInSession(rawTrack) >= 0
+            );
+            const isForeignOrIdleInSession = Boolean(
+                isSessionActive &&
+                !playback?.__optimisticFallback &&
+                !isRawTrackInSession
+            );
+            const sessionTracks = this.djCore.getSessionCache().getSessionTracks();
+            const sessionStartIdx = this.djCore.getSessionCache().getSessionStartIndex();
+            const fallbackSessionTrack =
+                sessionTracks[sessionStartIdx] ??
+                (this.state.currentTrack && this.djCore.findTrackIndexInSession(this.state.currentTrack) >= 0
+                    ? this.state.currentTrack
+                    : null);
             const isNonTrackMedia = Boolean(
                 playback &&
                 ((playback.item && playback.item.type !== 'track') ||
@@ -241,10 +260,14 @@ export class DJRunner {
             );
             const track = guard.suppressTrackUpdate
                 ? this.state.currentTrack
-                : (rawTrack ?? (isNonTrackMedia ? null : this.state.currentTrack));
+                : isForeignOrIdleInSession
+                    ? fallbackSessionTrack
+                    : (rawTrack ?? (isNonTrackMedia ? null : this.state.currentTrack));
             const effectivePlayback = guard.suppressPlayStateUpdate && playback && this.state.playbackState
                 ? { ...playback, is_playing: this.state.playbackState.is_playing }
-                : playback;
+                : isForeignOrIdleInSession && playback
+                    ? { ...playback, is_playing: false }
+                    : playback;
             const nextActiveDevice =
                 !guard.suppressDeviceUpdate && playback?.device && !playback.__optimisticFallback
                     ? playback.device
@@ -334,8 +357,9 @@ export class DJRunner {
 
     async next() {
         const departedUri = this.state.currentTrack?.uri || null;
+        const playTimeBefore = this.djCore.getLastPlayTime();
         const res = await this.djCore.next();
-        if (res.ok) {
+        if (res.ok && this.djCore.getLastPlayTime() === playTimeBefore) {
             await this.convergence.syncUntilConverged(
                 { departedTrackUri: departedUri },
                 () => this.pollPlayback()
@@ -346,8 +370,9 @@ export class DJRunner {
     async previous() {
         const departedUri = this.state.currentTrack?.uri || null;
         const departedProgressMs = this.state.playbackState?.progress_ms ?? null;
+        const playTimeBefore = this.djCore.getLastPlayTime();
         const res = await this.djCore.previous();
-        if (res.ok) {
+        if (res.ok && this.djCore.getLastPlayTime() === playTimeBefore) {
             await this.convergence.syncUntilConverged(
                 {
                     departedTrackUri: departedUri,

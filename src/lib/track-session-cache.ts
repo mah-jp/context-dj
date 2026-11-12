@@ -17,6 +17,8 @@ export class TrackSessionCache {
     private lastPlayTime = 0;
     private lastPlayingTrack: Track | null = null;
     private hasConfirmedSessionPlayback = false;
+    private hasInitiatedSessionInRuntime = false;
+    private hasNormalizedSessionModes = false;
     private isExternalContextActive = false;
 
     constructor() {
@@ -67,7 +69,11 @@ export class TrackSessionCache {
         this.sessionStartIndex = tracks.length > 0
             ? Math.max(0, Math.min(startIndex, tracks.length - 1))
             : 0;
+        if (tracks.length === 0) {
+            this.hasInitiatedSessionInRuntime = false;
+        }
         this.hasConfirmedSessionPlayback = false;
+        this.hasNormalizedSessionModes = false;
         this.isExternalContextActive = false;
         this.sessionVersion++;
         if (persist) {
@@ -78,6 +84,8 @@ export class TrackSessionCache {
     clearSessionTracks(persist: boolean = true) {
         this.currentSessionTracks = [];
         this.sessionStartIndex = 0;
+        this.hasInitiatedSessionInRuntime = false;
+        this.hasNormalizedSessionModes = false;
         this.sessionVersion++;
         if (persist) {
             removeStorageItem(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS);
@@ -97,8 +105,10 @@ export class TrackSessionCache {
     activateDJSession(tracks: Track[], persist: boolean = true, startIndex: number = 0) {
         this.setSessionTracks(tracks, persist, startIndex);
         this.lastPlayTime = Date.now();
-        this.lastPlayingTrack = null;
+        this.setLastPlayingTrack(tracks[startIndex] ?? null, persist);
         this.hasConfirmedSessionPlayback = false;
+        this.hasNormalizedSessionModes = false;
+        this.hasInitiatedSessionInRuntime = tracks.length > 0;
         this.isExternalContextActive = false;
     }
 
@@ -110,6 +120,8 @@ export class TrackSessionCache {
             this.sessionVersion++;
         }
         this.hasConfirmedSessionPlayback = false;
+        this.hasNormalizedSessionModes = false;
+        this.hasInitiatedSessionInRuntime = false;
         this.lastPlayTime = 0;
     }
 
@@ -124,6 +136,25 @@ export class TrackSessionCache {
 
     setLastPlayTime(time: number) {
         this.lastPlayTime = time;
+        if (time > 0 && this.currentSessionTracks.length > 0) {
+            this.hasInitiatedSessionInRuntime = true;
+        }
+    }
+
+    getHasInitiatedSessionInRuntime(): boolean {
+        return this.hasInitiatedSessionInRuntime;
+    }
+
+    setHasInitiatedSessionInRuntime(initiated: boolean) {
+        this.hasInitiatedSessionInRuntime = initiated;
+    }
+
+    getHasNormalizedSessionModes(): boolean {
+        return this.hasNormalizedSessionModes;
+    }
+
+    setHasNormalizedSessionModes(normalized: boolean) {
+        this.hasNormalizedSessionModes = normalized;
     }
 
     getLastPlayingTrack(): Track | null {
