@@ -2,9 +2,15 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import SpotifyWebApi from 'spotify-web-api-js';
 import {
+    SPOTIFY_ANDROID_WAKE_INTENT_URI,
     SpotifyPlayerClient,
     classifySpotifyError,
+    hasActiveBrowserUserGesture,
     isMobileBrowserEnvironment,
+    isMobileSpotifyDevice,
+    isTargetTrackLoadedOnState,
+    launchSpotifyAppUri,
+    resolveSpotifyWakeUri,
     selectTargetSpotifyDevice,
     shouldSuppressBackgroundKeepAlive,
 } from '../src/lib/spotify-player-client';
@@ -260,8 +266,9 @@ describe('SpotifyPlayerClient', () => {
         assert.strictEqual('offset' in parsedBody, false);
     });
 
-    it('pre-transfers quietly (play: false) before starting { uris } when mobile Smartphone device is inactive', async () => {
-        const fakeSpotify = {
+    it('never sends play: false to inactive mobile Smartphone/Tablet (preserving Android ForegroundKeeperService) while still pre-transferring inactive Desktop/Speaker quietly', async () => {
+        // 1. Mobile Smartphone (`is_active: false`) MUST NOT receive `PUT /v1/me/player { play: false }`!
+        const fakeMobileSpotify = {
             getAccessToken: () => 'token_mobile',
             getMyDevices: async () => ({
                 devices: [
@@ -271,27 +278,52 @@ describe('SpotifyPlayerClient', () => {
             }),
         } as unknown as SpotifyWebApi.SpotifyWebApiJs;
 
-        const client = new SpotifyPlayerClient(fakeSpotify, undefined, {
+        const mobileClient = new SpotifyPlayerClient(fakeMobileSpotify, undefined, {
             isMobile: () => true,
             transferSettleDelayMs: 0,
             retryDelayMs: 0,
         });
 
-        // Mobile browser prioritizes unrestricted Smartphone even when Computer was active
-        const targetId = await client.resolveTargetDevice();
-        assert.strictEqual(targetId, 'phone_1');
+        const mobileTargetId = await mobileClient.resolveTargetDevice();
+        assert.strictEqual(mobileTargetId, 'phone_1');
 
-        await client.startPlaybackOnDevice(targetId, ['spotify:track:dj1']);
+        const mobileResult = await mobileClient.startPlaybackOnDevice(mobileTargetId, ['spotify:track:dj1']);
+        assert.strictEqual(mobileResult.isMobileTarget, true);
+        assert.strictEqual(fetchCalls.length, 1);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_1');
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[0].init?.body)), {
+            uris: ['spotify:track:dj1'],
+        });
 
+        // 2. Inactive non-mobile Computer/Speaker STILL receives quiet `play: false` pre-transfer before `{ uris }`
+        fetchCalls = [];
+        const fakeDesktopSpotify = {
+            getAccessToken: () => 'token_desktop',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'speaker_1', name: 'Living Room Speaker', type: 'Speaker', is_active: false, is_restricted: false },
+                ],
+            }),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const desktopClient = new SpotifyPlayerClient(fakeDesktopSpotify, undefined, {
+            isMobile: () => false,
+            transferSettleDelayMs: 0,
+            retryDelayMs: 0,
+        });
+
+        const desktopTargetId = await desktopClient.resolveTargetDevice();
+        assert.strictEqual(desktopTargetId, 'speaker_1');
+
+        const desktopResult = await desktopClient.startPlaybackOnDevice(desktopTargetId, ['spotify:track:dj1']);
+        assert.strictEqual(desktopResult.isMobileTarget, false);
         assert.strictEqual(fetchCalls.length, 2);
-        // 1. Quiet pre-transfer with play: false
         assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player');
         assert.deepStrictEqual(JSON.parse(String(fetchCalls[0].init?.body)), {
-            device_ids: ['phone_1'],
+            device_ids: ['speaker_1'],
             play: false,
         });
-        // 2. Clean play { uris }
-        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_1');
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=speaker_1');
         assert.deepStrictEqual(JSON.parse(String(fetchCalls[1].init?.body)), {
             uris: ['spotify:track:dj1'],
         });
@@ -510,5 +542,949 @@ describe('SpotifyPlayerClient', () => {
         const resolvedAfterWake = await wakingClient.resolveTargetDevice();
         assert.strictEqual(pollAttempt, 2);
         assert.strictEqual(resolvedAfterWake, 'phone_awake');
+    });
+
+    it('isTargetTrackLoadedOnState matches direct & relinked target URIs while rejecting external contexts or wrong devices', () => {
+        const targetUris = ['spotify:track:take_on_me', 'spotify:track:every_woman'];
+
+        assert.strictEqual(isTargetTrackLoadedOnState(null, targetUris, 'phone_1'), false);
+        assert.strictEqual(isTargetTrackLoadedOnState(undefined, targetUris, 'phone_1'), false);
+
+        // Direct match on expected device with context === null
+        assert.strictEqual(
+            isTargetTrackLoadedOnState(
+                {
+                    is_playing: false,
+                    context: null,
+                    device: { id: 'phone_1', is_active: true } as SpotifyApi.UserDevice,
+                    item: { id: 'take_on_me', uri: 'spotify:track:take_on_me', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse,
+                targetUris,
+                'phone_1'
+            ),
+            true
+        );
+
+        // Market-relinked track whose linked_from.uri matches uris[0]
+        assert.strictEqual(
+            isTargetTrackLoadedOnState(
+                {
+                    is_playing: false,
+                    context: null,
+                    device: { id: 'phone_1', is_active: true } as SpotifyApi.UserDevice,
+                    item: {
+                        id: 'relinked_jp',
+                        uri: 'spotify:track:relinked_jp',
+                        type: 'track',
+                        linked_from: { uri: 'spotify:track:take_on_me' },
+                    } as unknown as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse,
+                targetUris,
+                'phone_1'
+            ),
+            true
+        );
+
+        // Rejects external playlist/album context even if same song URI is inside it
+        assert.strictEqual(
+            isTargetTrackLoadedOnState(
+                {
+                    is_playing: false,
+                    context: { type: 'playlist', uri: 'spotify:playlist:80s_hits' } as SpotifyApi.ContextObject,
+                    device: { id: 'phone_1', is_active: true } as SpotifyApi.UserDevice,
+                    item: { id: 'take_on_me', uri: 'spotify:track:take_on_me', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse,
+                targetUris,
+                'phone_1'
+            ),
+            false
+        );
+
+        // Rejects when loaded on a different device than expectedDeviceId
+        assert.strictEqual(
+            isTargetTrackLoadedOnState(
+                {
+                    is_playing: false,
+                    context: null,
+                    device: { id: 'pc_other', is_active: true } as SpotifyApi.UserDevice,
+                    item: { id: 'take_on_me', uri: 'spotify:track:take_on_me', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse,
+                targetUris,
+                'phone_1'
+            ),
+            false
+        );
+    });
+
+    it('sends an empty-body resume kick when { uris } loads target track in paused state on mobile, and skips kick when already playing', async () => {
+        let playbackState: SpotifyApi.CurrentPlaybackResponse | null = {
+            is_playing: false,
+            progress_ms: 0,
+            context: null,
+            device: { id: 'phone_1', name: 'Pixel', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+            item: { id: 'take_on_me', uri: 'spotify:track:take_on_me', type: 'track' } as SpotifyApi.TrackObjectFull,
+        } as SpotifyApi.CurrentPlaybackResponse;
+
+        const fakeSpotify = {
+            getAccessToken: () => 'token_mobile',
+            getMyCurrentPlaybackState: async () => playbackState,
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const client = new SpotifyPlayerClient(fakeSpotify, undefined, {
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+
+        await client.startPlaybackOnDevice('phone_1', ['spotify:track:take_on_me', 'spotify:track:every_woman']);
+
+        // Call 1: PUT /me/player/play with { uris }
+        // Call 2: PUT /me/player/play (empty body, no Content-Type) to kick-start paused mobile player
+        assert.strictEqual(fetchCalls.length, 2);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_1');
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[0].init?.body)), {
+            uris: ['spotify:track:take_on_me', 'spotify:track:every_woman'],
+        });
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_1');
+        assert.strictEqual(fetchCalls[1].init?.method, 'PUT');
+        assert.strictEqual(fetchCalls[1].init?.body, undefined);
+        assert.strictEqual((fetchCalls[1].init?.headers as Record<string, string>)?.['Content-Type'], undefined);
+
+        // When Spotify already reports is_playing: true, no extra resume request is sent
+        fetchCalls = [];
+        playbackState = {
+            ...playbackState,
+            is_playing: true,
+            progress_ms: 300,
+        };
+        await client.startPlaybackOnDevice('phone_1', ['spotify:track:take_on_me', 'spotify:track:every_woman']);
+        assert.strictEqual(fetchCalls.length, 1);
+    });
+
+    it('waits an extra settle poll for waking inactive Smartphones without ever sending play:false, retries dropped { uris } cleanly, reclaims via play:true if another device holds Connect, and honors shouldAbort', async () => {
+        // 1. Waking Smartphone (`wasInitiallyInactive === true`) surfaces Track 1 paused on 3rd check,
+        //    then flips to `is_playing: true, progress_ms: 180` after empty-body resume kick!
+        let stateCheckCount = 0;
+        const fakeSpotify = {
+            getAccessToken: () => 'token_wake_retry',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                stateCheckCount++;
+                if (stateCheckCount <= 2) {
+                    return null as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: stateCheckCount >= 4,
+                    progress_ms: stateCheckCount >= 4 ? 180 : 0,
+                    context: null,
+                    device: { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    item: { id: 't1', uri: 'spotify:track:t1', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const client = new SpotifyPlayerClient(fakeSpotify, undefined, {
+            isMobile: () => true,
+            transferSettleDelayMs: 0,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+
+        const resolvedId = await client.resolveTargetDevice();
+        assert.strictEqual(resolvedId, 'phone_sleep');
+        const wakeRes = await client.startPlaybackOnDevice(resolvedId, ['spotify:track:t1', 'spotify:track:t2']);
+
+        // 0: initial play ({ uris }) — NO play:false pre-transfer!
+        // 1: empty-body resume kick once 3rd check sees t1 loaded paused; 4th check confirms playing!
+        assert.strictEqual(wakeRes.confirmedPlaying, true);
+        assert.strictEqual(wakeRes.targetTrackLoaded, true);
+        assert.strictEqual(stateCheckCount, 4);
+        assert.strictEqual(fetchCalls.length, 2);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.ok(fetchCalls[0].init?.body);
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.strictEqual(fetchCalls[1].init?.body, undefined);
+
+        // 2. Waking Smartphone genuinely drops initial `{ uris }` across all 3 wake checks (`null` x 3):
+        //    retries `{ uris }` + empty-body kick WITHOUT sending ANY `play: false` transfer!
+        fetchCalls = [];
+        let droppedCheckCount = 0;
+        const droppedSpotify = {
+            getAccessToken: () => 'token_dropped',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                droppedCheckCount++;
+                if (droppedCheckCount <= 3) {
+                    return null as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: droppedCheckCount >= 5,
+                    progress_ms: droppedCheckCount >= 5 ? 210 : 0,
+                    context: null,
+                    device: { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    item: { id: 't1', uri: 'spotify:track:t1', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const droppedClient = new SpotifyPlayerClient(droppedSpotify, undefined, {
+            isMobile: () => true,
+            transferSettleDelayMs: 0,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const droppedId = await droppedClient.resolveTargetDevice();
+        const droppedRes = await droppedClient.startPlaybackOnDevice(droppedId, ['spotify:track:t1', 'spotify:track:t2']);
+
+        // 0: initial play ({ uris })
+        // 1: retry play ({ uris }) (NO /me/player play:false!)
+        // 2: empty-body resume kick
+        assert.strictEqual(droppedRes.confirmedPlaying, true);
+        assert.strictEqual(fetchCalls.length, 3);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.ok(fetchCalls[0].init?.body);
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.ok(fetchCalls[1].init?.body);
+        assert.strictEqual(fetchCalls[2].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.strictEqual(fetchCalls[2].init?.body, undefined);
+
+        // 3. If a DIFFERENT device (`pc_other`) actively holds the Connect session on check #2,
+        //    retryDroppedUris reclaims the mobile phone using `play: true` (NEVER `play: false`) before retrying `{ uris }`.
+        fetchCalls = [];
+        let stolenCheck = 0;
+        const stolenSpotify = {
+            getAccessToken: () => 'token_stolen',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                stolenCheck++;
+                if (stolenCheck <= 2) {
+                    return {
+                        is_playing: true,
+                        progress_ms: 5000,
+                        context: { type: 'playlist', uri: 'spotify:playlist:pc' } as SpotifyApi.ContextObject,
+                        device: { id: 'pc_other', name: 'Desktop', type: 'Computer', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                        item: { id: 'other', uri: 'spotify:track:other', type: 'track' } as SpotifyApi.TrackObjectFull,
+                    } as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: true,
+                    progress_ms: 250,
+                    context: null,
+                    device: { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    item: { id: 't1', uri: 'spotify:track:t1', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const stolenClient = new SpotifyPlayerClient(stolenSpotify, undefined, {
+            isMobile: () => true,
+            transferSettleDelayMs: 0,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const stolenId = await stolenClient.resolveTargetDevice();
+        const stolenRes = await stolenClient.startPlaybackOnDevice(stolenId, ['spotify:track:t1']);
+        assert.strictEqual(stolenRes.confirmedPlaying, true);
+        assert.strictEqual(fetchCalls.length, 3);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player');
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[1].init?.body)), {
+            device_ids: ['phone_sleep'],
+            play: true,
+        });
+        assert.strictEqual(fetchCalls[2].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+
+        // 4. Verify shouldAbort suppresses post-play verification/resume kicks
+        fetchCalls = [];
+        let aborted = false;
+        const abortingSpotify = {
+            getAccessToken: () => 'token_abort',
+            getMyCurrentPlaybackState: async () => {
+                aborted = true;
+                return {
+                    is_playing: false,
+                    progress_ms: 0,
+                    context: null,
+                    device: { id: 'phone_sleep', is_active: true } as SpotifyApi.UserDevice,
+                    item: { id: 't1', uri: 'spotify:track:t1', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const abortClient = new SpotifyPlayerClient(abortingSpotify, undefined, {
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const abortedRes = await abortClient.startPlaybackOnDevice('phone_sleep', ['spotify:track:t1'], {
+            shouldAbort: () => aborted,
+        });
+        assert.strictEqual(abortedRes.aborted, true);
+        assert.strictEqual(fetchCalls.length, 1);
+    });
+
+    it('detects progress_ms === 0 cloud mirage flipping to paused, handles relinked tracks without linked_from via expectedTrackKeys, and recovers stale is_active: true dropped { uris } without play:false', async () => {
+        // 1. Cloud mirage (`is_playing: true, progress_ms: 0` on 1st check -> `is_playing: false` on 2nd check ->
+        //    `is_playing: true, progress_ms: 320` on 3rd check after kickResume)
+        //    plus regional track relinking WITHOUT `linked_from` (`spotify:track:jp_relinked` != `spotify:track:intl_take_on_me`)!
+        const receivedOptions: unknown[] = [];
+        let mirageChecks = 0;
+        let kickCallbackCount = 0;
+        const mirageSpotify = {
+            getAccessToken: () => 'token_mirage',
+            getMyCurrentPlaybackState: async (opts?: unknown) => {
+                receivedOptions.push(opts);
+                mirageChecks++;
+                return {
+                    is_playing: mirageChecks !== 2,
+                    progress_ms: mirageChecks >= 3 ? 320 : 0,
+                    context: null,
+                    device: { id: 'phone_1', name: 'Pixel', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    item: {
+                        id: 'jp_relinked',
+                        uri: 'spotify:track:jp_relinked',
+                        name: 'Take On Me - 2015 Remaster',
+                        artists: [{ name: 'a-ha' }],
+                        type: 'track',
+                    } as unknown as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const mirageClient = new SpotifyPlayerClient(mirageSpotify, undefined, {
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+            transferSettleDelayMs: 0,
+        });
+
+        const mirageRes = await mirageClient.startPlaybackOnDevice('phone_1', ['spotify:track:intl_take_on_me'], {
+            expectedTrackKeys: ['take on me|a-ha'],
+            onResumeKickSent: () => {
+                kickCallbackCount++;
+            },
+        });
+
+        assert.strictEqual(mirageRes.confirmedPlaying, true);
+        assert.strictEqual(mirageChecks, 3);
+        assert.deepStrictEqual(receivedOptions[0], { market: 'from_token' });
+        assert.strictEqual(kickCallbackCount, 1);
+        assert.strictEqual(fetchCalls.length, 2);
+        assert.ok(fetchCalls[0].init?.body);
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_1');
+        assert.strictEqual(fetchCalls[1].init?.body, undefined);
+
+        // 2. Recently backgrounded Smartphone still marked stale `is_active: true` (`wasInitiallyInactive === false`)
+        //    drops the initial `{ uris }` (`postState === null`, `secondState === null`) -> retries `{ uris }` + kick WITHOUT `play: false`!
+        fetchCalls = [];
+        let staleActiveChecks = 0;
+        const resolvedDeviceSnapshots: SpotifyApi.UserDevice[][] = [];
+        const staleActiveSpotify = {
+            getAccessToken: () => 'token_stale_active',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_bg', name: 'Galaxy', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                staleActiveChecks++;
+                if (staleActiveChecks <= 2) {
+                    return null as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: staleActiveChecks >= 4,
+                    progress_ms: staleActiveChecks >= 4 ? 150 : 0,
+                    context: null,
+                    device: { id: 'phone_bg', name: 'Galaxy', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    item: { id: 't1', uri: 'spotify:track:t1', name: 'Song 1', artists: [{ name: 'Artist' }], type: 'track' } as unknown as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const staleActiveClient = new SpotifyPlayerClient(staleActiveSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+            transferSettleDelayMs: 0,
+            onDevicesResolved: (devs) => {
+                resolvedDeviceSnapshots.push(devs);
+            },
+        });
+
+        const bgDeviceId = await staleActiveClient.resolveTargetDevice();
+        assert.strictEqual(bgDeviceId, 'phone_bg');
+        assert.strictEqual(resolvedDeviceSnapshots.length, 1);
+        assert.strictEqual(resolvedDeviceSnapshots[0][0].id, 'phone_bg');
+
+        const staleRes = await staleActiveClient.startPlaybackOnDevice(bgDeviceId, ['spotify:track:t1']);
+        // 0: initial play ({ uris })
+        // 1: retry play ({ uris }) (NO /me/player play:false!)
+        // 2: empty-body resume kick because thirdState loaded paused
+        assert.strictEqual(staleRes.confirmedPlaying, true);
+        assert.strictEqual(fetchCalls.length, 3);
+        assert.ok(fetchCalls[0].init?.body);
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_bg');
+        assert.ok(fetchCalls[1].init?.body);
+        assert.strictEqual(fetchCalls[2].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_bg');
+        assert.strictEqual(fetchCalls[2].init?.body, undefined);
+    });
+
+    it('suppresses global onError notifications when resume() is called with { silent: true } while preserving explicit resume error reporting', async () => {
+        const reportedErrors: SpotifyApiErrorInfo[] = [];
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+            fetchCalls.push({ url: String(input), init });
+            return {
+                ok: false,
+                status: 403,
+                statusText: 'Forbidden',
+                headers: { get: () => null },
+                text: async () => 'Restriction violated',
+            } as unknown as Response;
+        }) as typeof fetch;
+
+        const fakeSpotify = {
+            getAccessToken: () => 'token_silent',
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const client = new SpotifyPlayerClient(fakeSpotify, (err) => {
+            reportedErrors.push(err);
+        });
+
+        const silentRes = await client.resume('phone_1', { silent: true });
+        assert.strictEqual(silentRes.ok, false);
+        assert.strictEqual(silentRes.status, 403);
+        assert.strictEqual(reportedErrors.length, 0);
+
+        const loudRes = await client.resume('phone_1');
+        assert.strictEqual(loudRes.ok, false);
+        assert.strictEqual(loudRes.status, 403);
+        assert.strictEqual(reportedErrors.length, 1);
+    });
+
+    it('grants extra settle check when inactive mobile device reports non-null idle state, honors pre-entry shouldAbort, and supports forcePlayTransfer resume with fallback', async () => {
+        // 1. Pre-entry shouldAbort prevents ANY fetch call in startPlaybackOnDevice (e.g. user paused during resolveTargetDevice)
+        const abortSpotify = {
+            getAccessToken: () => 'token_abort_early',
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const abortClient = new SpotifyPlayerClient(abortSpotify);
+        const earlyAbortRes = await abortClient.startPlaybackOnDevice('phone_1', ['spotify:track:t1'], {
+            shouldAbort: () => true,
+        });
+        assert.strictEqual(earlyAbortRes.aborted, true);
+        assert.strictEqual(fetchCalls.length, 0);
+
+        // 2. Waking inactive phone reports non-null `{ device: { id: 'phone_sleep', is_active: true }, is_playing: false, item: null }`
+        //    on checks #1 and #2, surfaces `t1` paused on check #3, and confirms playing on check #4 ->
+        //    must NOT send `play: false` or prematurely re-send `{ uris }`!
+        let idleWakeChecks = 0;
+        const idleWakeSpotify = {
+            getAccessToken: () => 'token_idle_wake',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                idleWakeChecks++;
+                if (idleWakeChecks <= 2) {
+                    return {
+                        is_playing: false,
+                        progress_ms: 0,
+                        context: null,
+                        device: { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                        item: null,
+                    } as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: idleWakeChecks >= 4,
+                    progress_ms: idleWakeChecks >= 4 ? 190 : 0,
+                    context: null,
+                    device: { id: 'phone_sleep', name: 'Android', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    item: { id: 't1', uri: 'spotify:track:t1', type: 'track' } as SpotifyApi.TrackObjectFull,
+                } as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const idleWakeClient = new SpotifyPlayerClient(idleWakeSpotify, undefined, {
+            isMobile: () => true,
+            transferSettleDelayMs: 0,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const targetId = await idleWakeClient.resolveTargetDevice();
+        const idleRes = await idleWakeClient.startPlaybackOnDevice(targetId, ['spotify:track:t1', 'spotify:track:t2']);
+
+        assert.strictEqual(idleRes.confirmedPlaying, true);
+        assert.strictEqual(idleWakeChecks, 4);
+        assert.strictEqual(fetchCalls.length, 2);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.ok(fetchCalls[0].init?.body);
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+        assert.strictEqual(fetchCalls[1].init?.body, undefined);
+
+        // 3. resume(deviceId, { silent: true, forcePlayTransfer: true }) sends PUT /v1/me/player { device_ids, play: true },
+        //    and falls back to PUT /v1/me/player/play?device_id=... if transfer fails.
+        fetchCalls = [];
+        const transferClient = new SpotifyPlayerClient({
+            getAccessToken: () => 'token_transfer_play',
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs);
+
+        const okTransfer = await transferClient.resume('phone_sleep', { silent: true, forcePlayTransfer: true });
+        assert.strictEqual(okTransfer.ok, true);
+        assert.strictEqual(fetchCalls.length, 1);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player');
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[0].init?.body)), {
+            device_ids: ['phone_sleep'],
+            play: true,
+        });
+
+        fetchCalls = [];
+        let callNum = 0;
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+            callNum++;
+            fetchCalls.push({ url: String(input), init });
+            if (callNum === 1) {
+                return {
+                    ok: false,
+                    status: 502,
+                    statusText: 'Bad Gateway',
+                    headers: { get: () => null },
+                    text: async () => 'Bad Gateway',
+                } as unknown as Response;
+            }
+            return {
+                ok: true,
+                status: 204,
+                statusText: 'No Content',
+                headers: { get: () => null },
+                text: async () => '',
+            } as unknown as Response;
+        }) as typeof fetch;
+
+        const fallbackTransfer = await transferClient.resume('phone_sleep', { silent: true, forcePlayTransfer: true });
+        assert.strictEqual(fallbackTransfer.ok, true);
+        assert.strictEqual(fetchCalls.length, 2);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player');
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_sleep');
+    });
+
+    it('reports confirmedPlaying: false on frozen / BFGS-blocked Android 16 phone and validates launchSpotifyAppUri, hasActiveBrowserUserGesture, and setActiveDevice({ play: true })', async () => {
+        // 1. Frozen Android 16 phone (`am_freeze` / `ForegroundKeeperService` stopped):
+        //    Spotify Cloud returns HTTP 204 on `PUT /me/player/play`, while `/me/player` stays stuck on
+        //    the previous external track ("Manteca - Live", `is_playing: false`)!
+        const frozenSpotify = {
+            getAccessToken: () => 'token_pixel10',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => ({
+                is_playing: false,
+                progress_ms: 431000,
+                context: { type: 'album', uri: 'spotify:album:dizzy' } as SpotifyApi.ContextObject,
+                device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                item: { id: 'manteca', uri: 'spotify:track:manteca', name: 'Manteca - Live', type: 'track' } as SpotifyApi.TrackObjectFull,
+            } as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const frozenClient = new SpotifyPlayerClient(frozenSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+
+        const pixelId = await frozenClient.resolveTargetDevice();
+        const frozenResult = await frozenClient.startPlaybackOnDevice(pixelId, ['spotify:track:new_jazz_1']);
+        assert.strictEqual(frozenResult.confirmedPlaying, false);
+        assert.strictEqual(frozenResult.targetTrackLoaded, false);
+        assert.strictEqual(frozenResult.isMobileTarget, true);
+        // Zero `play: false` requests were ever sent!
+        assert.strictEqual(
+            fetchCalls.some(c => c.url.endsWith('/me/player') && String(c.init?.body).includes('"play":false')),
+            false
+        );
+
+        // 2. BFGS-blocked phone loads Track 1 into Cloud state (`targetTrackLoaded: true`) but ignores `kickResume` (`is_playing: false`)
+        fetchCalls = [];
+        const bfgsPausedSpotify = {
+            getAccessToken: () => 'token_bfgs',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => ({
+                is_playing: false,
+                progress_ms: 0,
+                context: null,
+                device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                item: { id: 'new_jazz_1', uri: 'spotify:track:new_jazz_1', type: 'track' } as SpotifyApi.TrackObjectFull,
+            } as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const bfgsClient = new SpotifyPlayerClient(bfgsPausedSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const bfgsDevId = await bfgsClient.resolveTargetDevice();
+        const bfgsRes = await bfgsClient.startPlaybackOnDevice(bfgsDevId, ['spotify:track:new_jazz_1']);
+        assert.strictEqual(bfgsRes.targetTrackLoaded, true);
+        assert.strictEqual(bfgsRes.confirmedPlaying, false);
+        assert.strictEqual(bfgsRes.isMobileTarget, true);
+
+        // 3. setActiveDevice supports `{ play: true }` while keeping default body clean when omitted
+        fetchCalls = [];
+        await bfgsClient.setActiveDevice('pixel_10_pro_xl', { play: true });
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[0].init?.body)), {
+            device_ids: ['pixel_10_pro_xl'],
+            play: true,
+        });
+        await bfgsClient.setActiveDevice('pixel_10_pro_xl');
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[1].init?.body)), {
+            device_ids: ['pixel_10_pro_xl'],
+        });
+
+        // 4. Helper validations: isMobileSpotifyDevice, hasActiveBrowserUserGesture, launchSpotifyAppUri
+        assert.strictEqual(isMobileSpotifyDevice({ type: 'Smartphone' }), true);
+        assert.strictEqual(isMobileSpotifyDevice({ type: 'Tablet' }), true);
+        assert.strictEqual(isMobileSpotifyDevice({ type: 'Computer' }), false);
+        assert.strictEqual(isMobileSpotifyDevice(null), false);
+        assert.strictEqual(hasActiveBrowserUserGesture(), false);
+
+        const clickedHrefs: string[] = [];
+        const appendedNodes: unknown[] = [];
+        const removedNodes: unknown[] = [];
+        const fakeDoc = {
+            body: {
+                appendChild(node: { parentNode?: unknown }) {
+                    node.parentNode = this;
+                    appendedNodes.push(node);
+                    return node;
+                },
+                removeChild(node: { parentNode?: unknown }) {
+                    node.parentNode = null;
+                    removedNodes.push(node);
+                    return node;
+                },
+            },
+            createElement(tag: string) {
+                assert.strictEqual(tag, 'a');
+                const el = {
+                    href: '',
+                    rel: '',
+                    style: { display: '' },
+                    parentNode: null as unknown,
+                    click() {
+                        clickedHrefs.push(this.href);
+                    },
+                };
+                return el;
+            },
+        } as unknown as Document;
+
+        assert.strictEqual(launchSpotifyAppUri('spotify:', fakeDoc), true);
+        assert.deepStrictEqual(clickedHrefs, ['spotify:']);
+        assert.strictEqual(appendedNodes.length, 1);
+        assert.strictEqual(removedNodes.length, 1);
+
+        // Reject unsafe or non-spotify schemes and empty inputs
+        assert.strictEqual(launchSpotifyAppUri('javascript:alert(1)', fakeDoc), false);
+        assert.strictEqual(launchSpotifyAppUri('https://open.spotify.com', fakeDoc), false);
+        assert.strictEqual(launchSpotifyAppUri('', fakeDoc), false);
+        assert.strictEqual(launchSpotifyAppUri('spotify:', null), false);
+        assert.strictEqual(
+            launchSpotifyAppUri('intent://home#Intent;scheme=spotify;package=com.evil.app;end', fakeDoc),
+            false
+        );
+        assert.strictEqual(
+            launchSpotifyAppUri('intent://home#Intent;scheme=http;package=com.spotify.music;end', fakeDoc),
+            false
+        );
+        assert.strictEqual(clickedHrefs.length, 1);
+
+        // Android WebAPK / Chrome resolves package-targeted `com.spotify.music` intent:// URI by default,
+        // while iOS / Desktop resolves `spotify:`
+        assert.strictEqual(
+            resolveSpotifyWakeUri(
+                'Mozilla/5.0 (Linux; Android 17; Pixel 10 Pro XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36'
+            ),
+            SPOTIFY_ANDROID_WAKE_INTENT_URI
+        );
+        assert.strictEqual(
+            resolveSpotifyWakeUri(
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1'
+            ),
+            'spotify:'
+        );
+
+        const origNavDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+        try {
+            Object.defineProperty(globalThis, 'navigator', {
+                value: {
+                    userAgent:
+                        'Mozilla/5.0 (Linux; Android 17; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36',
+                },
+                configurable: true,
+                writable: true,
+            });
+            assert.strictEqual(launchSpotifyAppUri(undefined, fakeDoc), true);
+            assert.strictEqual(clickedHrefs[1], SPOTIFY_ANDROID_WAKE_INTENT_URI);
+        } finally {
+            if (origNavDesc) {
+                Object.defineProperty(globalThis, 'navigator', origNavDesc);
+            } else {
+                delete (globalThis as Record<string, unknown>).navigator;
+            }
+        }
+    });
+
+    it('preserves Smartphone classification across Computer switches, supports deferTransfer without idle PUT /me/player, avoids trailing resolveTargetDevice delay, and fast-fails dead mobile targets under user gesture', async () => {
+        // 1. Even if `lastResolvedDevice` previously pointed to `pc_1` (`Computer`), `knownDevices` remembers
+        //    `phone_1` (`Smartphone`, `is_active: false`) so `startPlaybackOnDevice('phone_1')` NEVER sends `play: false`!
+        const multiSpotify = {
+            getAccessToken: () => 'token_multi',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pc_1', name: 'Desktop PC', type: 'Computer', is_active: true, is_restricted: false },
+                    { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const desktopRuntimeClient = new SpotifyPlayerClient(multiSpotify, undefined, {
+            isMobile: () => false,
+            transferSettleDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const firstResolved = await desktopRuntimeClient.resolveTargetDevice();
+        assert.strictEqual(firstResolved, 'pc_1');
+
+        // Defer transfer pins `phone_1` without firing any idle `PUT /v1/me/player` that would stop Android FGS
+        fetchCalls = [];
+        const deferRes = await desktopRuntimeClient.setActiveDevice('phone_1', { deferTransfer: true });
+        assert.strictEqual(deferRes.ok, true);
+        assert.strictEqual(fetchCalls.length, 0);
+        assert.strictEqual(desktopRuntimeClient.getPreferredDeviceId(), 'phone_1');
+
+        const phonePlayRes = await desktopRuntimeClient.startPlaybackOnDevice('phone_1', ['spotify:track:t1']);
+        assert.strictEqual(phonePlayRes.isMobileTarget, true);
+        assert.strictEqual(
+            fetchCalls.some(c => c.url.endsWith('/me/player') && String(c.init?.body).includes('"play":false')),
+            false
+        );
+        assert.strictEqual(fetchCalls.length, 1);
+        assert.strictEqual(fetchCalls[0].url, 'https://api.spotify.com/v1/me/player/play?device_id=phone_1');
+
+        // 2. `resolveTargetDevice` does NOT waste `pollDelayMs` sleeping after the final attempt
+        let emptyAttempts = 0;
+        const delayCalls: number[] = [];
+        const emptySpotify = {
+            getAccessToken: () => 'token_empty',
+            getMyDevices: async () => {
+                emptyAttempts++;
+                return { devices: [] as SpotifyApi.UserDevice[] };
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const fastPollClient = new SpotifyPlayerClient(emptySpotify, undefined, {
+            isMobile: () => true,
+            devicePollDelayMs: 60,
+        });
+        (fastPollClient as unknown as { delay: (ms: number) => Promise<void> }).delay = async (ms: number) => {
+            delayCalls.push(ms);
+        };
+        await assert.rejects(
+            () => fastPollClient.resolveTargetDevice({ maxAttempts: 2, pollDelayMs: 30 }),
+            /No active device found/
+        );
+        assert.strictEqual(emptyAttempts, 2);
+        // Only 1 inter-attempt delay of 30ms between attempt 1 and attempt 2 (zero trailing sleep!)
+        assert.deepStrictEqual(delayCalls, [30]);
+
+        // 3. `fastFailForUserGesture: true` skips second dead-device `PUT /player/play` retry on frozen phone
+        //    so Chromium's 5.0s `TransientUserActivation` window remains valid for 1-tap `spotify:` wake,
+        //    while STILL reclaiming Connect via `play: true` if another device (`pc_1`) holds the session!
+        fetchCalls = [];
+        const deadPhoneSpotify = {
+            getAccessToken: () => 'token_dead_gesture',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => null,
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const gestureClient = new SpotifyPlayerClient(deadPhoneSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const resolvedPhone = await gestureClient.resolveTargetDevice();
+        const deadGestureRes = await gestureClient.startPlaybackOnDevice(
+            resolvedPhone,
+            ['spotify:track:fast1'],
+            { fastFailForUserGesture: true }
+        );
+        assert.strictEqual(deadGestureRes.confirmedPlaying, false);
+        assert.strictEqual(deadGestureRes.targetTrackLoaded, false);
+        // Only 1 `PUT /player/play` call (zero redundant second dead-device retry!)
+        assert.strictEqual(fetchCalls.filter(c => c.url.includes('/player/play')).length, 1);
+
+        // When another device (`pc_1`) holds Connect, `fastFailForUserGesture: true` still reclaims via `play: true`!
+        fetchCalls = [];
+        let transferredToPhone = false;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.endsWith('/me/player') && String(init?.body).includes('"play":true')) {
+                transferredToPhone = true;
+            }
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+        const heldByPcSpotify = {
+            getAccessToken: () => 'token_held_pc',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pc_1', name: 'PC', type: 'Computer', is_active: true, is_restricted: false },
+                    { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () =>
+                transferredToPhone
+                    ? ({
+                          is_playing: true,
+                          progress_ms: 350,
+                          context: null,
+                          device: { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: { id: 'fast1', uri: 'spotify:track:fast1', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse)
+                    : ({
+                          is_playing: true,
+                          progress_ms: 12000,
+                          context: null,
+                          device: { id: 'pc_1', name: 'PC', type: 'Computer', is_active: true, is_restricted: false },
+                          item: { id: 'other', uri: 'spotify:track:other', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const stealClient = new SpotifyPlayerClient(heldByPcSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+            transferSettleDelayMs: 0,
+        });
+        const stealTarget = await stealClient.resolveTargetDevice();
+        assert.strictEqual(stealTarget, 'phone_1');
+        const stealRes = await stealClient.startPlaybackOnDevice(
+            stealTarget,
+            ['spotify:track:fast1'],
+            { fastFailForUserGesture: true }
+        );
+        assert.strictEqual(stealRes.confirmedPlaying, true);
+        assert.strictEqual(transferredToPhone, true);
+
+        // Rejects persistent 0ms cloud mirage and repeated verification errors on mobile targets
+        const stuckMirageSpotify = {
+            getAccessToken: () => 'token_stuck_mirage',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => ({
+                is_playing: true,
+                progress_ms: 0,
+                context: null,
+                device: { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                item: { id: 'fast1', uri: 'spotify:track:fast1', type: 'track' },
+            } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const stuckMirageClient = new SpotifyPlayerClient(stuckMirageSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await stuckMirageClient.resolveTargetDevice();
+        const stuckMirageRes = await stuckMirageClient.startPlaybackOnDevice('phone_1', ['spotify:track:fast1']);
+        assert.strictEqual(stuckMirageRes.targetTrackLoaded, true);
+        assert.strictEqual(stuckMirageRes.confirmedPlaying, false);
+
+        const throwingVerifySpotify = {
+            getAccessToken: () => 'token_throw_verify',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                throw new Error('503 Service Unavailable');
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const throwingVerifyClient = new SpotifyPlayerClient(throwingVerifySpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await throwingVerifyClient.resolveTargetDevice();
+        const throwingVerifyRes = await throwingVerifyClient.startPlaybackOnDevice('phone_1', ['spotify:track:fast1']);
+        assert.strictEqual(throwingVerifyRes.confirmedPlaying, false);
+    });
+
+    it('resolveTargetDevice({ fastFailOnEmpty: true }) aborts immediately on empty device list without retry delay while still retrying restricted devices', async () => {
+        let emptyCalls = 0;
+        const emptySpotify = {
+            getAccessToken: () => 'token_empty',
+            getMyDevices: async () => {
+                emptyCalls++;
+                return { devices: [] };
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const fastFailClient = new SpotifyPlayerClient(emptySpotify, undefined, {
+            isMobile: () => true,
+            devicePollDelayMs: 5000, // Would block 10s if not fast-failed!
+        });
+        const startedAt = Date.now();
+        await assert.rejects(
+            async () => fastFailClient.resolveTargetDevice({ fastFailOnEmpty: true }),
+            /No active device found/
+        );
+        const elapsedMs = Date.now() - startedAt;
+        assert.strictEqual(emptyCalls, 1);
+        assert.ok(elapsedMs < 500, `Expected immediate fast-fail without 5s poll delay, took ${elapsedMs}ms`);
+
+        // Non-empty restricted list still retries and resolves when unrestricted on attempt 2
+        let restrictedAttempt = 0;
+        const wakingRestrictedSpotify = {
+            getAccessToken: () => 'token_restricted_wake',
+            getMyDevices: async () => {
+                restrictedAttempt++;
+                if (restrictedAttempt === 1) {
+                    return {
+                        devices: [
+                            { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: true } as SpotifyApi.UserDevice,
+                        ],
+                    };
+                }
+                return {
+                    devices: [
+                        { id: 'phone_1', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                    ],
+                };
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const retryRestrictedClient = new SpotifyPlayerClient(wakingRestrictedSpotify, undefined, {
+            isMobile: () => true,
+            devicePollDelayMs: 0,
+        });
+        const resolvedId = await retryRestrictedClient.resolveTargetDevice({ fastFailOnEmpty: true });
+        assert.strictEqual(resolvedId, 'phone_1');
+        assert.strictEqual(restrictedAttempt, 2);
     });
 });

@@ -4,13 +4,16 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import { DJCore } from '../lib/dj-core';
 import { SpotifyAuth } from '../lib/spotify-auth';
 import { STORAGE_KEYS, PLAYBACK_CONSTANTS, DEFAULT_MODELS, DEFAULTS } from '../lib/constants';
-import { AIProvider, ScheduleItem, SpotifyApiErrorInfo, Track } from '../lib/types';
+import { AIProvider, ScheduleItem, SpotifyApiErrorInfo, SpotifyControlResult, Track } from '../lib/types';
 import { getStorageItem, removeStorageItem, getStoredJSON, setStoredJSON } from '../lib/storage';
 import { useDJPollingLoops } from '../hooks/useDJPollingLoops';
 import { useIsHydrated } from '../hooks/useIsHydrated';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
 import {
+    hasActiveBrowserUserGesture,
     isMobileBrowserEnvironment,
+    isMobileSpotifyDevice,
+    launchSpotifyAppUri,
     selectTargetSpotifyDevice,
     shouldSuppressBackgroundKeepAlive,
 } from '../lib/spotify-player-client';
@@ -19,6 +22,7 @@ import {
     getScheduleItemSignature,
     isWaitingForScheduleStart,
     resolveScheduleThought,
+    resolveSessionPlaybackDisplay,
 } from '../lib/dj-utils';
 
 const EMPTY_SCHEDULE: ScheduleItem[] = [];
@@ -49,11 +53,13 @@ export interface PlayerPlaybackContextType {
     status: string;
     currentTrack: Track | null;
     isPlaying: boolean;
+    isPlayPending: boolean;
     deviceName: string;
     devices: SpotifyApi.UserDevice[];
     currentQuery: string | null;
     currentThought: string | null;
     error: string | null;
+    mobileWakeRequired: boolean;
 }
 
 export interface PlayerActionsContextType {
@@ -68,6 +74,7 @@ export interface PlayerActionsContextType {
     handleNext: () => Promise<void>;
     handlePrev: () => Promise<void>;
     handleTogglePlay: () => Promise<void>;
+    handleWakeSpotify: () => Promise<void>;
     handlePlayQueueIndex: (index: number) => Promise<void>;
     handleRemoveScheduleItem: (index: number) => void;
     clearError: () => void;
@@ -139,9 +146,95 @@ export function applyStoredConfigToDJ(dj: DJCore) {
     }
 
     const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
+    const savedPersonalPref = getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, '');
     dj.updateConfig({
-        aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
+        aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true',
+        personalPreference: savedPersonalPref,
     });
+}
+
+export interface MobileWakeSequenceTarget {
+    getDevices: () => Promise<SpotifyApi.UserDevice[]>;
+    resume: (options?: { fromMobileWake?: boolean }) => Promise<SpotifyControlResult>;
+    getPreferredDeviceId?: () => string | null;
+}
+
+export interface RunMobileSpotifyWakeOptions {
+    dj: MobileWakeSequenceTarget;
+    launchUri?: () => boolean;
+    shouldAbort?: () => boolean;
+    pollDelaysMs?: number[];
+    delayFn?: (ms: number) => Promise<void>;
+    onDevicesPolled?: (devices: SpotifyApi.UserDevice[]) => void;
+}
+
+/**
+ * Determines whether `pendingMobileWakeTimestampRef` should remain armed after a mobile wake
+ * sequence finishes without starting audio. When ContextDJ is hidden (`visibilityState === 'hidden'`),
+ * Android/iOS may have throttled or blocked background fetches while Spotify cold-started in foreground,
+ * so retaining the timestamp lets `handleVisibilityWakeReturn` finish playback as soon as the user returns.
+ */
+export function shouldRetainPendingMobileWake(
+    started: boolean,
+    visibilityState?: string
+): boolean {
+    return !started && visibilityState === 'hidden';
+}
+
+/**
+ * Fires the platform-appropriate Spotify wake URI (`intent://...package=com.spotify.music...` on Android,
+ * `spotify:` on iOS) synchronously at `t = 0ms` (preserving transient browser user activation)
+ * to unfreeze / foreground the mobile Spotify app, then polls Connect devices until a mobile
+ * target (or explicit preferred device) registers and triggers `dj.resume({ fromMobileWake: true })`.
+ */
+export async function runMobileSpotifyWakeSequence(
+    options: RunMobileSpotifyWakeOptions
+): Promise<{ launched: boolean; started: boolean }> {
+    const launchFn = options.launchUri ?? (() => launchSpotifyAppUri());
+    const delayFn =
+        options.delayFn ??
+        ((ms: number) =>
+            ms <= 0
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => {
+                      setTimeout(resolve, ms);
+                  }));
+    const delays = options.pollDelaysMs ?? [900, 1200, 1500, 2000, 2500];
+
+    const launched = launchFn();
+
+    for (const waitMs of delays) {
+        await delayFn(waitMs);
+        if (options.shouldAbort?.()) {
+            return { launched, started: false };
+        }
+        try {
+            const freshDevices = await options.dj.getDevices();
+            options.onDevicesPolled?.(freshDevices);
+            if (options.shouldAbort?.()) {
+                return { launched, started: false };
+            }
+            const controllable = freshDevices.filter(d => Boolean(d && d.id && !d.is_restricted));
+            const preferredId = options.dj.getPreferredDeviceId?.() ?? null;
+            const hasWakeTarget = controllable.some(
+                d => (preferredId && d.id === preferredId) || !d.type || isMobileSpotifyDevice(d)
+            );
+            if (!hasWakeTarget) {
+                continue;
+            }
+            const res = await options.dj.resume({ fromMobileWake: true });
+            if (options.shouldAbort?.()) {
+                return { launched, started: false };
+            }
+            if (res.ok) {
+                return { launched, started: true };
+            }
+        } catch (wakeErr) {
+            console.warn('Mobile Spotify wake poll attempt warning:', wakeErr);
+        }
+    }
+
+    return { launched, started: false };
 }
 
 export function isSameTrackDisplay(a: Track | null, b: Track | null): boolean {
@@ -172,8 +265,51 @@ const CONFIG_AND_AUTH_STORAGE_KEYS = new Set<string>([
     STORAGE_KEYS.GEMINI_MODEL,
     STORAGE_KEYS.SELECTED_AI_PROVIDER,
     STORAGE_KEYS.AI_FILTERING_ENABLED,
+    STORAGE_KEYS.PERSONAL_PREFERENCE,
     STORAGE_KEYS.BACKGROUND_KEEP_ALIVE,
 ]);
+
+export function resolveDisplayedDeviceName(params: {
+    playbackState: SpotifyApi.CurrentPlaybackResponse | null;
+    devices: SpotifyApi.UserDevice[];
+    previousDeviceName: string;
+    hasFetchedDevices: boolean;
+    preferredDeviceId?: string | null;
+    isMobile?: boolean;
+}): string {
+    const {
+        playbackState,
+        devices,
+        previousDeviceName,
+        hasFetchedDevices,
+        preferredDeviceId = null,
+        isMobile = false,
+    } = params;
+
+    if (playbackState && playbackState.device && !playbackState.__optimisticFallback) {
+        return playbackState.device.name || '';
+    }
+
+    if (devices.length > 0) {
+        const activeD = devices.find(d => d.is_active && !d.is_restricted) || devices.find(d => d.is_active);
+        if (activeD) {
+            return activeD.name || '';
+        }
+        const targetD = selectTargetSpotifyDevice(devices, {
+            preferredDeviceId,
+            isMobile,
+        });
+        if (targetD) {
+            return targetD.name || '';
+        }
+    }
+
+    if (playbackState?.__optimisticFallback || !hasFetchedDevices) {
+        return previousDeviceName;
+    }
+
+    return '';
+}
 
 export function classifyStorageEventAction(key: string | null): CrossTabStorageAction {
     if (key === null || CONFIG_AND_AUTH_STORAGE_KEYS.has(key)) {
@@ -245,6 +381,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const [devices, setDevices] = useState<SpotifyApi.UserDevice[]>([]);
     const [djLogs, setDjLogs] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
+    const [mobileWakeRequired, setMobileWakeRequired] = useState<boolean>(false);
+    const [isPlayPending, setIsPlayPending] = useState<boolean>(false);
 
     const djRef = useRef<DJCore | null>(null);
     const detachDJSubscriptionsRef = useRef<(() => void) | null>(null);
@@ -253,6 +391,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const lastTrackUriRef = useRef<string | null>(currentTrack?.uri || null);
     const currentTrackRef = useRef<Track | null>(currentTrack);
     const isPlayingRef = useRef<boolean>(false);
+    const isPlayPendingRef = useRef<boolean>(false);
     const deviceNameRef = useRef<string>('');
     const lastProgressMsRef = useRef<number | null>(null);
     const isRefreshingTokenRef = useRef<boolean>(false);
@@ -264,10 +403,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const queueRef = useRef<Track[]>([]);
     const hasInitialQueueSyncRef = useRef<boolean>(false);
     const devicesRef = useRef<SpotifyApi.UserDevice[]>([]);
+    const hadPlaybackDeviceRef = useRef<boolean>(false);
+    const wakeSeqIdRef = useRef<number>(0);
+    const pendingMobileWakeTimestampRef = useRef<number>(0);
+    const lastWakeTapTimeRef = useRef<number>(0);
+    const playToggleSeqRef = useRef<number>(0);
+
+    const updateIsPlayPending = useCallback((next: boolean) => {
+        isPlayPendingRef.current = next;
+        setIsPlayPending(next);
+    }, []);
 
     const updateIsPlaying = useCallback((next: boolean) => {
         isPlayingRef.current = next;
         setIsPlaying(next);
+        if (next) {
+            isPlayPendingRef.current = false;
+            setIsPlayPending(false);
+        }
     }, []);
 
     const updateDeviceName = useCallback((next: string) => {
@@ -331,7 +484,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
     }, []);
 
+    const cancelPendingMobileWake = useCallback(() => {
+        wakeSeqIdRef.current++;
+        playToggleSeqRef.current++;
+        pendingMobileWakeTimestampRef.current = 0;
+        lastWakeTapTimeRef.current = 0;
+        updateIsPlayPending(false);
+        djRef.current?.setMobileWakeInProgress(false);
+    }, [updateIsPlayPending]);
+
     const resetLoggedOutState = useCallback((nextSetup: SetupStatus, nextStatus: string) => {
+        cancelPendingMobileWake();
+        setMobileWakeRequired(false);
         stopBackgroundKeepAlive();
         convergenceRef.current.cancel();
         if (detachDJSubscriptionsRef.current) {
@@ -342,6 +506,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setDjCore(null);
         updateIsPlaying(false);
         updateDeviceName('');
+        hadPlaybackDeviceRef.current = false;
         updateDevicesState([]);
         updateQueueState([]);
         currentTrackRef.current = null;
@@ -354,7 +519,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             authorized: false,
             isAuthPending: false,
         }));
-    }, [stopBackgroundKeepAlive, updateIsPlaying, updateDeviceName, updateDevicesState, updateQueueState]);
+    }, [cancelPendingMobileWake, stopBackgroundKeepAlive, updateIsPlaying, updateDeviceName, updateDevicesState, updateQueueState]);
 
     const handleAuthExpired = useCallback(() => {
         if (isRefreshingTokenRef.current) return;
@@ -394,38 +559,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastProgressMsRef.current = playbackState.progress_ms;
             }
 
-            const rawTrackItem = (playbackState && playbackState.item && playbackState.item.type === 'track')
-                ? (playbackState.item as Track)
-                : null;
-
             const isSessionActive = typeof djRef.current.isSessionPlaybackActive === 'function'
                 ? djRef.current.isSessionPlaybackActive()
                 : false;
-
-            const hasExternalContextUri = Boolean(playbackState?.context?.uri);
-            const isRawTrackInSession = Boolean(
-                !hasExternalContextUri &&
-                rawTrackItem &&
-                djRef.current.findTrackIndexInSession(rawTrackItem) >= 0
-            );
-            // If ContextDJ has an active session and Spotify is paused/idle on a leftover external track
-            // OR playing a leftover external track while ContextDJ's session has not yet been confirmed on the device,
-            // keep ContextDJ's session track & show Play (not Pause) so pressing Play starts ContextDJ Track 1 immediately.
-            const isForeignOrIdleInSession = Boolean(
-                isSessionActive &&
-                !playbackState?.__optimisticFallback &&
-                !isRawTrackInSession
-            );
-            const sessionTracks = djRef.current.getSessionCache().getSessionTracks();
-            const sessionStartIdx = djRef.current.getSessionCache().getSessionStartIndex();
-            const authoritativeSessionTrack =
-                sessionTracks[sessionStartIdx] ??
-                (currentTrackRef.current && djRef.current.findTrackIndexInSession(currentTrackRef.current) >= 0
-                    ? currentTrackRef.current
-                    : null);
-            const currentTrackItem = isForeignOrIdleInSession
-                ? authoritativeSessionTrack
-                : rawTrackItem;
+            const sessionCache = djRef.current.getSessionCache();
+            const currentDj = djRef.current;
+            const {
+                currentTrackItem,
+                isForeignOrIdleInSession,
+                effectiveIsPlaying,
+                shouldPersistSessionTrack,
+                shouldUpdateSessionCache,
+            } = resolveSessionPlaybackDisplay({
+                playbackState,
+                isSessionActive,
+                hasConfirmedPlayback:
+                    typeof currentDj.hasConfirmedPlayback === 'function'
+                        ? currentDj.hasConfirmedPlayback()
+                        : sessionCache.getHasConfirmedSessionPlayback(),
+                isBatchExhausted: sessionCache.isBatchExhausted(),
+                sessionTracks: sessionCache.getSessionTracks(),
+                sessionStartIndex: sessionCache.getSessionStartIndex(),
+                previousDisplayedTrack: currentTrackRef.current,
+                findTrackIndexInSession: (t) => currentDj.findTrackIndexInSession(t),
+                isKnownRefillCarryoverTrack: (t) => sessionCache.isKnownRefillCarryoverTrack(t),
+            });
 
             const currentTrackUri = currentTrackItem?.uri || null;
             const trackChanged = !guard.suppressTrackUpdate && currentTrackUri !== lastTrackUriRef.current;
@@ -443,9 +601,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             // 2. Conditionally fetch Queue (skip overwriting optimistic queue if track is still in stale transition)
             const lastPlayTime = typeof djRef.current.getLastPlayTime === 'function' ? djRef.current.getLastPlayTime() : 0;
             const newPlayOccurred = lastPlayTime > lastQueueSyncPlayTimeRef.current;
-            const currentSessionVersion = typeof djRef.current.getSessionCache === 'function'
-                ? djRef.current.getSessionCache().getSessionVersion()
-                : 0;
+            const currentSessionVersion = sessionCache.getSessionVersion();
             const sessionTracksChanged = currentSessionVersion !== lastSyncedSessionVersionRef.current;
             const shouldFetchQueue = !guard.suppressTrackUpdate && (
                 forceAll || trackChanged || sessionModeChanged || !hasInitialQueueSyncRef.current || newPlayOccurred || sessionTracksChanged
@@ -455,9 +611,30 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 queuePromise = djRef.current.getQueue(currentTrackItem);
             }
 
-            // 3. Conditionally fetch Devices
+            // 3. Conditionally fetch Devices (also refresh promptly when a live device disappears from playbackState,
+            //    e.g. Android 17 Cached App Freezer froze background Spotify even after an idle is_active=false poll)
             const now = Date.now();
-            const shouldFetchDevices = forceAll || devicesRef.current.length === 0 ||
+            const hasLivePlaybackDevice = Boolean(
+                playbackState?.device && !playbackState.__optimisticFallback
+            );
+            const playbackDeviceJustVanished = Boolean(
+                !playbackState?.__optimisticFallback &&
+                hadPlaybackDeviceRef.current &&
+                !hasLivePlaybackDevice
+            );
+            hadPlaybackDeviceRef.current = hasLivePlaybackDevice;
+            const activeDeviceVanishedFromPlayback = Boolean(
+                playbackDeviceJustVanished ||
+                (
+                    !playbackState?.device &&
+                    devicesRef.current.some(d => d.is_active) &&
+                    now - lastDevicesFetchRef.current > 3000
+                )
+            );
+            const shouldFetchDevices =
+                forceAll ||
+                devicesRef.current.length === 0 ||
+                activeDeviceVanishedFromPlayback ||
                 (now - lastDevicesFetchRef.current > PLAYBACK_CONSTANTS.DEVICE_REFRESH_INTERVAL_MS);
             let devicesPromise: Promise<SpotifyApi.UserDevice[]> | null = null;
             if (shouldFetchDevices) {
@@ -468,7 +645,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             if (queuePromise) {
                 const currentQ = await queuePromise;
                 hasInitialQueueSyncRef.current = true;
-                updateQueueState(currentQ.slice(0, 20));
+                updateQueueState(currentQ.slice(0, PLAYBACK_CONSTANTS.MAX_DISPLAYED_QUEUE_ITEMS));
                 lastQueueSyncPlayTimeRef.current = lastPlayTime;
                 lastSyncedSessionVersionRef.current = currentSessionVersion;
             }
@@ -494,29 +671,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             }
 
             // Determine Device Name (suppress stale device revert while device transfer is converging,
-            // and never overwrite a real device name with synthetic startup fallback 'Connecting...')
+            // never overwrite a real device name with synthetic startup fallback 'Connecting...',
+            // and clear stale device name when all Connect devices vanish / freeze)
             if (!guard.suppressDeviceUpdate) {
-                let activeDeviceName = '';
-                if (playbackState && playbackState.device && !playbackState.__optimisticFallback) {
-                    activeDeviceName = playbackState.device.name;
-                } else if (latestDevices.length > 0) {
-                    const activeD = latestDevices.find(d => d.is_active && !d.is_restricted) || latestDevices.find(d => d.is_active);
-                    if (activeD) {
-                        activeDeviceName = activeD.name;
-                    } else {
-                        const targetD = selectTargetSpotifyDevice(latestDevices, {
-                            preferredDeviceId: typeof djRef.current.getPreferredDeviceId === 'function'
-                                ? djRef.current.getPreferredDeviceId()
-                                : null,
-                            isMobile: isMobileBrowserEnvironment(),
-                        });
-                        if (targetD) activeDeviceName = targetD.name;
-                    }
-                } else if (playbackState?.device?.name && !deviceNameRef.current) {
-                    activeDeviceName = playbackState.device.name;
-                }
-                if (activeDeviceName && activeDeviceName !== deviceNameRef.current) {
-                    updateDeviceName(activeDeviceName);
+                const nextDeviceName = resolveDisplayedDeviceName({
+                    playbackState,
+                    devices: latestDevices,
+                    previousDeviceName: deviceNameRef.current,
+                    hasFetchedDevices: lastDevicesFetchRef.current > 0,
+                    preferredDeviceId: typeof djRef.current.getPreferredDeviceId === 'function'
+                        ? djRef.current.getPreferredDeviceId()
+                        : null,
+                    isMobile: isMobileBrowserEnvironment(),
+                });
+                if (nextDeviceName !== deviceNameRef.current) {
+                    updateDeviceName(nextDeviceName);
                 }
             }
 
@@ -525,17 +694,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 if (!guard.suppressTrackUpdate) {
                     const finalTrack = djRef.current.enrichTrackWithCachedMetadata(currentTrackItem);
                     currentTrackRef.current = finalTrack;
-                    const shouldUpdateSessionCache = Boolean(playbackState && !playbackState.__optimisticFallback && !isForeignOrIdleInSession);
                     setCurrentTrack(prev => {
                         if (isSameTrackDisplay(prev, finalTrack)) {
                             return prev;
                         }
-                        persistPlayingTrack(finalTrack, shouldUpdateSessionCache);
+                        if (shouldPersistSessionTrack) {
+                            persistPlayingTrack(finalTrack, shouldUpdateSessionCache);
+                        }
                         return finalTrack;
                     });
                 }
                 if (!guard.suppressPlayStateUpdate) {
-                    updateIsPlaying(!isForeignOrIdleInSession && Boolean(playbackState?.is_playing));
+                    updateIsPlaying(effectiveIsPlaying);
                 }
             } else if (!guard.suppressTrackUpdate) {
                 const isNonTrackMedia = Boolean(
@@ -588,20 +758,37 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setScheduleState(initialSnapshot.schedule);
         setCurrentQuery(initialSnapshot.currentQuery);
         setCurrentThought(initialSnapshot.currentThought);
+        setMobileWakeRequired(Boolean(initialSnapshot.mobileWakeRequired));
         if (initialSnapshot.status.startsWith('⏰')) {
             setStatus(initialSnapshot.status);
         }
 
         dj.setErrorCallback((errMsg: string, errInfo?: SpotifyApiErrorInfo) => {
-            setError(prev => (prev === errMsg ? prev : errMsg));
             if (errInfo?.category === 'auth_expired') {
                 handleAuthExpired();
             }
+            const isCritical =
+                errInfo?.category === 'auth_expired' ||
+                errInfo?.category === 'forbidden' ||
+                errInfo?.category === 'rate_limited';
+            if (
+                !isCritical &&
+                ((typeof dj.isMobileWakeInProgress === 'function' && dj.isMobileWakeInProgress()) ||
+                    (errInfo?.category === 'device_not_found' &&
+                        typeof dj.canWakeLocalMobileSpotify === 'function' &&
+                        dj.canWakeLocalMobileSpotify()))
+            ) {
+                return;
+            }
+            setError(prev => (prev === errMsg ? prev : errMsg));
         });
         const unsubscribeState = dj.subscribe((snapshot) => {
-            setStatus(snapshot.status);
+            if (!(typeof dj.isMobileWakeInProgress === 'function' && dj.isMobileWakeInProgress())) {
+                setStatus(snapshot.status);
+            }
             setCurrentQuery(snapshot.currentQuery);
             setCurrentThought(snapshot.currentThought);
+            setMobileWakeRequired(Boolean(snapshot.mobileWakeRequired));
             setScheduleState(prev => (prev === snapshot.schedule ? prev : snapshot.schedule));
         });
         const unsubscribeLogs = dj.subscribeLogs((latestLogs) => {
@@ -612,18 +799,52 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             );
         });
 
-        dj.setOnTracksPlayedCallback((tracks) => {
+        dj.setOnDevicesUpdatedCallback((freshDevices) => {
+            lastDevicesFetchRef.current = Date.now();
+            updateDevicesState(freshDevices);
+            if (
+                freshDevices.filter(d => Boolean(d && d.id && !d.is_restricted)).length === 0 &&
+                !isPlayingRef.current &&
+                deviceNameRef.current
+            ) {
+                updateDeviceName('');
+            }
+            if (
+                backgroundAudioRef.current &&
+                shouldSuppressBackgroundKeepAlive({
+                    isMobile: isMobileBrowserEnvironment(),
+                    devices: freshDevices,
+                    preferredDeviceId: typeof dj.getPreferredDeviceId === 'function'
+                        ? dj.getPreferredDeviceId()
+                        : null,
+                })
+            ) {
+                stopBackgroundKeepAlive();
+            }
+        });
+
+        dj.setOnTracksPlayedCallback((tracks, meta) => {
             if (tracks.length > 0) {
                 setError(null);
+                updateIsPlayPending(false);
                 const first = tracks[0];
                 currentTrackRef.current = first;
                 setCurrentTrack(first);
                 persistPlayingTrack(first, false);
-                updateQueueState(tracks.slice(1, 21));
-                updateIsPlaying(true);
+                updateQueueState(tracks.slice(1, PLAYBACK_CONSTANTS.MAX_DISPLAYED_QUEUE_ITEMS + 1));
                 lastTrackUriRef.current = first.uri;
                 lastQueueSyncPlayTimeRef.current = dj.getLastPlayTime();
                 lastSyncedSessionVersionRef.current = dj.getSessionCache().getSessionVersion();
+
+                if (meta && meta.confirmedPlaying === false) {
+                    convergenceRef.current.cancel();
+                    updateIsPlaying(false);
+                    setMobileWakeRequired(Boolean(meta.mobileWakeRequired));
+                    return;
+                }
+
+                setMobileWakeRequired(false);
+                updateIsPlaying(true);
                 void convergenceRef.current.syncUntilConverged(
                     {
                         expectedTrackUri: first.uri,
@@ -638,14 +859,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         const savedSessionTracks = dj.getSessionCache().getSessionTracks();
         if (savedSessionTracks.length > 0) {
             const startIdx = dj.getSessionCache().getSessionStartIndex();
-            updateQueueState(savedSessionTracks.slice(startIdx + 1, startIdx + 21));
+            updateQueueState(
+                savedSessionTracks.slice(startIdx + 1, startIdx + 1 + PLAYBACK_CONSTANTS.MAX_DISPLAYED_QUEUE_ITEMS)
+            );
         }
 
         detachDJSubscriptionsRef.current = () => {
+            dj.setOnDevicesUpdatedCallback(undefined);
             unsubscribeState();
             unsubscribeLogs();
         };
-    }, [handleAuthExpired, persistPlayingTrack, syncUIState, updateIsPlaying, updateQueueState]);
+    }, [handleAuthExpired, persistPlayingTrack, stopBackgroundKeepAlive, syncUIState, updateDeviceName, updateDevicesState, updateIsPlayPending, updateIsPlaying, updateQueueState]);
 
     const reloadConfig = useCallback(() => {
         if (getStorageItem(STORAGE_KEYS.BACKGROUND_KEEP_ALIVE) !== 'true') {
@@ -848,6 +1072,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         return () => {
             isCancelled = true;
+            cancelPendingMobileWake();
             stopBackgroundKeepAlive();
             convergenceController.cancel();
             if (detachDJSubscriptionsRef.current) {
@@ -855,7 +1080,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 detachDJSubscriptionsRef.current = null;
             }
         };
-    }, [attachDJInstance, stopBackgroundKeepAlive]);
+    }, [attachDJInstance, cancelPendingMobileWake, stopBackgroundKeepAlive]);
 
     const handleLoopError = useCallback((msg: string) => {
         setError(prev => (prev === msg ? prev : msg));
@@ -900,9 +1125,168 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         console.log("🔊 Background Keep-Alive Audio Started");
     }, [stopBackgroundKeepAlive]);
 
+    const handleWakeSpotify = useCallback(async () => {
+        const dj = djRef.current;
+        if (!dj) return;
+        const now = Date.now();
+        if (
+            typeof dj.isMobileWakeInProgress === 'function' &&
+            dj.isMobileWakeInProgress() &&
+            now - lastWakeTapTimeRef.current < 800
+        ) {
+            return;
+        }
+        lastWakeTapTimeRef.current = now;
+        const seqId = ++wakeSeqIdRef.current;
+        pendingMobileWakeTimestampRef.current = now;
+        dj.setMobileWakeInProgress(true);
+        updateIsPlayPending(true);
+        setError(null);
+        setStatus('📱 Waking Spotify... (Spotifyアプリを起動しています...)');
+
+        const result = await runMobileSpotifyWakeSequence({
+            dj,
+            shouldAbort: () => seqId !== wakeSeqIdRef.current || djRef.current !== dj,
+            onDevicesPolled: (freshDevices) => {
+                lastDevicesFetchRef.current = Date.now();
+                updateDevicesState(freshDevices);
+            },
+        });
+
+        if (seqId !== wakeSeqIdRef.current || djRef.current !== dj) {
+            return;
+        }
+
+        dj.setMobileWakeInProgress(false);
+        updateIsPlayPending(false);
+
+        if (result.started) {
+            pendingMobileWakeTimestampRef.current = 0;
+            dj.clearMobileWakeRequired();
+            setMobileWakeRequired(false);
+            updateIsPlaying(true);
+            setStatus('Ready');
+            void convergenceRef.current.syncUntilConverged(
+                { expectedIsPlaying: true },
+                syncUIState
+            );
+        } else {
+            const currentVisibility =
+                typeof document !== 'undefined' ? document.visibilityState : 'visible';
+            if (!shouldRetainPendingMobileWake(false, currentVisibility)) {
+                pendingMobileWakeTimestampRef.current = 0;
+            }
+            updateIsPlaying(false);
+            setStatus(dj.getStateSnapshot().status);
+            if (currentVisibility !== 'hidden') {
+                void syncUIState({ forceAll: true });
+            }
+        }
+    }, [syncUIState, updateDevicesState, updateIsPlayPending, updateIsPlaying]);
+
+    // If the mobile browser (e.g. iOS Safari or Android 16/17 Cached App Freezer / background fetch throttle)
+    // suspended timers or failed background fetches while the user switched to Spotify via `handleWakeSpotify`,
+    // finish starting external/session playback cleanly when the user returns within 45s without re-launching `spotify:`.
+    useEffect(() => {
+        if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') {
+            return;
+        }
+        const handleVisibilityWakeReturn = () => {
+            if (document.visibilityState && document.visibilityState !== 'visible') return;
+            const wakeStartedAt = pendingMobileWakeTimestampRef.current;
+            if (wakeStartedAt <= 0) return;
+
+            const dj = djRef.current;
+            if (Date.now() - wakeStartedAt > 45_000) {
+                cancelPendingMobileWake();
+                if (dj) {
+                    setStatus(dj.getStateSnapshot().status);
+                }
+                return;
+            }
+            if (!dj || isPlayingRef.current || !dj.isMobileWakeRequired()) {
+                cancelPendingMobileWake();
+                return;
+            }
+            // If `handleWakeSpotify` is already mid-flight inside `dj.resume({ fromMobileWake: true })`,
+            // let that active promise finish instead of racing a duplicate foreground wake sequence.
+            if (typeof dj.isResumeInFlight === 'function' && dj.isResumeInFlight()) {
+                return;
+            }
+
+            const returnSeqId = ++wakeSeqIdRef.current;
+            pendingMobileWakeTimestampRef.current = 0;
+            dj.setMobileWakeInProgress(true);
+            updateIsPlayPending(true);
+            setStatus('📱 Connecting to Spotify... (Spotifyに接続して再生を開始しています...)');
+
+            void runMobileSpotifyWakeSequence({
+                dj,
+                launchUri: () => false,
+                pollDelaysMs: [0, 800, 1400],
+                shouldAbort: () => returnSeqId !== wakeSeqIdRef.current || djRef.current !== dj,
+                onDevicesPolled: (freshDevices) => {
+                    lastDevicesFetchRef.current = Date.now();
+                    updateDevicesState(freshDevices);
+                },
+            }).then((result) => {
+                if (returnSeqId !== wakeSeqIdRef.current || djRef.current !== dj) {
+                    return;
+                }
+                dj.setMobileWakeInProgress(false);
+                updateIsPlayPending(false);
+                if (result.started) {
+                    dj.clearMobileWakeRequired();
+                    setMobileWakeRequired(false);
+                    updateIsPlaying(true);
+                    setStatus('Ready');
+                    void convergenceRef.current.syncUntilConverged(
+                        { expectedIsPlaying: true },
+                        syncUIState
+                    );
+                } else {
+                    updateIsPlaying(false);
+                    setStatus(dj.getStateSnapshot().status);
+                    void syncUIState({ forceAll: true });
+                }
+            });
+        };
+        document.addEventListener('visibilitychange', handleVisibilityWakeReturn);
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('focus', handleVisibilityWakeReturn);
+        }
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityWakeReturn);
+            if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+                window.removeEventListener('focus', handleVisibilityWakeReturn);
+            }
+        };
+    }, [cancelPendingMobileWake, syncUIState, updateDevicesState, updateIsPlayPending, updateIsPlaying]);
+
+    const hasKnownEmptyDevicesOnMobile = useCallback((dj: DJCore): boolean => {
+        return Boolean(
+            lastDevicesFetchRef.current > 0 &&
+            devicesRef.current.filter(d => Boolean(d && d.id && !d.is_restricted)).length === 0 &&
+            typeof dj.canWakeLocalMobileSpotify === 'function' &&
+            dj.canWakeLocalMobileSpotify(devicesRef.current)
+        );
+    }, []);
+
     const handleNext = useCallback(async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
+            const dj = djRef.current;
+            if (
+                (typeof dj.isMobileWakeRequired === 'function' && dj.isMobileWakeRequired()) ||
+                hasKnownEmptyDevicesOnMobile(dj)
+            ) {
+                if (typeof dj.stageNavigationForMobileWake === 'function') {
+                    dj.stageNavigationForMobileWake({ type: 'next' });
+                }
+                await handleWakeSpotify();
+                return;
+            }
+            const navSeq = ++playToggleSeqRef.current;
             const previousTrack = currentTrackRef.current;
             const previousUri = lastTrackUriRef.current;
             const currentQueue = queueRef.current;
@@ -919,10 +1303,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 lastTrackUriRef.current = expectedNextUri;
                 updateQueueState(remaining);
             }
-            const playTimeBefore = djRef.current.getLastPlayTime();
-            const res = await djRef.current.next();
+            const playTimeBefore = dj.getLastPlayTime();
+            const res = await dj.next();
+            if (navSeq !== playToggleSeqRef.current || djRef.current !== dj) {
+                return;
+            }
             if (res.ok) {
-                if (djRef.current.getLastPlayTime() === playTimeBefore) {
+                setMobileWakeRequired(false);
+                if (dj.getLastPlayTime() === playTimeBefore) {
                     void convergenceRef.current.syncUntilConverged(
                         expectedNextUri
                             ? {
@@ -934,74 +1322,218 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                         syncUIState
                     );
                 }
-            } else if (currentQueue.length > 0) {
-                // Revert optimistic track & queue shift if skip failed
-                currentTrackRef.current = previousTrack;
-                setCurrentTrack(previousTrack);
-                persistPlayingTrack(previousTrack, false);
-                lastTrackUriRef.current = previousUri;
-                updateQueueState(currentQueue);
+            } else {
+                const isSessionStagedForWake = Boolean(
+                    res.mobileWakeRequired &&
+                    typeof dj.isSessionPlaybackActive === 'function' &&
+                    dj.isSessionPlaybackActive()
+                );
+                if (currentQueue.length > 0 && !isSessionStagedForWake) {
+                    // Revert optimistic track & queue shift if skip failed outside staged mobile session wake
+                    currentTrackRef.current = previousTrack;
+                    setCurrentTrack(previousTrack);
+                    persistPlayingTrack(previousTrack, false);
+                    lastTrackUriRef.current = previousUri;
+                    updateQueueState(currentQueue);
+                }
+                if (res.mobileWakeRequired) {
+                    if (hasActiveBrowserUserGesture()) {
+                        await handleWakeSpotify();
+                        return;
+                    }
+                    setMobileWakeRequired(true);
+                    setError(null);
+                    setStatus(dj.getStateSnapshot().status);
+                }
             }
         }
-    }, [startBackgroundKeepAlive, syncUIState, updateQueueState, persistPlayingTrack]);
+    }, [handleWakeSpotify, hasKnownEmptyDevicesOnMobile, startBackgroundKeepAlive, syncUIState, updateQueueState, persistPlayingTrack]);
 
     const handlePrev = useCallback(async () => {
         startBackgroundKeepAlive();
         if (djRef.current) {
+            const dj = djRef.current;
+            if (
+                (typeof dj.isMobileWakeRequired === 'function' && dj.isMobileWakeRequired()) ||
+                hasKnownEmptyDevicesOnMobile(dj)
+            ) {
+                if (typeof dj.stageNavigationForMobileWake === 'function') {
+                    dj.stageNavigationForMobileWake({ type: 'previous' });
+                }
+                await handleWakeSpotify();
+                return;
+            }
+            const navSeq = ++playToggleSeqRef.current;
             const previousUri = lastTrackUriRef.current;
             const previousProgressMs = lastProgressMsRef.current;
-            const playTimeBefore = djRef.current.getLastPlayTime();
-            const res = await djRef.current.previous();
-            if (res.ok && djRef.current.getLastPlayTime() === playTimeBefore) {
-                void convergenceRef.current.syncUntilConverged(
-                    {
-                        departedTrackUri: previousUri,
-                        departedProgressMs: previousProgressMs,
-                        allowSameTrackRewind: true,
-                    },
-                    syncUIState
-                );
+            const playTimeBefore = dj.getLastPlayTime();
+            const res = await dj.previous();
+            if (navSeq !== playToggleSeqRef.current || djRef.current !== dj) {
+                return;
             }
-        }
-    }, [startBackgroundKeepAlive, syncUIState]);
-
-    const handleTogglePlay = useCallback(async () => {
-        startBackgroundKeepAlive();
-        if (djRef.current) {
-            const targetIsPlaying = !isPlayingRef.current;
-            const playTimeBefore = djRef.current.getLastPlayTime();
-            updateIsPlaying(targetIsPlaying);
-            const res = targetIsPlaying
-                ? await djRef.current.resume()
-                : await djRef.current.pause();
             if (res.ok) {
-                // If resume() initiated playTracks(), setOnTracksPlayedCallback has already
-                // registered a full expectedTrackUri + expectedIsPlaying convergence guard.
-                if (djRef.current.getLastPlayTime() === playTimeBefore) {
+                setMobileWakeRequired(false);
+                if (dj.getLastPlayTime() === playTimeBefore) {
                     void convergenceRef.current.syncUntilConverged(
-                        { expectedIsPlaying: targetIsPlaying },
+                        {
+                            departedTrackUri: previousUri,
+                            departedProgressMs: previousProgressMs,
+                            allowSameTrackRewind: true,
+                        },
                         syncUIState
                     );
                 }
-            } else {
-                // Revert optimistic toggle if request failed immediately
-                updateIsPlaying(!targetIsPlaying);
+            } else if (res.mobileWakeRequired) {
+                if (hasActiveBrowserUserGesture()) {
+                    await handleWakeSpotify();
+                    return;
+                }
+                setMobileWakeRequired(true);
+                setError(null);
+                setStatus(dj.getStateSnapshot().status);
             }
         }
-    }, [startBackgroundKeepAlive, syncUIState, updateIsPlaying]);
+    }, [handleWakeSpotify, hasKnownEmptyDevicesOnMobile, startBackgroundKeepAlive, syncUIState]);
+
+    const handleTogglePlay = useCallback(async () => {
+        startBackgroundKeepAlive();
+        const dj = djRef.current;
+        if (!dj) return;
+
+        const targetIsPlaying = !isPlayingRef.current;
+        if (!targetIsPlaying) {
+            cancelPendingMobileWake();
+        } else {
+            if (isPlayPendingRef.current) {
+                // Ignore impatient duplicate Play tap while `dj.resume()` or `handleWakeSpotify()` is
+                // already in flight so `transportCommandSeq` does not self-abort mid-verification.
+                return;
+            }
+            if (
+                (typeof dj.isMobileWakeRequired === 'function' && dj.isMobileWakeRequired()) ||
+                hasKnownEmptyDevicesOnMobile(dj)
+            ) {
+                await handleWakeSpotify();
+                return;
+            }
+        }
+
+        const toggleSeq = ++playToggleSeqRef.current;
+        const deferOptimisticPlayOnMobile = Boolean(
+            targetIsPlaying &&
+            typeof dj.canWakeLocalMobileSpotify === 'function' &&
+            dj.canWakeLocalMobileSpotify()
+        );
+        const playTimeBefore = dj.getLastPlayTime();
+        if (!deferOptimisticPlayOnMobile) {
+            updateIsPlaying(targetIsPlaying);
+        } else {
+            updateIsPlayPending(true);
+            setStatus('▶️ Starting playback... (再生を開始しています...)');
+        }
+
+        let res: SpotifyControlResult;
+        try {
+            res = targetIsPlaying
+                ? await dj.resume()
+                : await dj.pause();
+        } finally {
+            if (toggleSeq === playToggleSeqRef.current && djRef.current === dj && deferOptimisticPlayOnMobile) {
+                updateIsPlayPending(false);
+            }
+        }
+        if (toggleSeq !== playToggleSeqRef.current || djRef.current !== dj) {
+            return;
+        }
+        if (res.ok) {
+            updateIsPlaying(targetIsPlaying);
+            if (targetIsPlaying) {
+                setMobileWakeRequired(false);
+                if (deferOptimisticPlayOnMobile) {
+                    const snapStatus = dj.getStateSnapshot().status;
+                    setStatus(snapStatus.startsWith('📱') ? 'Ready' : snapStatus);
+                }
+            }
+            // If resume() initiated playTracks(), setOnTracksPlayedCallback has already
+            // registered a full expectedTrackUri + expectedIsPlaying convergence guard.
+            // On pause (!targetIsPlaying), always register expectedIsPlaying: false even if
+            // dj.pause() reset lastPlayTime to 0 on an unconfirmed session.
+            if (!targetIsPlaying || dj.getLastPlayTime() === playTimeBefore) {
+                void convergenceRef.current.syncUntilConverged(
+                    { expectedIsPlaying: targetIsPlaying },
+                    syncUIState
+                );
+            }
+        } else {
+            convergenceRef.current.cancel();
+            updateIsPlaying(!targetIsPlaying);
+            if (targetIsPlaying && res.mobileWakeRequired) {
+                if (hasActiveBrowserUserGesture()) {
+                    await handleWakeSpotify();
+                    return;
+                }
+                setMobileWakeRequired(true);
+                setError(null);
+                setStatus(dj.getStateSnapshot().status);
+            } else if (deferOptimisticPlayOnMobile) {
+                setStatus(dj.getStateSnapshot().status);
+            }
+        }
+    }, [cancelPendingMobileWake, handleWakeSpotify, hasKnownEmptyDevicesOnMobile, startBackgroundKeepAlive, syncUIState, updateIsPlayPending, updateIsPlaying]);
 
     const handlePlayQueueIndex = useCallback(async (index: number) => {
         startBackgroundKeepAlive();
-        if (!djRef.current) return;
+        const dj = djRef.current;
+        if (!dj) return;
         const currentQueue = queueRef.current;
         if (index < 0 || index >= currentQueue.length) return;
+        if (
+            (typeof dj.isMobileWakeRequired === 'function' && dj.isMobileWakeRequired()) ||
+            hasKnownEmptyDevicesOnMobile(dj)
+        ) {
+            if (typeof dj.stageNavigationForMobileWake === 'function') {
+                dj.stageNavigationForMobileWake({
+                    type: 'queue',
+                    index,
+                    displayedQueue: currentQueue,
+                });
+            }
+            await handleWakeSpotify();
+            return;
+        }
+        const jumpSeq = ++playToggleSeqRef.current;
         try {
-            await djRef.current.playFromQueueIndex(index, currentQueue);
+            await dj.playFromQueueIndex(index, currentQueue);
+            if (jumpSeq !== playToggleSeqRef.current || djRef.current !== dj) {
+                return;
+            }
+            if (typeof dj.isMobileWakeRequired === 'function' && dj.isMobileWakeRequired()) {
+                if (hasActiveBrowserUserGesture()) {
+                    await handleWakeSpotify();
+                    return;
+                }
+                setMobileWakeRequired(true);
+                setError(null);
+                setStatus(dj.getStateSnapshot().status);
+            }
         } catch (err) {
+            if (jumpSeq !== playToggleSeqRef.current || djRef.current !== dj) {
+                return;
+            }
+            if (typeof dj.isMobileWakeRequired === 'function' && dj.isMobileWakeRequired()) {
+                if (hasActiveBrowserUserGesture()) {
+                    await handleWakeSpotify();
+                    return;
+                }
+                setMobileWakeRequired(true);
+                setError(null);
+                setStatus(dj.getStateSnapshot().status);
+                return;
+            }
             const msg = err instanceof Error ? err.message : String(err);
             setError(prev => (prev === msg ? prev : msg));
         }
-    }, [startBackgroundKeepAlive]);
+    }, [handleWakeSpotify, hasKnownEmptyDevicesOnMobile, startBackgroundKeepAlive]);
 
     const handleRemoveScheduleItem = useCallback((index: number) => {
         if (djRef.current) {
@@ -1080,17 +1612,49 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                     typeof djRef.current.isSessionPlaybackActive === 'function' &&
                     djRef.current.isSessionPlaybackActive()
                 );
-            const res = await djRef.current.setActiveDevice(deviceId);
-            if (res.ok) {
-                if (shouldStartSessionOnNewDevice) {
-                    void djRef.current.processDJLoop(true, false).catch((err) => {
-                        console.warn('Immediate playback retry after device switch failed:', err);
-                    });
+
+            if (shouldStartSessionOnNewDevice) {
+                // Pin preferred device without sending `play: true` (which would briefly blast leftover
+                // external audio and risk triggering external-context wipe) or `play: false` (which stops
+                // Android `ForegroundKeeperService`), then start the staged ContextDJ session directly.
+                const pinRes = await djRef.current.setActiveDevice(deviceId, { deferTransfer: true });
+                if (!pinRes.ok) {
+                    updateDeviceName(prevDeviceName);
+                    return;
                 }
-                void convergenceRef.current.syncUntilConverged(
-                    { expectedDeviceId: deviceId },
-                    syncUIState
-                );
+                const startRes = await djRef.current.resume();
+                if (startRes.ok) {
+                    setMobileWakeRequired(false);
+                    void convergenceRef.current.syncUntilConverged(
+                        { expectedDeviceId: deviceId, expectedIsPlaying: true },
+                        syncUIState
+                    );
+                } else if (startRes.mobileWakeRequired) {
+                    setMobileWakeRequired(true);
+                    setError(null);
+                    setStatus(djRef.current.getStateSnapshot().status);
+                }
+                return;
+            }
+
+            const deferIdleMobileTransfer = Boolean(
+                !isPlayingRef.current && isMobileSpotifyDevice(targetDevice)
+            );
+            const res = await djRef.current.setActiveDevice(
+                deviceId,
+                isPlayingRef.current
+                    ? { play: true }
+                    : deferIdleMobileTransfer
+                        ? { deferTransfer: true }
+                        : undefined
+            );
+            if (res.ok) {
+                if (!deferIdleMobileTransfer) {
+                    void convergenceRef.current.syncUntilConverged(
+                        { expectedDeviceId: deviceId },
+                        syncUIState
+                    );
+                }
             } else {
                 updateDeviceName(prevDeviceName);
             }
@@ -1120,20 +1684,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         status,
         currentTrack: exposedTrack,
         isPlaying,
+        isPlayPending,
         deviceName,
         devices,
         currentQuery: exposedQuery,
         currentThought: exposedThought,
         error,
+        mobileWakeRequired,
     }), [
         status,
         exposedTrack,
         isPlaying,
+        isPlayPending,
         deviceName,
         devices,
         exposedQuery,
         exposedThought,
         error,
+        mobileWakeRequired,
     ]);
 
     const actionsContextValue = useMemo<PlayerActionsContextType>(() => ({
@@ -1148,6 +1716,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         handleNext,
         handlePrev,
         handleTogglePlay,
+        handleWakeSpotify,
         handlePlayQueueIndex,
         handleRemoveScheduleItem,
         clearError,
@@ -1165,6 +1734,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         handleNext,
         handlePrev,
         handleTogglePlay,
+        handleWakeSpotify,
         handlePlayQueueIndex,
         handleRemoveScheduleItem,
         clearError,

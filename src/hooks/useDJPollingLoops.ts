@@ -181,8 +181,10 @@ export function createDJPollingController({
 
         try {
             const savedFiltering = getStorageItem(STORAGE_KEYS.AI_FILTERING_ENABLED, '');
+            const savedPersonalPref = getStorageItem(STORAGE_KEYS.PERSONAL_PREFERENCE, '');
             djCore.updateConfig({
-                aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true'
+                aiFiltering: savedFiltering === '' ? DEFAULTS.AI_FILTERING_ENABLED : savedFiltering === 'true',
+                personalPreference: savedPersonalPref,
             });
 
             await djCore.processDJLoop();

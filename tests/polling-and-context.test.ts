@@ -9,7 +9,11 @@ import {
     shouldShowOnboarding,
     applyStoredConfigToDJ,
     classifyStorageEventAction,
+    resolveDisplayedDeviceName,
+    runMobileSpotifyWakeSequence,
+    shouldRetainPendingMobileWake,
 } from '../src/context/PlayerContext';
+import { SPOTIFY_ANDROID_WAKE_INTENT_URI } from '../src/lib/spotify-player-client';
 import { classifySpeechRecognitionError } from '../src/hooks/useVoiceInput';
 import { validateVisionImageFile, MAX_VISION_IMAGE_BYTES } from '../src/hooks/useVisionInput';
 import { DEFAULT_MODELS, DEFAULTS, STORAGE_KEYS } from '../src/lib/constants';
@@ -627,5 +631,274 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
         } finally {
             controller.stop();
         }
+    });
+
+    it('runMobileSpotifyWakeSequence fires launchUri synchronously at t=0ms before awaiting, retries until device wakes, honors shouldAbort, and never loops URI launches', async () => {
+        const callOrder: string[] = [];
+        let pollNum = 0;
+        let resumeCalls = 0;
+
+        // 1. Synchronous t=0ms URI launch before first await, empty `[]` on poll #1 while Spotify boots,
+        //    then Smartphone appears on poll #2 and `resume({ fromMobileWake: true })` succeeds!
+        const wakePromise = runMobileSpotifyWakeSequence({
+            dj: {
+                getDevices: async () => {
+                    pollNum++;
+                    callOrder.push(`getDevices_${pollNum}`);
+                    if (pollNum === 1) {
+                        return [];
+                    }
+                    return [
+                        {
+                            id: 'pixel_10_pro_xl',
+                            name: 'Pixel 10 Pro XL',
+                            type: 'Smartphone',
+                            is_active: false,
+                            is_restricted: false,
+                        } as SpotifyApi.UserDevice,
+                    ];
+                },
+                resume: async (opts) => {
+                    resumeCalls++;
+                    callOrder.push(`resume_${Boolean(opts?.fromMobileWake)}`);
+                    return { ok: true, status: 204 };
+                },
+            },
+            launchUri: () => {
+                callOrder.push('launchUri_sync');
+                return true;
+            },
+            pollDelaysMs: [10, 20, 30],
+            delayFn: async (ms) => {
+                callOrder.push(`delay_${ms}`);
+            },
+        });
+
+        // Verify `launchUri_sync` already ran synchronously BEFORE `wakePromise` is even awaited!
+        assert.strictEqual(callOrder[0], 'launchUri_sync');
+
+        const wakeResult = await wakePromise;
+        assert.deepStrictEqual(wakeResult, { launched: true, started: true });
+        assert.strictEqual(resumeCalls, 1);
+        assert.deepStrictEqual(callOrder, [
+            'launchUri_sync',
+            'delay_10',
+            'getDevices_1',
+            'delay_20',
+            'getDevices_2',
+            'resume_true',
+        ]);
+
+        // 2. Bounded exhaustion + single URI launch (zero infinite app-switch loop) + shouldAbort cancellation
+        let launchCount = 0;
+        const exhausted = await runMobileSpotifyWakeSequence({
+            dj: {
+                getDevices: async () => [
+                    { id: 'phone_1', name: 'Phone', type: 'Smartphone', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                ],
+                resume: async () => ({ ok: false, mobileWakeRequired: true }),
+            },
+            launchUri: () => {
+                launchCount++;
+                return true;
+            },
+            pollDelaysMs: [0, 0, 0],
+            delayFn: async () => {},
+        });
+        assert.deepStrictEqual(exhausted, { launched: true, started: false });
+        assert.strictEqual(launchCount, 1);
+
+        let abortedResumeCalls = 0;
+        const aborted = await runMobileSpotifyWakeSequence({
+            dj: {
+                getDevices: async () => [
+                    { id: 'phone_1', name: 'Phone', type: 'Smartphone', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                ],
+                resume: async () => {
+                    abortedResumeCalls++;
+                    return { ok: true };
+                },
+            },
+            launchUri: () => true,
+            shouldAbort: () => true,
+            pollDelaysMs: [0, 0],
+            delayFn: async () => {},
+        });
+        assert.deepStrictEqual(aborted, { launched: true, started: false });
+        assert.strictEqual(abortedResumeCalls, 0);
+
+        // 3. Never hijacks an online Desktop `Computer` or `Speaker` on polls #1/#2 while the phone's
+        //    Spotify app is still cold-booting; waits until `Smartphone` registers on poll #3!
+        let multiDevicePoll = 0;
+        const deviceAtResumeTime: string[] = [];
+        const nonHijackResult = await runMobileSpotifyWakeSequence({
+            dj: {
+                getDevices: async () => {
+                    multiDevicePoll++;
+                    if (multiDevicePoll < 3) {
+                        return [
+                            { id: 'home_pc', name: 'Home PC', type: 'Computer', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                            { id: 'living_sonos', name: 'Sonos', type: 'Speaker', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                        ];
+                    }
+                    return [
+                        { id: 'home_pc', name: 'Home PC', type: 'Computer', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                        { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: false, is_restricted: false } as SpotifyApi.UserDevice,
+                    ];
+                },
+                resume: async () => {
+                    deviceAtResumeTime.push(`poll_${multiDevicePoll}`);
+                    return { ok: true, status: 204 };
+                },
+            },
+            launchUri: () => true,
+            pollDelaysMs: [0, 0, 0, 0],
+            delayFn: async () => {},
+        });
+        assert.deepStrictEqual(nonHijackResult, { launched: true, started: true });
+        assert.deepStrictEqual(deviceAtResumeTime, ['poll_3']);
+
+        // 4. Default `runMobileSpotifyWakeSequence` launches Android `intent://...package=com.spotify.music...`
+        //    on Android WebAPK and `shouldRetainPendingMobileWake` keeps foreground-return recovery armed when hidden
+        const origNav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+        const origDoc = Object.getOwnPropertyDescriptor(globalThis, 'document');
+        const launchedHrefs: string[] = [];
+        try {
+            Object.defineProperty(globalThis, 'navigator', {
+                value: {
+                    userAgent:
+                        'Mozilla/5.0 (Linux; Android 17; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36',
+                },
+                configurable: true,
+                writable: true,
+            });
+            Object.defineProperty(globalThis, 'document', {
+                value: {
+                    visibilityState: 'hidden',
+                    body: {
+                        appendChild(node: { parentNode: unknown }) {
+                            node.parentNode = this;
+                        },
+                        removeChild(node: { parentNode: unknown }) {
+                            node.parentNode = null;
+                        },
+                    },
+                    createElement() {
+                        return {
+                            href: '',
+                            rel: '',
+                            style: { display: '' },
+                            parentNode: null as unknown,
+                            click() {
+                                launchedHrefs.push(this.href);
+                            },
+                        };
+                    },
+                },
+                configurable: true,
+                writable: true,
+            });
+
+            const hiddenWake = await runMobileSpotifyWakeSequence({
+                dj: {
+                    getDevices: async () => [],
+                    resume: async () => ({ ok: false }),
+                },
+                pollDelaysMs: [0],
+                delayFn: async () => {},
+            });
+            assert.deepStrictEqual(hiddenWake, { launched: true, started: false });
+            assert.deepStrictEqual(launchedHrefs, [SPOTIFY_ANDROID_WAKE_INTENT_URI]);
+            assert.strictEqual(shouldRetainPendingMobileWake(hiddenWake.started, 'hidden'), true);
+            assert.strictEqual(shouldRetainPendingMobileWake(hiddenWake.started, 'visible'), false);
+            assert.strictEqual(shouldRetainPendingMobileWake(true, 'hidden'), false);
+        } finally {
+            if (origNav) {
+                Object.defineProperty(globalThis, 'navigator', origNav);
+            } else {
+                delete (globalThis as Record<string, unknown>).navigator;
+            }
+            if (origDoc) {
+                Object.defineProperty(globalThis, 'document', origDoc);
+            } else {
+                delete (globalThis as Record<string, unknown>).document;
+            }
+        }
+    });
+
+    it('resolveDisplayedDeviceName clears ghost device name when Spotify freezes (devices: []) while preserving optimistic fallback, and applyStoredConfigToDJ syncs personalPreference', () => {
+        const pixelDevice: SpotifyApi.UserDevice = {
+            id: 'pixel_10_pro_xl',
+            name: 'Pixel 10 Pro XL',
+            type: 'Smartphone',
+            is_active: false,
+            is_private_session: false,
+            is_restricted: false,
+            volume_percent: 80,
+        };
+
+        // 1. Frozen Android 17 Spotify: playbackState is null and devices is [] (hasFetchedDevices: true) -> clears ghost "Pixel 10 Pro XL" to ""
+        assert.strictEqual(
+            resolveDisplayedDeviceName({
+                playbackState: null,
+                devices: [],
+                preferredDeviceId: 'pixel_10_pro_xl',
+                isMobile: true,
+                previousDeviceName: 'Pixel 10 Pro XL',
+                hasFetchedDevices: true,
+            }),
+            ''
+        );
+        // Before initial device fetch completes (`hasFetchedDevices: false`), preserves previousDeviceName cleanly
+        assert.strictEqual(
+            resolveDisplayedDeviceName({
+                playbackState: null,
+                devices: [],
+                preferredDeviceId: 'pixel_10_pro_xl',
+                isMobile: true,
+                previousDeviceName: 'Pixel 10 Pro XL',
+                hasFetchedDevices: false,
+            }),
+            'Pixel 10 Pro XL'
+        );
+
+        // 2. Optimistic startup fallback (__optimisticFallback: true) -> preserves previousDeviceName without flicker
+        assert.strictEqual(
+            resolveDisplayedDeviceName({
+                playbackState: {
+                    is_playing: true,
+                    __optimisticFallback: true,
+                } as SpotifyApi.CurrentPlaybackResponse,
+                devices: [],
+                preferredDeviceId: null,
+                isMobile: true,
+                previousDeviceName: 'Pixel 10 Pro XL',
+                hasFetchedDevices: true,
+            }),
+            'Pixel 10 Pro XL'
+        );
+
+        // 3. Standby device present in Connect while playbackState is null -> displays target device name
+        assert.strictEqual(
+            resolveDisplayedDeviceName({
+                playbackState: null,
+                devices: [pixelDevice],
+                preferredDeviceId: null,
+                isMobile: true,
+                previousDeviceName: '',
+                hasFetchedDevices: true,
+            }),
+            'Pixel 10 Pro XL'
+        );
+
+        // 4. STORAGE_KEYS.PERSONAL_PREFERENCE reloads config and propagates into DJCore
+        assert.strictEqual(classifyStorageEventAction(STORAGE_KEYS.PERSONAL_PREFERENCE), 'reload_config');
+        store[STORAGE_KEYS.PERSONAL_PREFERENCE] = 'ライブ音源を優先し、EDMリミックスは除外する';
+        const dj = new DJCore('fake_token');
+        applyStoredConfigToDJ(dj);
+        assert.strictEqual(
+            dj.getDJStatus().config.personalPreference,
+            'ライブ音源を優先し、EDMリミックスは除外する'
+        );
     });
 });

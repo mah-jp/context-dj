@@ -205,6 +205,171 @@ describe('AIService', () => {
             assert.strictEqual(result[0].vibeTag, '#夕暮れの海辺');
             assert.strictEqual(result[0].selectionReason, '穏やかな潮風を感じる選曲');
         });
+
+        it('evaluates >25 tracks in parallel 25-track chunks without truncating and injects personalPreference as highest-priority rule', async () => {
+            const tracks = Array.from({ length: 60 }, (_, idx) => ({
+                id: `spotify:track:c_${idx}`,
+                name: `Track ${idx}`,
+                artist: `Artist ${idx}`,
+                album: `Album ${idx}`,
+            }));
+
+            const capturedPrompts: string[] = [];
+            globalThis.fetch = (async (_url: RequestInfo | URL, options?: RequestInit) => {
+                const body = JSON.parse(String(options?.body));
+                const promptText: string = body.contents[0].parts[0].text;
+                capturedPrompts.push(promptText);
+
+                // Count how many `n: "` lines were sent in this chunk
+                const matches = [...promptText.matchAll(/^(\d+): "/gm)];
+                const evals = matches
+                    .filter((_, localIdx) => localIdx % 2 === 0)
+                    .map((_, idx) => ({
+                        index: idx * 2,
+                        score: 88,
+                        vibeTag: '#StudyBallad',
+                        selectionReason: 'Matches emotional study mood',
+                        energy: 5,
+                        stage: 'build',
+                    }));
+
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{ content: { parts: [{ text: JSON.stringify(evals) }] } }],
+                    }),
+                } as unknown as Response;
+            }) as typeof globalThis.fetch;
+
+            const service = new AIService('gemini', 'test_key');
+            const result = await service.filterTracksWithAI(
+                '深夜の勉強バラード',
+                tracks,
+                '静かな集中を支えるバラード',
+                'Aimerのカバー曲やオルゴールアレンジは除外し、ライブ音源は歓迎する'
+            );
+
+            // 60 tracks -> 3 chunks (25 + 25 + 10); each chunk selects even local indices (13 + 13 + 5 = 31 tracks)
+            assert.strictEqual(capturedPrompts.length, 3);
+            for (const p of capturedPrompts) {
+                assert.match(p, /User's Universal Preferences \(HIGHEST PRIORITY - STRICTLY ENFORCE\)/);
+                assert.match(p, /Aimerのカバー曲やオルゴールアレンジは除外し、ライブ音源は歓迎する/);
+            }
+            assert.strictEqual(result.length, 31);
+            // Verify chunk-local index 0 mapped accurately for Chunk 0 (`c_0`), Chunk 1 (`c_25`), and Chunk 2 (`c_50`)!
+            const selectedIds = new Set(result.map(r => r.id));
+            assert.strictEqual(selectedIds.has('spotify:track:c_0'), true);
+            assert.strictEqual(selectedIds.has('spotify:track:c_25'), true);
+            assert.strictEqual(selectedIds.has('spotify:track:c_50'), true);
+            assert.strictEqual(selectedIds.has('spotify:track:c_58'), true);
+            assert.strictEqual(service.getLastFilterError(), null);
+        });
+
+        it('preserves succeeded chunk evaluations when one parallel chunk fails transiently', async () => {
+            const tracks = Array.from({ length: 30 }, (_, idx) => ({
+                id: `spotify:track:p_${idx}`,
+                name: `Song ${idx}`,
+                artist: `Singer ${idx}`,
+            }));
+
+            let callIndex = 0;
+            globalThis.fetch = (async () => {
+                callIndex++;
+                if (callIndex === 2) {
+                    return {
+                        ok: false,
+                        status: 503,
+                        statusText: 'Service Unavailable',
+                        text: async () => 'Overloaded',
+                    } as unknown as Response;
+                }
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            content: {
+                                parts: [{
+                                    text: JSON.stringify([
+                                        { index: 0, score: 92, vibeTag: '#Focus', selectionReason: 'Top pick' },
+                                    ]),
+                                }],
+                            },
+                        }],
+                    }),
+                } as unknown as Response;
+            }) as typeof globalThis.fetch;
+
+            const service = new AIService('gemini', 'test_key');
+            const result = await service.filterTracksWithAI('focus', tracks);
+            // Chunk 0 returned 1 AI-curated track (< 5), supplemented cleanly up to 5 tracks from Chunk 1 fallback, with no fatal filter error
+            assert.strictEqual(result.length, 5);
+            assert.strictEqual(result[0].id, 'spotify:track:p_0');
+            assert.strictEqual(result[0].score, 92);
+            assert.strictEqual(result[1].id, 'spotify:track:p_25');
+            assert.strictEqual(result[1].score, 70);
+            assert.strictEqual(service.getLastFilterError(), null);
+
+            // When Chunk 0 already yields >= 5 curated tracks, failed Chunk 1 does NOT pollute results with unfiltered fallback tracks
+            let richCall = 0;
+            globalThis.fetch = (async () => {
+                richCall++;
+                if (richCall === 2) {
+                    return {
+                        ok: false,
+                        status: 503,
+                        statusText: 'Service Unavailable',
+                        text: async () => 'Overloaded',
+                    } as unknown as Response;
+                }
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            content: {
+                                parts: [{
+                                    text: JSON.stringify(
+                                        Array.from({ length: 6 }, (_, i) => ({
+                                            index: i,
+                                            score: 90,
+                                            vibeTag: '#Curated',
+                                            selectionReason: 'Curated hit',
+                                        }))
+                                    ),
+                                }],
+                            },
+                        }],
+                    }),
+                } as unknown as Response;
+            }) as typeof globalThis.fetch;
+
+            const pureCurated = await service.filterTracksWithAI('focus', tracks);
+            assert.strictEqual(pureCurated.length, 6);
+            assert.ok(pureCurated.every(t => t.score === 90));
+            assert.strictEqual(service.getLastFilterError(), null);
+            assert.strictEqual(service.hadChunkFilterError(), true);
+
+            // Clean subsequent call resets hadChunkFilterError back to false
+            globalThis.fetch = (async () => ({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{
+                        content: {
+                            parts: [{
+                                text: JSON.stringify([
+                                    { index: 0, score: 91, vibeTag: '#Clean', selectionReason: 'Clean' },
+                                ]),
+                            }],
+                        },
+                    }],
+                }),
+            } as unknown as Response)) as typeof globalThis.fetch;
+            await service.filterTracksWithAI('focus', tracks.slice(0, 5));
+            assert.strictEqual(service.hadChunkFilterError(), false);
+        });
     });
 
     describe('analyzeImage', () => {

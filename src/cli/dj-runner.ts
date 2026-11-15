@@ -4,7 +4,7 @@ import { ScheduleItem } from '../lib/types';
 import { CLIConfig, loadConfig, saveConfig } from './config';
 import { getValidSpotifyToken } from './auth';
 import { PlaybackConvergenceController } from '../lib/playback-sync';
-import { generateTrackKey } from '../lib/dj-utils';
+import { generateTrackKey, resolveSessionPlaybackDisplay } from '../lib/dj-utils';
 
 export interface DJRunnerState {
     status: string;
@@ -33,6 +33,9 @@ export class DJRunner {
         this.config = config;
         this.djCore = new DJCore(token);
         this.djCore.initAI(config.aiProvider, config.aiApiKey, config.aiModel);
+        if (config.personalContext) {
+            this.djCore.updateConfig({ personalPreference: config.personalContext });
+        }
 
         const initialSnapshot = this.djCore.getStateSnapshot();
         this.state = {
@@ -229,28 +232,22 @@ export class DJRunner {
         try {
             const playback = await this.djCore.getPlaybackState();
             const guard = this.convergence.inspectState(playback);
-            const rawTrack = (playback && playback.item && playback.item.type === 'track')
-                ? (playback.item as Track)
-                : null;
             const isSessionActive = this.djCore.isSessionPlaybackActive();
-            const hasExternalContextUri = Boolean(playback?.context?.uri);
-            const isRawTrackInSession = Boolean(
-                !hasExternalContextUri &&
-                rawTrack &&
-                this.djCore.findTrackIndexInSession(rawTrack) >= 0
-            );
-            const isForeignOrIdleInSession = Boolean(
-                isSessionActive &&
-                !playback?.__optimisticFallback &&
-                !isRawTrackInSession
-            );
-            const sessionTracks = this.djCore.getSessionCache().getSessionTracks();
-            const sessionStartIdx = this.djCore.getSessionCache().getSessionStartIndex();
-            const fallbackSessionTrack =
-                sessionTracks[sessionStartIdx] ??
-                (this.state.currentTrack && this.djCore.findTrackIndexInSession(this.state.currentTrack) >= 0
-                    ? this.state.currentTrack
-                    : null);
+            const sessionCache = this.djCore.getSessionCache();
+            const {
+                currentTrackItem,
+                isForeignOrIdleInSession,
+            } = resolveSessionPlaybackDisplay({
+                playbackState: playback,
+                isSessionActive,
+                hasConfirmedPlayback: this.djCore.hasConfirmedPlayback(),
+                isBatchExhausted: sessionCache.isBatchExhausted(),
+                sessionTracks: sessionCache.getSessionTracks(),
+                sessionStartIndex: sessionCache.getSessionStartIndex(),
+                previousDisplayedTrack: this.state.currentTrack,
+                findTrackIndexInSession: (t) => this.djCore.findTrackIndexInSession(t),
+                isKnownRefillCarryoverTrack: (t) => sessionCache.isKnownRefillCarryoverTrack(t),
+            });
             const isNonTrackMedia = Boolean(
                 playback &&
                 ((playback.item && playback.item.type !== 'track') ||
@@ -260,9 +257,7 @@ export class DJRunner {
             );
             const track = guard.suppressTrackUpdate
                 ? this.state.currentTrack
-                : isForeignOrIdleInSession
-                    ? fallbackSessionTrack
-                    : (rawTrack ?? (isNonTrackMedia ? null : this.state.currentTrack));
+                : (currentTrackItem ?? (isNonTrackMedia ? null : this.state.currentTrack));
             const effectivePlayback = guard.suppressPlayStateUpdate && playback && this.state.playbackState
                 ? { ...playback, is_playing: this.state.playbackState.is_playing }
                 : isForeignOrIdleInSession && playback

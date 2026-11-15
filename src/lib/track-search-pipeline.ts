@@ -55,9 +55,10 @@ export class TrackSearchPipeline {
             this.deps.addLog(`🎯 Target Artists: ${targetArtists.join(', ')}`);
         }
 
-        // 3. Execute Parallel Search
+        // 3. Execute Parallel Search & Interleave Anchor Seeds Without Crowding Search Pool
         const searchTracks = await this.executeParallelSearch(queries);
-        const allRawTracks = [...anchorTracks, ...searchTracks];
+        const dedupedAnchors = deduplicateTracks(anchorTracks).slice(0, 8);
+        const allRawTracks = this.interleaveAnchorsWithSearch(dedupedAnchors, searchTracks);
 
         if (allRawTracks.length === 0 && priorityTracks.length === 0) {
             this.deps.addLog("❌ No tracks found from Spotify Search");
@@ -78,14 +79,42 @@ export class TrackSearchPipeline {
             return popRes.tracks.length;
         };
 
-        // If session history filtered out most hits (e.g. during Auto-Refill), fetch deeper pages for fresh tracks
-        if (
+        const rawLimit = this.deps.getConfig().trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
+        const limit = Math.max(1, Math.min(PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT, rawLimit));
+        const targetCount = context?.targetTrackCount;
+        let nextOffsetMultiplier = 2;
+
+        if (typeof targetCount === 'number' && targetCount > 0) {
+            const desiredPool = Math.min(
+                PLAYBACK_CONSTANTS.MAX_AI_EVAL_CANDIDATES,
+                targetCount >= PLAYBACK_CONSTANTS.MIN_INITIAL_SESSION_TRACKS
+                    ? Math.max(Math.ceil(targetCount * 1.8), 35)
+                    : Math.max(targetCount * 2, 10)
+            );
+            while (
+                nextOffsetMultiplier <= 6 &&
+                (unplayedTracks.length < desiredPool || countViableUnplayed(unplayedTracks) < desiredPool)
+            ) {
+                const prevUniqueCount = uniqueTracks.length;
+                const deeperTracks = await this.executeParallelSearch(queries, limit * nextOffsetMultiplier);
+                nextOffsetMultiplier += 2;
+                if (deeperTracks.length === 0) {
+                    break;
+                }
+                uniqueTracks = deduplicateTracks([...uniqueTracks, ...deeperTracks]);
+                unplayedTracks = uniqueTracks.filter(t => !this.deps.sessionCache.isTrackPlayedInSession(t));
+                if (uniqueTracks.length === prevUniqueCount) {
+                    break;
+                }
+            }
+        } else if (
+            // Legacy/default refill path when targetTrackCount is omitted: fetch deeper pages if played history exhausted initial hits
             unplayedTracks.length < uniqueTracks.length &&
             (unplayedTracks.length < 5 || countViableUnplayed(unplayedTracks) < 5)
         ) {
-            const limit = this.deps.getConfig().trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
             for (const multiplier of [2, 4]) {
                 const deeperTracks = await this.executeParallelSearch(queries, limit * multiplier);
+                nextOffsetMultiplier = multiplier + 2;
                 if (deeperTracks.length > 0) {
                     uniqueTracks = deduplicateTracks([...uniqueTracks, ...deeperTracks]);
                     unplayedTracks = uniqueTracks.filter(t => !this.deps.sessionCache.isTrackPlayedInSession(t));
@@ -116,12 +145,104 @@ export class TrackSearchPipeline {
             : [];
 
         // 6. AI Filtering & Multi-axis Scoring
-        const candidates = filteredTracks.length > 0
-            ? await this.performAIFiltering(filteredTracks, context)
-            : [];
+        const ai = this.deps.getAI();
+        const minDesiredCurated = typeof targetCount === 'number'
+            ? Math.min(targetCount, PLAYBACK_CONSTANTS.MIN_INITIAL_SESSION_TRACKS)
+            : 0;
+        const canConsiderTopUp = Boolean(
+            typeof targetCount === 'number' &&
+            targetCount >= PLAYBACK_CONSTANTS.MIN_INITIAL_SESSION_TRACKS &&
+            this.deps.getConfig().aiFiltering &&
+            ai
+        );
+        const evaluatedInWave1Uris = new Set<string>();
+        const wave1StatusState = { didSetFilteringStatus: false };
+
+        let candidates: Track[] = [];
+        try {
+            candidates = filteredTracks.length > 0
+                ? await this.performAIFiltering(
+                    filteredTracks,
+                    context,
+                    targetArtists,
+                    {
+                        deferReadyStatus: canConsiderTopUp,
+                        evaluatedUrisOut: evaluatedInWave1Uris,
+                        statusStateOut: wave1StatusState,
+                    }
+                )
+                : [];
+
+            // 6b. Adaptive Top-Up Wave: If strict AI filtering yielded fewer tracks than MIN_INITIAL_SESSION_TRACKS
+            //     for a full block curation, evaluate remaining overflow candidates (>75) and/or fetch deeper pages once.
+            const hadAIFilterError = Boolean(
+                ai && (
+                    (typeof ai.getLastFilterError === 'function' && ai.getLastFilterError()) ||
+                    (typeof ai.hadChunkFilterError === 'function' && ai.hadChunkFilterError())
+                )
+            );
+            const leftoverFromWave1 = filteredTracks.filter(t => !evaluatedInWave1Uris.has(t.uri));
+            if (
+                canConsiderTopUp &&
+                candidates.length < minDesiredCurated &&
+                (leftoverFromWave1.length > 0 || nextOffsetMultiplier <= 6) &&
+                !hadAIFilterError
+            ) {
+                const seenUris = new Set(uniqueTracks.map(t => t.uri));
+                const extraRaw: Track[] = [];
+                while (
+                    nextOffsetMultiplier <= 6 &&
+                    leftoverFromWave1.length + extraRaw.length < PLAYBACK_CONSTANTS.AI_EVAL_CHUNK_SIZE
+                ) {
+                    const deeper = await this.executeParallelSearch(queries, limit * nextOffsetMultiplier);
+                    nextOffsetMultiplier += 2;
+                    if (deeper.length === 0) {
+                        break;
+                    }
+                    extraRaw.push(...deeper);
+                }
+
+                let extraFiltered: Track[] = [];
+                if (extraRaw.length > 0) {
+                    const combinedDeduped = deduplicateTracks([...uniqueTracks, ...extraRaw]);
+                    const newlyDiscovered = combinedDeduped.filter(
+                        t => !seenUris.has(t.uri) && !this.deps.sessionCache.isTrackPlayedInSession(t)
+                    );
+                    uniqueTracks = combinedDeduped;
+                    if (newlyDiscovered.length > 0) {
+                        extraFiltered = this.applyTrackFilters(newlyDiscovered, targetArtists);
+                    }
+                }
+
+                const topUpCandidates = deduplicateTracks([...leftoverFromWave1, ...extraFiltered]);
+                if (topUpCandidates.length > 0) {
+                    const extraEvaluated = await this.performAIFiltering(
+                        topUpCandidates,
+                        { ...context, silent: true, targetTrackCount: minDesiredCurated - candidates.length },
+                        targetArtists,
+                        { disallowRevertOnZeroQualified: candidates.length > 0 }
+                    );
+                    if (extraEvaluated.length > 0) {
+                        candidates = deduplicateTracks([...candidates, ...extraEvaluated]);
+                        candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+                    }
+                }
+            }
+        } finally {
+            if (canConsiderTopUp && wave1StatusState.didSetFilteringStatus) {
+                this.deps.updateStatus('Ready');
+            }
+        }
 
         // 7. Smart Sequencing (起承転結: Intro -> Build -> Peak -> Outro)
-        const { tracks: sequencedTracks, stageCounts } = sequenceTracksByStory(candidates, targetArtists);
+        const maxSequencedTracks = typeof targetCount === 'number' && targetCount > 0
+            ? targetCount
+            : 40;
+        const { tracks: sequencedTracks, stageCounts } = sequenceTracksByStory(
+            candidates,
+            targetArtists,
+            maxSequencedTracks
+        );
         let finalTracks = sequencedTracks;
         if (candidates.length > 2) {
             this.deps.addLog(
@@ -154,7 +275,10 @@ export class TrackSearchPipeline {
             }
             finalTracks = finalTracks.filter(t => t.uri !== pUri);
             finalTracks = [p, ...finalTracks];
-            this.deps.addLog(`📌 Priority track applied at the top: ${p.name} [${p.vibeTag}] (Stage: Intro)`);
+            const stageLabel = p.stage
+                ? p.stage.charAt(0).toUpperCase() + p.stage.slice(1)
+                : 'Intro';
+            this.deps.addLog(`📌 Priority track applied at the top: ${p.name} [${p.vibeTag}] (Stage: ${stageLabel})`);
         }
 
         // Cache all metadata so it persists when Spotify queue is polled
@@ -233,25 +357,65 @@ export class TrackSearchPipeline {
         return found;
     }
 
+    private interleaveAnchorsWithSearch(anchors: Track[], searchTracks: Track[]): Track[] {
+        if (anchors.length === 0) return searchTracks;
+        if (searchTracks.length === 0) return anchors;
+
+        const merged: Track[] = [];
+        const step = Math.max(3, Math.floor(searchTracks.length / anchors.length));
+        let anchorIdx = 0;
+
+        for (let i = 0; i < searchTracks.length; i++) {
+            if (i % step === 0 && anchorIdx < anchors.length) {
+                merged.push(anchors[anchorIdx++]);
+            }
+            merged.push(searchTracks[i]);
+        }
+        while (anchorIdx < anchors.length) {
+            merged.push(anchors[anchorIdx++]);
+        }
+        return merged;
+    }
+
     async performAIFiltering(
         candidates: Track[],
-        context?: SearchPipelineContext
+        context?: SearchPipelineContext,
+        targetArtists: string[] = [],
+        options?: {
+            disallowRevertOnZeroQualified?: boolean;
+            deferReadyStatus?: boolean;
+            evaluatedUrisOut?: Set<string>;
+            statusStateOut?: { didSetFilteringStatus: boolean };
+        }
     ): Promise<Track[]> {
         const config = this.deps.getConfig();
         const ai = this.deps.getAI();
+        const personalPreference = (context?.personalPreference ?? config.personalPreference)?.trim() || '';
 
-        if (!config.aiFiltering || !ai || !context || (!context.userRequest && !context.thought)) {
+        if (!config.aiFiltering || !ai || !context || (!context.userRequest && !context.thought && !personalPreference)) {
             return candidates;
         }
 
         const isSilent = Boolean(context.silent);
         if (!isSilent) {
             this.deps.updateStatus('🤖 AI Filtering... (AIが選曲を精査中...)');
+            if (options?.statusStateOut) {
+                options.statusStateOut.didSetFilteringStatus = true;
+            }
         }
         this.deps.addLog(`🤖 AI Filtering started for ${candidates.length} candidates...`);
 
         try {
-            const topCandidates = candidates.slice(0, 25);
+            const orderedCandidates = targetArtists.length > 0
+                ? [
+                    ...candidates.filter(t => isTrackByTargetArtist(t, targetArtists)),
+                    ...candidates.filter(t => !isTrackByTargetArtist(t, targetArtists)),
+                ]
+                : candidates;
+            const topCandidates = orderedCandidates.slice(0, PLAYBACK_CONSTANTS.MAX_AI_EVAL_CANDIDATES);
+            if (options?.evaluatedUrisOut) {
+                topCandidates.forEach(t => options.evaluatedUrisOut?.add(t.uri));
+            }
             const trackData = topCandidates.map(t => ({
                 name: t.name,
                 artist: t.artists.map(a => a.name).join(', ') || t.artists[0]?.name || 'Unknown',
@@ -259,7 +423,12 @@ export class TrackSearchPipeline {
                 id: t.uri
             }));
             const request = context.userRequest || 'Follow the DJ mood';
-            const evaluations = await ai.filterTracksWithAI(request, trackData, context.thought);
+            const evaluations = await ai.filterTracksWithAI(
+                request,
+                trackData,
+                context.thought,
+                personalPreference || undefined
+            );
 
             const evalMap = new Map<string, TrackEvaluation>();
             evaluations.forEach(ev => evalMap.set(ev.id, ev));
@@ -278,8 +447,11 @@ export class TrackSearchPipeline {
 
             this.deps.sessionCache.cacheTrackMetadata(candidates);
 
+            const minDesiredCount = typeof context.targetTrackCount === 'number' && context.targetTrackCount > 0
+                ? Math.min(context.targetTrackCount, PLAYBACK_CONSTANTS.MIN_INITIAL_SESSION_TRACKS)
+                : 5;
             let qualified = candidates.filter(t => (t.score ?? 0) >= 60);
-            if (qualified.length < 5 && candidates.some(t => t.score !== undefined)) {
+            if (qualified.length < minDesiredCount && candidates.some(t => t.score !== undefined)) {
                 qualified = candidates.filter(t => (t.score ?? 0) >= 50);
             }
 
@@ -289,13 +461,15 @@ export class TrackSearchPipeline {
             } else {
                 this.deps.addLog(`🤖 AI Filtering: ${candidates.length} -> ${qualified.length} tracks kept.`);
             }
-            if (!isSilent) {
+            if (!isSilent && !options?.deferReadyStatus) {
                 this.deps.updateStatus('Ready');
             }
 
             if (qualified.length > 0) {
                 qualified.sort((a, b) => (b.score || 0) - (a.score || 0));
                 return qualified;
+            } else if (options?.disallowRevertOnZeroQualified) {
+                return [];
             } else {
                 this.deps.addLog(`⚠️ AI Filtering removed ALL tracks. Reverting to original set.`);
                 return candidates;
@@ -307,7 +481,7 @@ export class TrackSearchPipeline {
             if (!isSilent) {
                 this.deps.updateStatus('Ready');
             }
-            return candidates;
+            return options?.disallowRevertOnZeroQualified ? [] : candidates;
         }
     }
 
@@ -315,7 +489,8 @@ export class TrackSearchPipeline {
         const allRawTracks: Track[] = [];
         const config = this.deps.getConfig();
         const spotify = this.deps.getSpotify();
-        const limit = config.trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
+        const rawLimit = config.trackSearchLimit || PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT;
+        const limit = Math.max(1, Math.min(PLAYBACK_CONSTANTS.TRACK_SEARCH_LIMIT, rawLimit));
         const validQueries = queries.map(q => q.trim()).filter(Boolean);
 
         await Promise.all(validQueries.map(async (query) => {

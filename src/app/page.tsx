@@ -24,10 +24,12 @@ export default function Home() {
   const isHydrated = useIsHydrated();
   const {
     status,
+    isPlaying,
     currentTrack,
     currentQuery,
     deviceName,
     error,
+    mobileWakeRequired,
   } = usePlayerPlayback();
 
   const {
@@ -77,7 +79,7 @@ export default function Home() {
     status.includes('Starting');
 
   // Custom Hooks
-  const { isListening, toggleListening } = useVoiceInput({
+  const { isListening, toggleListening, stopListening } = useVoiceInput({
     onResult: setInputText,
     onError: (msg) => setToast({ msg, type: 'error' }),
   });
@@ -174,6 +176,9 @@ export default function Home() {
     if (!inputText.trim() || !djCore || isBusy || isSubmittingRef.current) return;
     isSubmittingRef.current = true;
 
+    // Abort any active microphone session immediately (detaching late onresult) so mobile OS Audio Focus is free for Spotify
+    stopListening({ abort: true });
+
     // Activate background mode (keep alive)
     startBackgroundKeepAlive();
 
@@ -213,6 +218,12 @@ export default function Home() {
           setStatus(latestStatus);
           setToast({
             msg: `Scheduled to start at ${schedule[0].start}! Standing by. (${schedule[0].start}開始でスケジュールを予約しました)`,
+            type: 'info',
+          });
+        } else if (djCore.isMobileWakeRequired() || latestStatus.startsWith('📱')) {
+          setStatus(latestStatus);
+          setToast({
+            msg: '選曲完了！下の「Spotifyを起動して再生」をタップしてください (Tracks ready — tap Wake Spotify & Play)',
             type: 'info',
           });
         } else if (latestStatus.startsWith('⚠️')) {
@@ -484,7 +495,7 @@ export default function Home() {
       {/* Toast Notification */}
       {activeToast && (
         <div
-          className={styles.toast}
+          className={`${styles.toast} ${authorized && mobileWakeRequired && !isPlaying ? styles.toastAboveWakeBanner : ''}`}
           role="status"
           title="Click to dismiss"
           onClick={() => {

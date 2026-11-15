@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { usePlayerPlayback, usePlayerActions } from '../context/PlayerContext';
 import styles from '../app/page.module.css';
-import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, MonitorSpeaker, Share2, Sparkles, Anchor, Smartphone, Loader } from 'lucide-react';
 import { STORAGE_KEYS } from '../lib/constants';
 import { getStorageItem, setStorageItem } from '../lib/storage';
 import { useIsHydrated } from '../hooks/useIsHydrated';
@@ -39,11 +39,13 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
     const {
         status,
         isPlaying,
+        isPlayPending,
         currentTrack,
         deviceName,
         devices,
         currentQuery,
-        currentThought
+        currentThought,
+        mobileWakeRequired,
     } = usePlayerPlayback();
 
     const {
@@ -53,6 +55,7 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
         handlePrev,
         handleNext,
         handleTogglePlay,
+        handleWakeSpotify,
     } = usePlayerActions();
 
 
@@ -134,8 +137,40 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                     />
                 </div>
             )}
+            {/* Mobile Spotify 1-Tap Wake & Play Pill */}
+            {authorized && mobileWakeRequired && !isPlaying && (
+                <div className={styles.mobileWakeBanner}>
+                    <div className={styles.mobileWakeInfo}>
+                        <Smartphone size={18} className={styles.mobileWakeIcon} />
+                        <div className={styles.mobileWakeTextGroup}>
+                            <span className={styles.mobileWakeTitle}>Spotifyがスリープ中です</span>
+                            <span className={styles.mobileWakeSub}>
+                                バックグラウンド制限を解除して再生を開始します
+                            </span>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={handleWakeSpotify}
+                        className={styles.mobileWakeBtn}
+                        aria-busy={isPlayPending}
+                    >
+                        {isPlayPending ? (
+                            <>
+                                <Loader size={14} className={styles.spin} />
+                                <span>Spotifyを起動中...</span>
+                            </>
+                        ) : (
+                            <>
+                                <Play size={14} fill="currentColor" />
+                                <span>Spotifyを起動して再生</span>
+                            </>
+                        )}
+                    </button>
+                </div>
+            )}
             {/* DJ Insight Pop-up */}
-            {showAiThought && (currentThought || currentTrack?.selectionReason) && (
+            {showAiThought && !(mobileWakeRequired && !isPlaying) && (currentThought || currentTrack?.selectionReason) && (
                 <div
                     className={styles.djInsight}
                     role="button"
@@ -263,8 +298,20 @@ export default function PlayerBar({ onLogin }: PlayerBarProps) {
                             Log in to Spotify
                         </button>
                     ) : (
-                        <button className={`${styles.controlBtn} ${styles.playPauseBtn}`} onClick={handleTogglePlay} disabled={!authorized} aria-label={isPlaying ? 'Pause' : 'Play'}>
-                            {isPlaying ? <Pause size={20} fill="black" /> : <Play size={20} fill="black" style={{ marginLeft: '2px' }} />}
+                        <button
+                            className={`${styles.controlBtn} ${styles.playPauseBtn}`}
+                            onClick={handleTogglePlay}
+                            disabled={!authorized}
+                            aria-busy={isPlayPending && !isPlaying}
+                            aria-label={isPlaying ? 'Pause' : isPlayPending ? 'Starting playback' : 'Play'}
+                        >
+                            {isPlaying ? (
+                                <Pause size={20} fill="black" />
+                            ) : isPlayPending ? (
+                                <Loader size={18} className={styles.spin} color="black" />
+                            ) : (
+                                <Play size={20} fill="black" style={{ marginLeft: '2px' }} />
+                            )}
                         </button>
                     )}
 

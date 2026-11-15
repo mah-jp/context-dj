@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { DEFAULT_MODELS } from './constants';
+import { DEFAULT_MODELS, PLAYBACK_CONSTANTS } from './constants';
 import { AIProvider, ScheduleItem, TrackEvaluation } from './types';
 import { normalizeTimeString } from './dj-utils';
 
@@ -25,7 +25,7 @@ You are ContextDJ, an expert radio DJ and music curator. Your mission is to anal
   - **Mix**: Provide a mix of specific and broad queries to give the player a diverse candidate pool.
 - **Anchor Tracks (Representative Seeds)**:
   - For each block, provide 2 to 3 iconic, well-known songs or artists that epitomize the desired mood and texture in the anchorTracks field (e.g., ["Plastic Love - Mariya Takeuchi", "Sparkle - Tatsuro Yamashita"]).
-- **Query Density & Variety**: Provide 3 to 5 distinct, non-repetitive search queries per block. Do not repeat the same keywords within a block.
+- **Query Density & Variety**: Provide 4 to 6 distinct, non-repetitive search queries per block so the curator can assemble a generous, multi-hour playlist. Do not repeat the same keywords within a block.
 - **Explicit Artist Request (MANDATORY)**:
   - If the user explicitly asks for a specific artist (e.g., "u-fullさんの曲を聴きたい", "Mr.Childrenが聴きたい"), that artist MUST be the absolute central focus.
   - At least 2 to 3 queries in the block MUST strictly target that artist with exact double quotes (e.g., artist:"u-full", "u-full").
@@ -42,7 +42,7 @@ You MUST return valid JSON (either a JSON array of blocks or a JSON object with 
 Each schedule block MUST contain:
 - start: 24-hour time in "HH:mm" format (e.g., "14:00", "09:30"). Never use 12-hour or AM/PM.
 - end: 24-hour time in "HH:mm" format (e.g., "18:00", "23:00"). Never use 12-hour or AM/PM.
-- queries: array of 3 to 5 search strings for Spotify.
+- queries: array of 4 to 6 search strings for Spotify.
 - anchorTracks: array of 2 to 3 iconic songs or artists representing the vibe.
 - priorityTrack: optional exact track query (e.g. track:"Song" artist:"Artist").
 - thought: radio DJ's intent and vibe description in the user's language.
@@ -160,6 +160,7 @@ export class AIService {
     }
 
     private lastFilterError: string | null = null;
+    private lastFilterHadChunkError = false;
 
     getModelName(): string {
         return this.modelName;
@@ -167,6 +168,10 @@ export class AIService {
 
     getLastFilterError(): string | null {
         return this.lastFilterError;
+    }
+
+    hadChunkFilterError(): boolean {
+        return this.lastFilterHadChunkError;
     }
 
     private static stripMarkdownCodeBlock(text: string): string {
@@ -344,13 +349,36 @@ export class AIService {
         }
     }
 
-    async filterTracksWithAI(userRequest: string, tracks: { name: string, artist: string, album?: string, id: string }[], thought?: string): Promise<TrackEvaluation[]> {
-        this.lastFilterError = null;
-        if (tracks.length === 0) return [];
+    private buildFallbackTrackEvaluations(
+        userRequest: string,
+        tracks: { name: string; artist: string; album?: string; id: string }[],
+        thought?: string
+    ): TrackEvaluation[] {
+        const cleanReq = userRequest.replace(/[^\w\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g, '').slice(0, 10);
+        const fallbackTag = cleanReq ? `#${cleanReq}` : '#名曲セレクト';
+        const fallbackReason = thought ? `${thought}` : `${userRequest} の雰囲気に合わせたセレクトです。`;
 
-        // Limit candidates to 25 to prevent token exhaustion and ensure fast, robust response
-        const candidatesToEval = tracks.slice(0, 25);
-        const trackListStr = candidatesToEval.map((t, i) => `${i}: "${t.name}" by ${t.artist}${t.album ? ` (Album: "${t.album}")` : ''}`).join('\n');
+        return tracks.map(t => ({
+            id: t.id,
+            score: 70,
+            vibeTag: fallbackTag,
+            selectionReason: fallbackReason
+        }));
+    }
+
+    private async evaluateTrackChunkWithAI(
+        userRequest: string,
+        candidatesToEval: { name: string; artist: string; album?: string; id: string }[],
+        thought?: string,
+        personalPreference?: string
+    ): Promise<TrackEvaluation[]> {
+        const trackListStr = candidatesToEval
+            .map((t, i) => `${i}: "${t.name}" by ${t.artist}${t.album ? ` (Album: "${t.album}")` : ''}`)
+            .join('\n');
+        const trimmedPref = personalPreference?.trim() || '';
+        const prefCriteriaLine = trimmedPref
+            ? `0. **User's Universal Preferences (HIGHEST PRIORITY - STRICTLY ENFORCE)**:\n   - Strictly enforce the User's Universal Preferences across every candidate. If they exclude specific artists, vocal styles, genres, or eras, score any violating track below 30 so it is excluded. If they explicitly welcome specific formats (e.g., live recordings, acoustic covers, instrumental versions), override default penalties for those formats.\n`
+            : '';
         const prompt = `
 # Role
 You are an expert music curator, critic, and radio DJ assistant.
@@ -360,11 +388,11 @@ Evaluate if the following candidate tracks from Spotify match the User's Request
 Use your internal musical knowledge and the provided track, artist, and **album names** to make an intelligent, discerning judgment for each track.
 
 # Criteria for Evaluation
-1. **Intelligent Quality & Context Verification (CRITICAL)**:
+${prefCriteriaLine}1. **Intelligent Quality & Context Verification (CRITICAL)**:
    - Carefully inspect the **track title, artist name, and album title**.
    - Discern between authentic artist releases vs generic production music, advertising/commercial BGM (e.g. "動画広告用音楽", "Music for advertising"), relaxation/sleep loops, sound effect tracks, or practice jam/backing tracks. Exclude or heavily penalize generic non-artist content unless explicitly requested.
    - Exclude "music box" (オルゴール), "karaoke" (カラオケ), and amateur instrumental cover versions of popular songs. We want the original artist's track.
-   - Exclude low-quality live bootlegs, audiobooks, or podcasts.
+   - Exclude low-quality live bootlegs, audiobooks, or podcasts (unless live recordings are explicitly requested in User Request or User's Universal Preferences).
 2. **Artist Match (STRICT)**:
    - If the user explicitly mentions an artist, prioritize or strictly require them. Give their original tracks a 90-100 score and exclude cover versions by other artists.
 3. **Musical Vibe, Style & Energy Alignment**:
@@ -383,86 +411,139 @@ For each acceptable track (score >= 50):
 # Input
 - User Request: "${userRequest.replace(/"/g, "'")}"
 ${thought ? `- DJ Intent: "${thought.replace(/"/g, "'")}"` : ''}
+${trimmedPref ? `- User's Universal Preferences (STRICT): "${trimmedPref.replace(/"/g, "'")}"` : ''}
 - Found Tracks:
 ${trackListStr}
 `;
 
-        try {
-            const cleanJson = await this.requestStructuredText({
-                systemPrompt: "You evaluate music candidates and output a JSON object { \"evaluations\": [...] } (or JSON array) of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage.",
-                userPrompt: prompt,
-                geminiText: prompt,
-                geminiGenerationConfig: {
-                    responseMimeType: "application/json",
-                    maxOutputTokens: 8192,
-                    responseSchema: {
-                        type: "array",
-                        description: "Array of evaluated tracks matching the criteria.",
-                        items: {
-                            type: "object",
-                            properties: {
-                                index: { type: "integer" },
-                                score: { type: "integer" },
-                                vibeTag: { type: "string" },
-                                selectionReason: { type: "string" },
-                                estimatedBpm: { type: "integer" },
-                                energy: { type: "integer", description: "1 to 10 intensity" },
-                                stage: { type: "string", enum: ["intro", "build", "peak", "outro"] }
-                            },
-                            required: ["index", "score", "vibeTag", "selectionReason"]
-                        }
+        const cleanJson = await this.requestStructuredText({
+            systemPrompt: "You evaluate music candidates and output a JSON object { \"evaluations\": [...] } (or JSON array) of evaluated tracks with fields: index, score, vibeTag, selectionReason, estimatedBpm, energy, stage.",
+            userPrompt: prompt,
+            geminiText: prompt,
+            geminiGenerationConfig: {
+                responseMimeType: "application/json",
+                maxOutputTokens: 8192,
+                responseSchema: {
+                    type: "array",
+                    description: "Array of evaluated tracks matching the criteria.",
+                    items: {
+                        type: "object",
+                        properties: {
+                            index: { type: "integer" },
+                            score: { type: "integer" },
+                            vibeTag: { type: "string" },
+                            selectionReason: { type: "string" },
+                            estimatedBpm: { type: "integer" },
+                            energy: { type: "integer", description: "1 to 10 intensity" },
+                            stage: { type: "string", enum: ["intro", "build", "peak", "outro"] }
+                        },
+                        required: ["index", "score", "vibeTag", "selectionReason"]
                     }
                 }
-            });
-
-            const parsed: unknown = JSON.parse(cleanJson);
-
-            let rawItems: RawTrackEvaluation[] = [];
-            if (Array.isArray(parsed)) {
-                rawItems = parsed as RawTrackEvaluation[];
-            } else if (parsed && typeof parsed === 'object') {
-                const parsedObj = parsed as Record<string, unknown>;
-                const candidate =
-                    parsedObj.evaluations ||
-                    parsedObj.tracks ||
-                    parsedObj.matches ||
-                    parsedObj.items ||
-                    Object.values(parsedObj).find(v => Array.isArray(v));
-                if (Array.isArray(candidate)) {
-                    rawItems = candidate as RawTrackEvaluation[];
-                }
             }
+        });
 
-            const evaluations: TrackEvaluation[] = rawItems
-                .filter((item): item is RawTrackEvaluation & { index: number } =>
-                    typeof item.index === 'number' && item.index >= 0 && item.index < candidatesToEval.length
-                )
-                .map(item => ({
-                    id: candidatesToEval[item.index].id,
-                    score: typeof item.score === 'number' ? item.score : 70,
-                    vibeTag: item.vibeTag && item.vibeTag.startsWith('#') ? item.vibeTag : (item.vibeTag ? `#${item.vibeTag}` : '#注目トラック'),
-                    selectionReason: item.selectionReason || 'ムードに合わせた選曲です。',
-                    estimatedBpm: typeof item.estimatedBpm === 'number' ? item.estimatedBpm : undefined,
-                    energy: typeof item.energy === 'number' ? Math.max(1, Math.min(10, item.energy)) : 5,
-                    stage: isValidStage(item.stage) ? item.stage : undefined
-                }));
+        const parsed: unknown = JSON.parse(cleanJson);
 
-            return evaluations;
-        } catch (error) {
-            console.error('AI Filtering Error:', error);
-            this.lastFilterError = error instanceof Error ? error.message : String(error);
-            // Intelligent fallback when API fails
-            const cleanReq = userRequest.replace(/[^\w\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g, '').slice(0, 10);
-            const fallbackTag = cleanReq ? `#${cleanReq}` : '#名曲セレクト';
-            const fallbackReason = thought ? `${thought}` : `${userRequest} の雰囲気に合わせたセレクトです。`;
-
-            return tracks.map(t => ({
-                id: t.id,
-                score: 70,
-                vibeTag: fallbackTag,
-                selectionReason: fallbackReason
-            }));
+        let rawItems: RawTrackEvaluation[] = [];
+        if (Array.isArray(parsed)) {
+            rawItems = parsed as RawTrackEvaluation[];
+        } else if (parsed && typeof parsed === 'object') {
+            const parsedObj = parsed as Record<string, unknown>;
+            const candidate =
+                parsedObj.evaluations ||
+                parsedObj.tracks ||
+                parsedObj.matches ||
+                parsedObj.items ||
+                Object.values(parsedObj).find(v => Array.isArray(v));
+            if (Array.isArray(candidate)) {
+                rawItems = candidate as RawTrackEvaluation[];
+            }
         }
+
+        return rawItems
+            .filter((item): item is RawTrackEvaluation & { index: number } =>
+                typeof item.index === 'number' && item.index >= 0 && item.index < candidatesToEval.length
+            )
+            .map(item => ({
+                id: candidatesToEval[item.index].id,
+                score: typeof item.score === 'number' ? item.score : 70,
+                vibeTag: item.vibeTag && item.vibeTag.startsWith('#') ? item.vibeTag : (item.vibeTag ? `#${item.vibeTag}` : '#注目トラック'),
+                selectionReason: item.selectionReason || 'ムードに合わせた選曲です。',
+                estimatedBpm: typeof item.estimatedBpm === 'number' ? item.estimatedBpm : undefined,
+                energy: typeof item.energy === 'number' ? Math.max(1, Math.min(10, item.energy)) : 5,
+                stage: isValidStage(item.stage) ? item.stage : undefined
+            }));
+    }
+
+    async filterTracksWithAI(
+        userRequest: string,
+        tracks: { name: string; artist: string; album?: string; id: string }[],
+        thought?: string,
+        personalPreference?: string
+    ): Promise<TrackEvaluation[]> {
+        this.lastFilterError = null;
+        this.lastFilterHadChunkError = false;
+        if (tracks.length === 0) return [];
+
+        // Cap total candidates and evaluate in parallel chunks of 25 so output JSON never truncates
+        // while avoiding discarding candidates beyond index 24.
+        const cappedCandidates = tracks.slice(0, PLAYBACK_CONSTANTS.MAX_AI_EVAL_CANDIDATES);
+        const chunkSize = PLAYBACK_CONSTANTS.AI_EVAL_CHUNK_SIZE;
+        const chunks: { name: string; artist: string; album?: string; id: string }[][] = [];
+        for (let i = 0; i < cappedCandidates.length; i += chunkSize) {
+            chunks.push(cappedCandidates.slice(i, i + chunkSize));
+        }
+
+        const chunkResults = await Promise.all(
+            chunks.map(async (chunk) => {
+                try {
+                    const evaluations = await this.evaluateTrackChunkWithAI(
+                        userRequest,
+                        chunk,
+                        thought,
+                        personalPreference
+                    );
+                    return { ok: true as const, evaluations };
+                } catch (error) {
+                    console.error('AI Filtering Error:', error);
+                    const errMsg = error instanceof Error ? error.message : String(error);
+                    return {
+                        ok: false as const,
+                        errorMessage: errMsg,
+                        evaluations: this.buildFallbackTrackEvaluations(userRequest, chunk, thought),
+                    };
+                }
+            })
+        );
+
+        this.lastFilterHadChunkError = chunkResults.some(r => !r.ok);
+
+        const allFailed = chunkResults.every(r => !r.ok);
+        if (allFailed) {
+            const firstFailed = chunkResults.find(r => !r.ok);
+            if (firstFailed && !firstFailed.ok) {
+                this.lastFilterError = firstFailed.errorMessage;
+            }
+            return this.buildFallbackTrackEvaluations(userRequest, tracks, thought);
+        }
+
+        const succeededEvaluations = chunkResults
+            .filter((r): r is { ok: true; evaluations: TrackEvaluation[] } => r.ok)
+            .flatMap(r => r.evaluations);
+
+        // Only supplement from failed-chunk fallback when succeeded chunks yielded fewer than 5 tracks;
+        // otherwise keep the playlist strictly AI-curated without unfiltered fallback tracks.
+        if (succeededEvaluations.length >= 5) {
+            return succeededEvaluations;
+        }
+
+        const fallbackSupplement = chunkResults
+            .filter(r => !r.ok)
+            .flatMap(r => r.evaluations)
+            .slice(0, 5 - succeededEvaluations.length);
+
+        return [...succeededEvaluations, ...fallbackSupplement];
     }
 
     async analyzeImage(base64Image: string, mimeType: string): Promise<string> {

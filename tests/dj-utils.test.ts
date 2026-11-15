@@ -21,6 +21,9 @@ import {
     getScheduleItemDisplayStatus,
     resolveScheduleThought,
     shouldPreserveActivePlaybackOnScheduleUpdate,
+    getRemainingSlotMinutes,
+    computeTargetTrackCountForSlot,
+    resolveSessionPlaybackDisplay,
 } from '../src/lib/dj-utils';
 import { ScheduleItem, Track } from '../src/lib/types';
 
@@ -761,6 +764,169 @@ describe('dj-utils', () => {
                 }),
                 false
             );
+        });
+    });
+
+    describe('getRemainingSlotMinutes & computeTargetTrackCountForSlot', () => {
+        it('scales initial track count to cover bounded & overnight schedule blocks while enforcing [20, 45] bounds and 30 for open-ended slots', () => {
+            // Null/undefined fallback -> 30 tracks
+            assert.strictEqual(computeTargetTrackCountForSlot(null), 30);
+
+            // Short 30m slot (14:00 - 14:30 at 14:10 -> 20m remaining) -> enforces generous 20-track floor (~70m)
+            const shortSlot: ScheduleItem = { start: '14:00', end: '14:30', query: 'coffee break' };
+            assert.strictEqual(getRemainingSlotMinutes(shortSlot, new Date(2026, 10, 15, 14, 10, 0)), 20);
+            assert.strictEqual(computeTargetTrackCountForSlot(shortSlot, new Date(2026, 10, 15, 14, 10, 0)), 20);
+
+            // Real-device 20:58 - 23:00 (122m) slot at 20:58 -> ceil(122 / 3.5) = 35 tracks (survives 2h screen-off Doze)
+            const studySlot: ScheduleItem = { start: '20:58', end: '23:00', query: 'study ballad' };
+            const at2058 = new Date(2026, 10, 15, 20, 58, 0);
+            assert.strictEqual(getRemainingSlotMinutes(studySlot, at2058), 122);
+            assert.strictEqual(computeTargetTrackCountForSlot(studySlot, at2058), 35);
+
+            // Overnight 23:00 - 01:30 (150m) slot at 23:00 -> ceil(150 / 3.5) = 43 tracks; at 00:30 -> 60m remaining -> 20 tracks
+            const lateNightSlot: ScheduleItem = { start: '23:00', end: '01:30', query: 'late ballad' };
+            assert.strictEqual(getRemainingSlotMinutes(lateNightSlot, new Date(2026, 10, 15, 23, 0, 0)), 150);
+            assert.strictEqual(computeTargetTrackCountForSlot(lateNightSlot, new Date(2026, 10, 15, 23, 0, 0)), 43);
+            assert.strictEqual(getRemainingSlotMinutes(lateNightSlot, new Date(2026, 10, 16, 0, 30, 0)), 60);
+            assert.strictEqual(computeTargetTrackCountForSlot(lateNightSlot, new Date(2026, 10, 16, 0, 30, 0)), 20);
+
+            // 4-hour bounded slot (18:00 - 22:00, 240m) -> capped at 45 tracks
+            const fourHourSlot: ScheduleItem = { start: '18:00', end: '22:00', query: 'evening lounge' };
+            assert.strictEqual(computeTargetTrackCountForSlot(fourHourSlot, new Date(2026, 10, 15, 18, 0, 0)), 45);
+
+            // Open-ended all-day slots (00:00 - 23:59 or 00:00 - 00:00) -> 30 tracks
+            assert.strictEqual(
+                computeTargetTrackCountForSlot({ start: '00:00', end: '23:59', query: 'all day' }, new Date(2026, 10, 15, 10, 0, 0)),
+                30
+            );
+            assert.strictEqual(
+                computeTargetTrackCountForSlot({ start: '00:00', end: '00:00', query: '24h' }, new Date(2026, 10, 15, 10, 0, 0)),
+                30
+            );
+
+            // Long multi-hour block (09:00 - 23:00, 840m) when 90m remain at 21:30 -> scales to remaining 90m (26 tracks)
+            const dayToNight: ScheduleItem = { start: '09:00', end: '23:00', query: 'daytime ocean' };
+            assert.strictEqual(computeTargetTrackCountForSlot(dayToNight, new Date(2026, 10, 15, 21, 30, 0)), 26);
+
+            // Recurring schedule saved yesterday (`scheduledStartAt` > 24h ago): at 22:57 today, returns 3m (NOT full 180m!)
+            const yesterday2000 = new Date(2026, 10, 14, 20, 0, 0, 0).getTime();
+            const staleAnchoredSlot: ScheduleItem = {
+                start: '20:00',
+                end: '23:00',
+                query: 'evening study',
+                scheduledStartAt: yesterday2000,
+            };
+            assert.strictEqual(getRemainingSlotMinutes(staleAnchoredSlot, new Date(2026, 10, 15, 22, 57, 0)), 3);
+        });
+
+        it('resolveSessionPlaybackDisplay prevents Trap 2A UI rewind to Track 0 and shows accurate play-state on Auto-Refill carryover and Trap 2B Autoplay tracks', () => {
+            const makeSimpleTrack = (id: string, name: string): Track =>
+                ({
+                    id,
+                    uri: `spotify:track:${id}`,
+                    name,
+                    type: 'track',
+                    artists: [{ name: 'Artist' }],
+                } as unknown as Track);
+
+            const t0 = makeSimpleTrack('t0', 'Brave Shine');
+            const t4 = makeSimpleTrack('t4', 'Love Hurts');
+            const sessionTracks = [
+                t0,
+                makeSimpleTrack('t1', 'T1'),
+                makeSimpleTrack('t2', 'T2'),
+                makeSimpleTrack('t3', 'T3'),
+                t4,
+            ];
+            const carryover = makeSimpleTrack('carry1', 'Leftover Refill Song');
+            const autoplayRec = makeSimpleTrack('auto1', 'Spotify Recommended Song');
+
+            // 1. Trap 2A (`isBatchExhausted: true`, Spotify paused at 0ms on `t0`):
+            //    Must keep `t4` (`Love Hurts`) displayed with `effectiveIsPlaying: false`, NOT rewind UI/storage to `t0`!
+            const trap2A = resolveSessionPlaybackDisplay({
+                playbackState: {
+                    is_playing: false,
+                    progress_ms: 0,
+                    item: t0,
+                    context: null,
+                } as unknown as SpotifyApi.CurrentPlaybackResponse,
+                isSessionActive: true,
+                hasConfirmedPlayback: true,
+                isBatchExhausted: true,
+                sessionTracks,
+                sessionStartIndex: 4,
+                previousDisplayedTrack: t4,
+                findTrackIndexInSession: (t) => sessionTracks.findIndex(s => s.uri === t.uri),
+                isKnownRefillCarryoverTrack: () => false,
+            });
+            assert.strictEqual(trap2A.currentTrackItem?.id, 't4');
+            assert.strictEqual(trap2A.effectiveIsPlaying, false);
+            assert.strictEqual(trap2A.isForeignOrIdleInSession, true);
+
+            // 2. Trap 2B (`isBatchExhausted: true`, Spotify Autoplay actively playing `autoplayRec`):
+            //    Must show `autoplayRec` with `effectiveIsPlaying: true` (Pause icon works!) without overwriting persisted session track!
+            const trap2B = resolveSessionPlaybackDisplay({
+                playbackState: {
+                    is_playing: true,
+                    progress_ms: 4_000,
+                    item: autoplayRec,
+                    context: null,
+                } as unknown as SpotifyApi.CurrentPlaybackResponse,
+                isSessionActive: true,
+                hasConfirmedPlayback: true,
+                isBatchExhausted: true,
+                sessionTracks,
+                sessionStartIndex: 4,
+                previousDisplayedTrack: t4,
+                findTrackIndexInSession: (t) => sessionTracks.findIndex(s => s.uri === t.uri),
+                isKnownRefillCarryoverTrack: () => false,
+            });
+            assert.strictEqual(trap2B.currentTrackItem?.id, 'auto1');
+            assert.strictEqual(trap2B.effectiveIsPlaying, true);
+            assert.strictEqual(trap2B.shouldPersistSessionTrack, false);
+            assert.strictEqual(trap2B.shouldUpdateSessionCache, false);
+
+            // 3. Auto-Refill carryover track playing (`isKnownRefillCarryoverTrack: true`):
+            //    Shows `carry1` with `effectiveIsPlaying: true` (and `false` when paused) without overwriting persisted session track!
+            const carryPlaying = resolveSessionPlaybackDisplay({
+                playbackState: {
+                    is_playing: true,
+                    progress_ms: 15_000,
+                    item: carryover,
+                    context: null,
+                } as unknown as SpotifyApi.CurrentPlaybackResponse,
+                isSessionActive: true,
+                hasConfirmedPlayback: true,
+                isBatchExhausted: false,
+                sessionTracks,
+                sessionStartIndex: 0,
+                previousDisplayedTrack: t0,
+                findTrackIndexInSession: (t) => sessionTracks.findIndex(s => s.uri === t.uri),
+                isKnownRefillCarryoverTrack: (t) => t.uri === carryover.uri,
+            });
+            assert.strictEqual(carryPlaying.currentTrackItem?.id, 'carry1');
+            assert.strictEqual(carryPlaying.effectiveIsPlaying, true);
+            assert.strictEqual(carryPlaying.shouldPersistSessionTrack, false);
+
+            const carryPaused = resolveSessionPlaybackDisplay({
+                playbackState: {
+                    is_playing: false,
+                    progress_ms: 25_000,
+                    item: carryover,
+                    context: null,
+                } as unknown as SpotifyApi.CurrentPlaybackResponse,
+                isSessionActive: true,
+                hasConfirmedPlayback: true,
+                isBatchExhausted: false,
+                sessionTracks,
+                sessionStartIndex: 0,
+                previousDisplayedTrack: carryover,
+                findTrackIndexInSession: (t) => sessionTracks.findIndex(s => s.uri === t.uri),
+                isKnownRefillCarryoverTrack: (t) => t.uri === carryover.uri,
+            });
+            assert.strictEqual(carryPaused.currentTrackItem?.id, 'carry1');
+            assert.strictEqual(carryPaused.effectiveIsPlaying, false);
+            assert.strictEqual(carryPaused.shouldPersistSessionTrack, false);
         });
     });
 });

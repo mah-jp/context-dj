@@ -1,3 +1,4 @@
+import { PLAYBACK_CONSTANTS } from './constants';
 import { Track, ScheduleItem } from './types';
 
 /**
@@ -88,6 +89,83 @@ function getMinuteFloorMs(date: Date): number {
 function getSlotDurationMinutes(startMins: number, endMins: number): number {
     const rawDuration = (endMins - startMins + 1440) % 1440;
     return rawDuration === 0 ? 1440 : rawDuration;
+}
+
+/**
+ * Returns the remaining duration in minutes for a schedule item at `date` when active,
+ * or its full slot duration in minutes when upcoming/inactive.
+ */
+export function getRemainingSlotMinutes(item: ScheduleItem, date: Date = new Date()): number {
+    const startMins = parseTimeToMinutes(item.start);
+    const endMins = parseTimeToMinutes(item.end);
+    const fullDuration = getSlotDurationMinutes(startMins, endMins);
+
+    if (typeof item.scheduledStartAt === 'number' && Number.isFinite(item.scheduledStartAt)) {
+        const itemStartMs = item.scheduledStartAt;
+        const itemEndMs = itemStartMs + fullDuration * 60_000;
+        const dateFloorMs = getMinuteFloorMs(date);
+        if (
+            dateFloorMs >= itemStartMs - MAX_PRE_SCHEDULE_VALID_MS &&
+            dateFloorMs <= itemEndMs + MAX_POST_SCHEDULE_VALID_MS
+        ) {
+            if (dateFloorMs >= itemStartMs && dateFloorMs < itemEndMs) {
+                return Math.max(1, Math.round((itemEndMs - dateFloorMs) / 60_000));
+            }
+            return fullDuration;
+        }
+    }
+
+    if (!isScheduleItemActive(item, date)) {
+        return fullDuration;
+    }
+
+    if (startMins === endMins) {
+        return 1440;
+    }
+
+    const currentMins = date.getHours() * 60 + date.getMinutes();
+    const rem = (endMins - currentMins + 1440) % 1440;
+    return rem === 0 ? fullDuration : rem;
+}
+
+/**
+ * Computes the target curated track count for an initial/preloaded schedule block.
+ * Ensures even short slots receive a generous playlist (>= 20 tracks, ~70m) worth an AI curation call,
+ * scales bounded blocks (~3.5m/track, e.g. ~35 tracks for a 2-hour block) so mobile playback survives
+ * screen-off Doze across the entire slot without network refills, and caps open-ended all-day slots at 30.
+ */
+export function computeTargetTrackCountForSlot(
+    item: ScheduleItem | null | undefined,
+    date: Date = new Date()
+): number {
+    if (!item) {
+        return PLAYBACK_CONSTANTS.DEFAULT_OPEN_ENDED_SESSION_TRACKS;
+    }
+    const startMins = parseTimeToMinutes(item.start);
+    const endMins = parseTimeToMinutes(item.end);
+    const fullDuration = getSlotDurationMinutes(startMins, endMins);
+    const remainingMins = getRemainingSlotMinutes(item, date);
+    const AVG_TRACK_MINUTES = 3.5;
+
+    // Open-ended / all-day block (> 6 hours, e.g. 00:00 - 23:59)
+    if (fullDuration > 360) {
+        if (remainingMins <= 150) {
+            return Math.max(
+                PLAYBACK_CONSTANTS.MIN_INITIAL_SESSION_TRACKS,
+                Math.min(
+                    PLAYBACK_CONSTANTS.MAX_INITIAL_SESSION_TRACKS,
+                    Math.ceil(remainingMins / AVG_TRACK_MINUTES)
+                )
+            );
+        }
+        return PLAYBACK_CONSTANTS.DEFAULT_OPEN_ENDED_SESSION_TRACKS;
+    }
+
+    const estimatedTracks = Math.ceil(remainingMins / AVG_TRACK_MINUTES);
+    return Math.max(
+        PLAYBACK_CONSTANTS.MIN_INITIAL_SESSION_TRACKS,
+        Math.min(PLAYBACK_CONSTANTS.MAX_INITIAL_SESSION_TRACKS, estimatedTracks)
+    );
 }
 
 /**
@@ -927,4 +1005,109 @@ export function getScheduleItemDisplayStatus(
     }
     return 'upcoming';
 }
+
+export interface SessionPlaybackDisplayResolution {
+    currentTrackItem: Track | null;
+    isForeignOrIdleInSession: boolean;
+    isAuthorizedOutOfSessionTrack: boolean;
+    effectiveIsPlaying: boolean;
+    shouldPersistSessionTrack: boolean;
+    shouldUpdateSessionCache: boolean;
+}
+
+/**
+ * Resolves the authoritative track and play-state to display across UI (`PlayerContext`) and CLI (`DJRunner`)
+ * during active DJ sessions, preventing:
+ *  - Trap 2A rewind to Track 0 when Spotify pauses at 0ms on the batch's origin track after batch exhaustion
+ *  - False `isPlaying: false` (Play button shown while audio plays) on Auto-Refill carryover or Trap 2B Autoplay tracks
+ *  - Overwriting persisted `DJ_CURRENT_PLAYING_TRACK` with transient out-of-session carryover/autoplay tracks
+ */
+export function resolveSessionPlaybackDisplay(params: {
+    playbackState: SpotifyApi.CurrentPlaybackResponse | null;
+    isSessionActive: boolean;
+    hasConfirmedPlayback: boolean;
+    isBatchExhausted: boolean;
+    sessionTracks: Track[];
+    sessionStartIndex: number;
+    previousDisplayedTrack: Track | null;
+    findTrackIndexInSession: (track: Track) => number;
+    isKnownRefillCarryoverTrack: (track: Track) => boolean;
+}): SessionPlaybackDisplayResolution {
+    const {
+        playbackState,
+        isSessionActive,
+        hasConfirmedPlayback,
+        isBatchExhausted,
+        sessionTracks,
+        sessionStartIndex,
+        previousDisplayedTrack,
+        findTrackIndexInSession,
+        isKnownRefillCarryoverTrack,
+    } = params;
+
+    const rawTrackItem =
+        playbackState && playbackState.item && playbackState.item.type === 'track'
+            ? (playbackState.item as Track)
+            : null;
+    const hasExternalContextUri = Boolean(playbackState?.context?.uri);
+    const isRawTrackInSession = Boolean(
+        !hasExternalContextUri &&
+        rawTrackItem &&
+        findTrackIndexInSession(rawTrackItem) >= 0
+    );
+    const isKnownCarryoverRefill = Boolean(
+        !hasExternalContextUri &&
+        rawTrackItem &&
+        !isRawTrackInSession &&
+        isKnownRefillCarryoverTrack(rawTrackItem)
+    );
+    const isAuthorizedOutOfSessionTrack = Boolean(
+        hasConfirmedPlayback &&
+        !hasExternalContextUri &&
+        rawTrackItem &&
+        !isRawTrackInSession &&
+        (
+            (!isBatchExhausted && isKnownCarryoverRefill) ||
+            (isBatchExhausted && Boolean(playbackState?.is_playing))
+        )
+    );
+    const isExhaustedIdleReset = Boolean(
+        isBatchExhausted &&
+        !playbackState?.is_playing
+    );
+    const isForeignOrIdleInSession = Boolean(
+        isSessionActive &&
+        !playbackState?.__optimisticFallback &&
+        (
+            isExhaustedIdleReset ||
+            (!isRawTrackInSession && !isAuthorizedOutOfSessionTrack)
+        )
+    );
+    const authoritativeSessionTrack =
+        sessionTracks[sessionStartIndex] ??
+        (previousDisplayedTrack && findTrackIndexInSession(previousDisplayedTrack) >= 0
+            ? previousDisplayedTrack
+            : null);
+    const currentTrackItem = isForeignOrIdleInSession
+        ? authoritativeSessionTrack
+        : rawTrackItem;
+    const effectiveIsPlaying = !isForeignOrIdleInSession && Boolean(playbackState?.is_playing);
+    const shouldUpdateSessionCache = Boolean(
+        playbackState &&
+        !playbackState.__optimisticFallback &&
+        !isForeignOrIdleInSession &&
+        !isAuthorizedOutOfSessionTrack
+    );
+    const shouldPersistSessionTrack = !isAuthorizedOutOfSessionTrack;
+
+    return {
+        currentTrackItem,
+        isForeignOrIdleInSession,
+        isAuthorizedOutOfSessionTrack,
+        effectiveIsPlaying,
+        shouldPersistSessionTrack,
+        shouldUpdateSessionCache,
+    };
+}
+
 

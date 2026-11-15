@@ -39,12 +39,15 @@ export interface DJConfig {
     trackSearchLimit: number;
     onlyOfficial: boolean;
     aiFiltering: boolean;
+    personalPreference?: string;
 }
 
 export interface SearchPipelineContext {
     userRequest?: string;
     thought?: string;
     anchorTracks?: string[];
+    personalPreference?: string;
+    targetTrackCount?: number;
     silent?: boolean;
 }
 
@@ -83,6 +86,12 @@ export interface SpotifyControlResult {
     ok: boolean;
     status?: number;
     error?: SpotifyApiErrorInfo;
+    mobileWakeRequired?: boolean;
+}
+
+export interface DJTracksPlayedMeta {
+    confirmedPlaying: boolean;
+    mobileWakeRequired: boolean;
 }
 
 // DJCore Subscription / Event Types
@@ -93,6 +102,7 @@ export interface DJStateSnapshot {
     currentThought: string | null;
     logs: string[];
     lastError: string | null;
+    mobileWakeRequired?: boolean;
 }
 
 export type DJStateListener = (snapshot: DJStateSnapshot) => void;
@@ -151,6 +161,11 @@ declare global {
         interface CurrentPlaybackResponse {
             currently_playing_type?: 'track' | 'episode' | 'ad' | 'unknown' | string;
             __optimisticFallback?: boolean;
+        }
+
+        interface UserDevice {
+            is_private_session?: boolean;
+            supports_volume?: boolean;
         }
     }
 }

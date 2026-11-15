@@ -45,16 +45,42 @@ export function useVoiceInput({ onResult, onError }: UseVoiceInputProps) {
         };
     }, []);
 
-    const toggleListening = useCallback(() => {
-        if (isListening) {
-            if (recognitionRef.current) {
+    const stopListening = useCallback((options?: { abort?: boolean }) => {
+        const activeRecognition = recognitionRef.current;
+        if (activeRecognition) {
+            recognitionRef.current = null;
+            if (options?.abort) {
+                activeRecognition.onstart = null;
+                activeRecognition.onresult = null;
+                activeRecognition.onerror = null;
+                activeRecognition.onend = null;
                 try {
-                    recognitionRef.current.stop();
+                    activeRecognition.abort();
                 } catch {
-                    recognitionRef.current.abort();
+                    try {
+                        activeRecognition.stop();
+                    } catch {
+                        // Ignore cleanup errors
+                    }
+                }
+            } else {
+                try {
+                    activeRecognition.stop();
+                } catch {
+                    try {
+                        activeRecognition.abort();
+                    } catch {
+                        // Ignore cleanup errors
+                    }
                 }
             }
-            setIsListening(false);
+        }
+        setIsListening(false);
+    }, []);
+
+    const toggleListening = useCallback(() => {
+        if (isListening) {
+            stopListening();
             return;
         }
 
@@ -64,6 +90,10 @@ export function useVoiceInput({ onResult, onError }: UseVoiceInputProps) {
         if (!SpeechRecognition) {
             onError?.('Voice input is not supported in this browser. Try Chrome, Edge, or Safari. (このブラウザは音声入力に対応していません)');
             return;
+        }
+
+        if (recognitionRef.current) {
+            stopListening({ abort: true });
         }
 
         const recognition = new SpeechRecognition();
@@ -83,6 +113,9 @@ export function useVoiceInput({ onResult, onError }: UseVoiceInputProps) {
 
         recognition.onerror = (event: Event & { error?: string }) => {
             console.error('[VoiceInput Error]', event.error);
+            if (recognitionRef.current === recognition) {
+                recognitionRef.current = null;
+            }
             setIsListening(false);
             const message = classifySpeechRecognitionError(event.error);
             if (message) {
@@ -91,6 +124,9 @@ export function useVoiceInput({ onResult, onError }: UseVoiceInputProps) {
         };
 
         recognition.onend = () => {
+            if (recognitionRef.current === recognition) {
+                recognitionRef.current = null;
+            }
             setIsListening(false);
         };
 
@@ -102,10 +138,11 @@ export function useVoiceInput({ onResult, onError }: UseVoiceInputProps) {
             setIsListening(false);
             onError?.('Failed to start voice input. Please try again. (音声入力の開始に失敗しました)');
         }
-    }, [isListening, onResult, onError]);
+    }, [isListening, stopListening, onResult, onError]);
 
     return {
         isListening,
         toggleListening,
+        stopListening,
     };
 }

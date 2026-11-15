@@ -1,4 +1,5 @@
 import SpotifyWebApi from 'spotify-web-api-js';
+import { generateTrackKey } from './dj-utils';
 import {
     SpotifyApiErrorInfo,
     SpotifyControlResult,
@@ -117,7 +118,7 @@ export interface BrowserEnvironmentHint {
  * Detects whether the current runtime is a smartphone or tablet browser
  * (including iPadOS desktop-class Safari via Macintosh UA + multi-touch).
  */
-export function isMobileBrowserEnvironment(env?: BrowserEnvironmentHint): boolean {
+export function isMobileBrowserEnvironment(env?: BrowserEnvironmentHint | null): boolean {
     if (env) {
         if (env.userAgentDataMobile === true) return true;
         const ua = env.userAgent || '';
@@ -256,11 +257,160 @@ export function shouldSuppressBackgroundKeepAlive(params: {
     return /^(smartphone|tablet)$/i.test(activeExternal.type || '');
 }
 
+export function isMobileSpotifyDevice(
+    device: Pick<SpotifyApi.UserDevice, 'type'> | null | undefined
+): boolean {
+    return Boolean(device?.type && /^(smartphone|tablet)$/i.test(device.type));
+}
+
+/**
+ * Checks whether the browser currently holds an active transient user gesture
+ * (`navigator.userActivation.isActive`, ~5.0s window in Chromium / WebKit).
+ */
+export function hasActiveBrowserUserGesture(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    const nav = navigator as Navigator & {
+        userActivation?: { isActive?: boolean };
+    };
+    return Boolean(nav.userActivation?.isActive);
+}
+
+export const SPOTIFY_ANDROID_WAKE_INTENT_URI =
+    'intent://home#Intent;scheme=spotify;package=com.spotify.music;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.spotify.music;end';
+
+/**
+ * Resolves the platform-appropriate Spotify wake URI:
+ * - Android Chromium / WebAPK: package-targeted `intent://` URI for `com.spotify.music`
+ *   with a safe HTTPS fallback (preventing `ExternalNavigationHandler` opaque-SSP drops or
+ *   `ERR_UNKNOWN_URL_SCHEME` inside `SameTaskWebApkActivity`).
+ * - iOS / other browsers: standard `spotify:` custom-scheme URI.
+ */
+export function resolveSpotifyWakeUri(userAgent?: string): string {
+    const ua =
+        userAgent !== undefined
+            ? userAgent
+            : typeof navigator !== 'undefined'
+                ? navigator.userAgent || ''
+                : '';
+    if (/\bAndroid\b/i.test(ua)) {
+        return SPOTIFY_ANDROID_WAKE_INTENT_URI;
+    }
+    return 'spotify:';
+}
+
+function isAllowedSpotifyWakeUri(uri: string): boolean {
+    if (/^spotify:/i.test(uri)) {
+        return true;
+    }
+    return /^intent:\/\/[a-z0-9/_-]*#Intent;scheme=spotify;package=com\.spotify\.music;(?:S\.browser_fallback_url=https%3A%2F%2F[^;\s]+;)?end;?$/i.test(
+        uri
+    );
+}
+
+/**
+ * Fires a platform-appropriate Spotify wake URI (`intent://...package=com.spotify.music...` on Android,
+ * `spotify:` on iOS) via a temporary anchor click to wake a frozen or BFGS-restricted mobile Spotify app
+ * without navigating the current ContextDJ document away.
+ */
+export function launchSpotifyAppUri(
+    uri?: string,
+    docOverride?: Document | null
+): boolean {
+    const resolvedUri = uri === undefined ? resolveSpotifyWakeUri() : uri;
+    if (typeof resolvedUri !== 'string' || !isAllowedSpotifyWakeUri(resolvedUri.trim())) {
+        return false;
+    }
+    const cleanUri = resolvedUri.trim();
+    const doc = docOverride !== undefined
+        ? docOverride
+        : (typeof document !== 'undefined' ? document : null);
+
+    if (doc && doc.body && typeof doc.createElement === 'function') {
+        const anchor = doc.createElement('a');
+        anchor.href = cleanUri;
+        anchor.rel = 'noopener noreferrer';
+        anchor.style.display = 'none';
+        doc.body.appendChild(anchor);
+        try {
+            anchor.click();
+            return true;
+        } finally {
+            if (anchor.parentNode) {
+                anchor.parentNode.removeChild(anchor);
+            } else if (typeof anchor.remove === 'function') {
+                anchor.remove();
+            }
+        }
+    }
+
+    if (docOverride === undefined && typeof window !== 'undefined' && window.location?.assign) {
+        window.location.assign(cleanUri);
+        return true;
+    }
+
+    return false;
+}
+
 export interface SpotifyPlayerClientOptions {
     isMobile?: () => boolean;
     transferSettleDelayMs?: number;
     retryDelayMs?: number;
     devicePollDelayMs?: number;
+    postPlayVerifyDelayMs?: number;
+    onDevicesResolved?: (devices: SpotifyApi.UserDevice[]) => void;
+}
+
+export interface StartPlaybackOptions {
+    shouldAbort?: () => boolean;
+    expectedTrackKeys?: string[];
+    onResumeKickSent?: () => void;
+    fastFailForUserGesture?: boolean;
+}
+
+export interface StartPlaybackResult {
+    confirmedPlaying: boolean;
+    targetTrackLoaded: boolean;
+    targetDeviceId: string;
+    isMobileTarget: boolean;
+    aborted?: boolean;
+}
+
+/**
+ * Checks whether Spotify's current playback state reflects one of the target track URIs
+ * (or normalized title+artist keys across Spotify Track Relinking) loaded directly
+ * (`context === null`, not an external album/playlist context) on the expected device.
+ */
+export function isTargetTrackLoadedOnState(
+    state: SpotifyApi.CurrentPlaybackResponse | null | undefined,
+    uris: string[],
+    expectedDeviceId?: string,
+    expectedTrackKeys?: string[]
+): boolean {
+    const validTrackKeys = Array.isArray(expectedTrackKeys)
+        ? expectedTrackKeys.filter(k => Boolean(k && k !== '|'))
+        : [];
+    if (!state || Boolean(state.context?.uri) || (uris.length === 0 && validTrackKeys.length === 0)) {
+        return false;
+    }
+    if (expectedDeviceId && state.device?.id && state.device.id !== expectedDeviceId) {
+        return false;
+    }
+    if (!state.item || state.item.type !== 'track') {
+        return false;
+    }
+    const targetSet = new Set(uris);
+    const currentUri = state.item.uri;
+    const linkedUri = (state.item as { linked_from?: { uri?: string } }).linked_from?.uri;
+    if ((currentUri && targetSet.has(currentUri)) || (linkedUri && targetSet.has(linkedUri))) {
+        return true;
+    }
+    if (validTrackKeys.length > 0) {
+        const itemKey = generateTrackKey(state.item as SpotifyApi.TrackObjectFull);
+        if (itemKey && itemKey !== '|' && validTrackKeys.includes(itemKey)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -272,6 +422,7 @@ export class SpotifyPlayerClient {
     private activeDeviceId: string | null = null;
     private preferredDeviceId: string | null = null;
     private lastResolvedDevice: SpotifyApi.UserDevice | null = null;
+    private knownDevices = new Map<string, SpotifyApi.UserDevice>();
     private onError?: (error: SpotifyApiErrorInfo) => void;
     private lastError: SpotifyApiErrorInfo | null = null;
     private lastNotifiedErrorMap = new Map<string, number>();
@@ -341,10 +492,29 @@ export class SpotifyPlayerClient {
         }
     }
 
-    private isMobileRuntime(): boolean {
+    isMobileRuntime(): boolean {
         return this.options.isMobile
             ? this.options.isMobile()
             : isMobileBrowserEnvironment();
+    }
+
+    getLastResolvedDevice(): SpotifyApi.UserDevice | null {
+        return this.lastResolvedDevice;
+    }
+
+    getKnownDevice(deviceId: string): SpotifyApi.UserDevice | null {
+        return (
+            this.knownDevices.get(deviceId) ??
+            (this.lastResolvedDevice?.id === deviceId ? this.lastResolvedDevice : null)
+        );
+    }
+
+    private rememberDevices(devices: SpotifyApi.UserDevice[]) {
+        for (const d of devices) {
+            if (d && d.id) {
+                this.knownDevices.set(d.id, d);
+            }
+        }
     }
 
     private delay(ms: number): Promise<void> {
@@ -360,7 +530,17 @@ export class SpotifyPlayerClient {
     async getDevices(): Promise<SpotifyApi.UserDevice[]> {
         try {
             const response = await this.spotify.getMyDevices();
-            return response.devices;
+            const list = Array.isArray(response?.devices) ? response.devices : [];
+            this.rememberDevices(list);
+            const trackedId = this.preferredDeviceId || this.activeDeviceId;
+            if (trackedId) {
+                const matched = list.find(d => d.id === trackedId);
+                if (matched) {
+                    this.lastResolvedDevice = matched;
+                }
+            }
+            this.options.onDevicesResolved?.(list);
+            return list;
         } catch (e) {
             this.reportThrownError(e, 'get_devices', { throttleMs: 10000 });
             console.warn("Failed to fetch devices:", e);
@@ -399,12 +579,20 @@ export class SpotifyPlayerClient {
         }
     }
 
-    async setActiveDevice(deviceId: string): Promise<SpotifyControlResult> {
+    async setActiveDevice(
+        deviceId: string,
+        options?: { play?: boolean; deferTransfer?: boolean }
+    ): Promise<SpotifyControlResult> {
         const prevDeviceId = this.activeDeviceId;
         const prevPreferredId = this.preferredDeviceId;
         this.activeDeviceId = deviceId;
         this.preferredDeviceId = deviceId;
         console.log(`📱 Active device set to: ${deviceId}`);
+
+        if (options?.deferTransfer) {
+            this.lastResolvedDevice = this.getKnownDevice(deviceId);
+            return { ok: true, status: 204 };
+        }
 
         const token = this.spotify.getAccessToken();
         if (!token) {
@@ -414,13 +602,16 @@ export class SpotifyPlayerClient {
         }
 
         try {
+            const transferPayload = typeof options?.play === 'boolean'
+                ? { device_ids: [deviceId], play: options.play }
+                : { device_ids: [deviceId] };
             const res = await fetch('https://api.spotify.com/v1/me/player', {
                 method: 'PUT',
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ device_ids: [deviceId] })
+                body: JSON.stringify(transferPayload)
             });
 
             if (!res.ok && res.status !== 204) {
@@ -433,8 +624,11 @@ export class SpotifyPlayerClient {
                 return { ok: false, status: res.status, error: errInfo };
             }
 
-            if (this.lastResolvedDevice?.id === deviceId) {
-                this.lastResolvedDevice = { ...this.lastResolvedDevice, is_active: true };
+            const known = this.getKnownDevice(deviceId);
+            if (known) {
+                const updated = { ...known, is_active: true };
+                this.lastResolvedDevice = updated;
+                this.knownDevices.set(deviceId, updated);
             } else {
                 this.lastResolvedDevice = null;
             }
@@ -451,12 +645,17 @@ export class SpotifyPlayerClient {
         }
     }
 
-    async resolveTargetDevice(): Promise<string> {
+    async resolveTargetDevice(options?: {
+        maxAttempts?: number;
+        pollDelayMs?: number;
+        fastFailOnEmpty?: boolean;
+    }): Promise<string> {
         let resolved: SpotifyApi.UserDevice | null = null;
         const isMobile = this.isMobileRuntime();
-        const pollDelayMs = this.options.devicePollDelayMs ?? 1000;
+        const pollDelayMs = options?.pollDelayMs ?? this.options.devicePollDelayMs ?? 1000;
+        const maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
 
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
             let devices: SpotifyApi.UserDevicesResponse;
             try {
                 devices = await this.spotify.getMyDevices();
@@ -465,6 +664,8 @@ export class SpotifyPlayerClient {
                 throw e;
             }
             const list = Array.isArray(devices?.devices) ? devices.devices : [];
+            this.rememberDevices(list);
+            this.options.onDevicesResolved?.(list);
             console.log(
                 `📱 Devices found (attempt ${attempt + 1}):`,
                 list.map(d => `${d.name} (${d.type}, ${d.is_active ? 'Active' : 'Inactive'}${d.is_restricted ? ', Restricted' : ''})`)
@@ -483,7 +684,13 @@ export class SpotifyPlayerClient {
                 break;
             }
 
-            await this.delay(pollDelayMs);
+            if (options?.fastFailOnEmpty && list.length === 0) {
+                break;
+            }
+
+            if (attempt < maxAttempts - 1) {
+                await this.delay(pollDelayMs);
+            }
         }
 
         if (!resolved?.id) {
@@ -514,16 +721,53 @@ export class SpotifyPlayerClient {
         }
     }
 
-    async startPlaybackOnDevice(deviceId: string, uris: string[]) {
+    async startPlaybackOnDevice(
+        deviceId: string,
+        uris: string[],
+        options?: StartPlaybackOptions
+    ): Promise<StartPlaybackResult> {
         const token = this.spotify.getAccessToken();
         if (!token) throw new Error("No access token available");
 
-        // When targeting an inactive Connect device (especially a backgrounded mobile Smartphone),
-        // pre-transfer the Connect session with play:false so `{ uris }` is accepted cleanly without resuming old context.
-        if (this.lastResolvedDevice?.id === deviceId && !this.lastResolvedDevice.is_active) {
+        const targetKnownDevice = this.getKnownDevice(deviceId);
+        let isMobileTarget = targetKnownDevice
+            ? isMobileSpotifyDevice(targetKnownDevice)
+            : this.isMobileRuntime();
+
+        if (options?.shouldAbort?.()) {
+            return {
+                confirmedPlaying: false,
+                targetTrackLoaded: false,
+                targetDeviceId: deviceId,
+                isMobileTarget,
+                aborted: true,
+            };
+        }
+
+        const wasInitiallyInactive = Boolean(
+            targetKnownDevice && !targetKnownDevice.is_active
+        );
+        let didPreTransferToTarget = false;
+
+        // CRITICAL: Never send `PUT /v1/me/player { play: false }` (`transferPlaybackQuietly`) to a mobile
+        // Smartphone/Tablet! On Android 14+ (`targetSdkVersion >= 34`), sending `play: false` to a backgrounded
+        // Spotify app stops `ForegroundKeeperService` within ~260ms, after which Android Background-FGS
+        // restrictions block subsequent network-only `PUT /me/player/play` commands from starting audio.
+        // Only use quiet pre-transfer on inactive non-mobile Connect targets (Desktop / Speaker).
+        if (wasInitiallyInactive && !isMobileTarget) {
             const transferred = await this.transferPlaybackQuietly(deviceId, token);
             if (transferred) {
-                await this.delay(this.options.transferSettleDelayMs ?? 350);
+                didPreTransferToTarget = true;
+                await this.delay(this.options.transferSettleDelayMs ?? 650);
+            }
+            if (options?.shouldAbort?.()) {
+                return {
+                    confirmedPlaying: false,
+                    targetTrackLoaded: false,
+                    targetDeviceId: deviceId,
+                    isMobileTarget,
+                    aborted: true,
+                };
             }
         }
 
@@ -543,6 +787,17 @@ export class SpotifyPlayerClient {
                 ...(playBody ? { body: playBody } : {}),
             });
         };
+        const executeEmptyResume = async (targetId: string, bearerToken: string) => {
+            const resumeUrl = targetId
+                ? `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(targetId)}`
+                : 'https://api.spotify.com/v1/me/player/play';
+            return fetch(resumeUrl, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${bearerToken}`,
+                },
+            });
+        };
 
         let targetDeviceId = deviceId;
         let res = await executePlay(targetDeviceId, token);
@@ -559,6 +814,8 @@ export class SpotifyPlayerClient {
                 try {
                     const refreshed = await this.spotify.getMyDevices();
                     const rawList = Array.isArray(refreshed?.devices) ? refreshed.devices : [];
+                    this.rememberDevices(rawList);
+                    this.options.onDevicesResolved?.(rawList);
                     const filteredList = canRetryDifferentUnrestrictedDevice
                         ? rawList.filter(d => d.id !== targetDeviceId && !d.is_restricted)
                         : rawList;
@@ -579,15 +836,36 @@ export class SpotifyPlayerClient {
                 : (freshChosen?.id || targetDeviceId);
 
             if (retryDeviceId) {
+                const retryKnownDevice = freshChosen ?? this.getKnownDevice(retryDeviceId);
+                const retryIsMobile = retryKnownDevice
+                    ? isMobileSpotifyDevice(retryKnownDevice)
+                    : retryDeviceId === deviceId
+                        ? isMobileTarget
+                        : this.isMobileRuntime();
                 const latestToken = this.spotify.getAccessToken() || token;
-                await this.transferPlaybackQuietly(retryDeviceId, latestToken);
-                await this.delay(this.options.retryDelayMs ?? 450);
+                const retryTransferred = retryIsMobile
+                    ? false
+                    : await this.transferPlaybackQuietly(retryDeviceId, latestToken);
+                await this.delay(this.options.retryDelayMs ?? (retryIsMobile ? 400 : 500));
+                if (options?.shouldAbort?.()) {
+                    return {
+                        confirmedPlaying: false,
+                        targetTrackLoaded: false,
+                        targetDeviceId: retryDeviceId,
+                        isMobileTarget: retryIsMobile,
+                        aborted: true,
+                    };
+                }
                 res = await executePlay(retryDeviceId, latestToken);
                 if (res.ok || res.status === 204) {
                     targetDeviceId = retryDeviceId;
+                    isMobileTarget = retryIsMobile;
+                    didPreTransferToTarget = retryTransferred;
                     this.activeDeviceId = retryDeviceId;
                     if (freshChosen) {
-                        this.lastResolvedDevice = { ...freshChosen, is_active: true };
+                        const updatedChosen = { ...freshChosen, is_active: true };
+                        this.lastResolvedDevice = updatedChosen;
+                        this.knownDevices.set(retryDeviceId, updatedChosen);
                     }
                 }
             }
@@ -602,10 +880,381 @@ export class SpotifyPlayerClient {
             throw new Error(`Spotify Play Failed: ${res.statusText} (${errInfo.message})`);
         }
 
-        if (this.lastResolvedDevice?.id === targetDeviceId) {
-            this.lastResolvedDevice = { ...this.lastResolvedDevice, is_active: true };
+        const resolvedAfterPlay = this.getKnownDevice(targetDeviceId);
+        if (resolvedAfterPlay) {
+            const updatedTarget = { ...resolvedAfterPlay, is_active: true };
+            this.lastResolvedDevice = updatedTarget;
+            this.knownDevices.set(targetDeviceId, updatedTarget);
         }
-        console.log('▶️ Playback started successfully (Fetch)');
+
+        let confirmedPlaying = true;
+        let targetTrackLoaded = uris.length > 0;
+
+        // Spotify mobile clients may reset their internal queue parser when `{ uris }` is injected
+        // (leaving Track 1 loaded in `is_playing: false`), OR Android 14+ Cached App Freezer / BFGS
+        // restrictions may cause Spotify Cloud to return HTTP 204 while the phone stays frozen/stopped.
+        // Verify post-play state (across `progress_ms === 0` cloud mirages and relinked tracks), send an
+        // empty-body resume kick if paused, and report accurate `confirmedPlaying` so callers never fake playback.
+        if (
+            uris.length > 0 &&
+            typeof this.spotify.getMyCurrentPlaybackState === 'function' &&
+            !options?.shouldAbort?.()
+        ) {
+            try {
+                const fastFailMobileGesture = Boolean(isMobileTarget && options?.fastFailForUserGesture);
+                const verifyDelayMs =
+                    this.options.postPlayVerifyDelayMs ??
+                    (fastFailMobileGesture ? 450 : isMobileTarget ? 550 : 700);
+                const stepRetryDelayMs =
+                    this.options.retryDelayMs ??
+                    (fastFailMobileGesture ? 350 : isMobileTarget ? 400 : 500);
+                const fetchPlaybackState = async () => {
+                    try {
+                        return await this.spotify.getMyCurrentPlaybackState({ market: 'from_token' });
+                    } catch (err) {
+                        await this.delay(stepRetryDelayMs);
+                        if (options?.shouldAbort?.()) {
+                            throw err;
+                        }
+                        return await this.spotify.getMyCurrentPlaybackState({ market: 'from_token' });
+                    }
+                };
+                const isTargetLoaded = (st: SpotifyApi.CurrentPlaybackResponse | null | undefined) =>
+                    isTargetTrackLoadedOnState(st, uris, targetDeviceId, options?.expectedTrackKeys);
+                const kickResume = async (stateDeviceId?: string | null) => {
+                    const latestToken = this.spotify.getAccessToken() || token;
+                    const resumeDeviceId = stateDeviceId || targetDeviceId;
+                    const kickRes = await executeEmptyResume(resumeDeviceId, latestToken);
+                    if (kickRes.ok || kickRes.status === 204) {
+                        options?.onResumeKickSent?.();
+                    }
+                };
+                const confirmAfterResumeKick = async (
+                    priorState: SpotifyApi.CurrentPlaybackResponse | null | undefined
+                ): Promise<SpotifyApi.CurrentPlaybackResponse | null | undefined> => {
+                    await this.delay(stepRetryDelayMs);
+                    if (options?.shouldAbort?.()) {
+                        return priorState;
+                    }
+                    let afterKickState = await fetchPlaybackState();
+                    if (options?.shouldAbort?.()) {
+                        return afterKickState;
+                    }
+                    if (
+                        afterKickState?.is_playing &&
+                        typeof afterKickState.progress_ms === 'number' &&
+                        afterKickState.progress_ms === 0
+                    ) {
+                        await this.delay(stepRetryDelayMs);
+                        if (!options?.shouldAbort?.()) {
+                            afterKickState = await fetchPlaybackState();
+                        }
+                    }
+                    return afterKickState ?? priorState;
+                };
+                const verifyLoadedState = async (
+                    loadedState: SpotifyApi.CurrentPlaybackResponse | null | undefined,
+                    mirageWaitMs: number,
+                    pausedLog: string,
+                    mirageLog: string
+                ): Promise<{
+                    droppedAfterMirage: boolean;
+                    latestState: SpotifyApi.CurrentPlaybackResponse | null | undefined;
+                }> => {
+                    if (!loadedState?.is_playing) {
+                        console.log(pausedLog);
+                        await kickResume(loadedState?.device?.id);
+                        const postKickState = await confirmAfterResumeKick(loadedState);
+                        return { droppedAfterMirage: false, latestState: postKickState };
+                    }
+                    if (typeof loadedState.progress_ms === 'number' && loadedState.progress_ms === 0) {
+                        // Cloud cache briefly reports `is_playing: true, progress_ms: 0` before a mobile client
+                        // finishes parsing `{ uris }` or rejecting a background start under BFGS.
+                        await this.delay(mirageWaitMs);
+                        if (options?.shouldAbort?.()) {
+                            return { droppedAfterMirage: false, latestState: loadedState };
+                        }
+                        const afterMirageState = await fetchPlaybackState();
+                        if (options?.shouldAbort?.()) {
+                            return { droppedAfterMirage: false, latestState: afterMirageState };
+                        }
+                        if (isTargetLoaded(afterMirageState)) {
+                            if (!afterMirageState?.is_playing) {
+                                console.log(mirageLog);
+                                await kickResume(afterMirageState?.device?.id);
+                                const postKickState = await confirmAfterResumeKick(afterMirageState);
+                                return { droppedAfterMirage: false, latestState: postKickState };
+                            }
+                            return { droppedAfterMirage: false, latestState: afterMirageState };
+                        }
+                        return { droppedAfterMirage: true, latestState: afterMirageState };
+                    }
+                    return { droppedAfterMirage: false, latestState: loadedState };
+                };
+
+                let hadTargetActiveOnDevice = false;
+                const retryDroppedUris = async (
+                    lastState: SpotifyApi.CurrentPlaybackResponse | null | undefined
+                ): Promise<SpotifyApi.CurrentPlaybackResponse | null | undefined> => {
+                    const latestToken = this.spotify.getAccessToken() || token;
+                    const heldByOtherDevice = Boolean(
+                        lastState?.device?.id && lastState.device.id !== targetDeviceId
+                    );
+
+                    if (isMobileTarget) {
+                        // On mobile targets, NEVER send `play: false` (`transferPlaybackQuietly`).
+                        // Reclaim Connect via `play: true` ONLY when a different device holds the session.
+                        if (heldByOtherDevice) {
+                            await this.transferPlaybackWithPlay(targetDeviceId, { silent: true });
+                            await this.delay(this.options.transferSettleDelayMs ?? stepRetryDelayMs);
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
+                            }
+                        }
+                    } else {
+                        const alreadyTransferredOrActiveOnTarget =
+                            didPreTransferToTarget || hadTargetActiveOnDevice;
+                        const shouldQuietTransferBeforeRetry = alreadyTransferredOrActiveOnTarget
+                            ? heldByOtherDevice
+                            : (!lastState?.device?.is_active || lastState.device.id !== targetDeviceId);
+
+                        if (shouldQuietTransferBeforeRetry) {
+                            const retryTransferred = await this.transferPlaybackQuietly(targetDeviceId, latestToken);
+                            if (retryTransferred) {
+                                didPreTransferToTarget = true;
+                            }
+                            await this.delay(
+                                this.options.transferSettleDelayMs ?? this.options.retryDelayMs ?? 650
+                            );
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
+                            }
+                        }
+                    }
+
+                    const retryPlayRes = await executePlay(targetDeviceId, latestToken);
+                    if ((retryPlayRes.ok || retryPlayRes.status === 204) && !options?.shouldAbort?.()) {
+                        await this.delay(verifyDelayMs);
+                        if (options?.shouldAbort?.()) {
+                            return lastState;
+                        }
+                        let thirdState = await fetchPlaybackState();
+                        if (options?.shouldAbort?.()) {
+                            return thirdState;
+                        }
+                        if (
+                            !isTargetLoaded(thirdState) &&
+                            !thirdState?.is_playing &&
+                            (!thirdState?.device?.id || thirdState.device.id === targetDeviceId)
+                        ) {
+                            await this.delay(stepRetryDelayMs);
+                            if (options?.shouldAbort?.()) {
+                                return thirdState;
+                            }
+                            thirdState = await fetchPlaybackState();
+                            if (options?.shouldAbort?.()) {
+                                return thirdState;
+                            }
+                        }
+                        if (isTargetLoaded(thirdState)) {
+                            const checked = await verifyLoadedState(
+                                thirdState,
+                                stepRetryDelayMs,
+                                '⚡ Wake-up retry loaded track in paused state; sending empty-body resume kick',
+                                '⚡ Wake-up retry settled paused after 0ms mirage; sending empty-body resume kick'
+                            );
+                            return checked.latestState;
+                        }
+                        return thirdState;
+                    }
+                    return lastState;
+                };
+
+                let finalState: SpotifyApi.CurrentPlaybackResponse | null | undefined;
+                await this.delay(verifyDelayMs);
+                if (options?.shouldAbort?.()) {
+                    return {
+                        confirmedPlaying: false,
+                        targetTrackLoaded: false,
+                        targetDeviceId,
+                        isMobileTarget,
+                        aborted: true,
+                    };
+                }
+                const postState = await fetchPlaybackState();
+                if (options?.shouldAbort?.()) {
+                    return {
+                        confirmedPlaying: false,
+                        targetTrackLoaded: false,
+                        targetDeviceId,
+                        isMobileTarget,
+                        aborted: true,
+                    };
+                }
+                if (postState?.device?.is_active && postState.device.id === targetDeviceId) {
+                    hadTargetActiveOnDevice = true;
+                }
+
+                if (isTargetLoaded(postState)) {
+                    const checked = await verifyLoadedState(
+                        postState,
+                        this.options.retryDelayMs ?? (isMobileTarget ? 450 : 600),
+                        '⚡ Track loaded in paused state after { uris }; sending empty-body resume kick',
+                        '⚡ Track settled paused after initial 0ms cloud mirage; sending empty-body resume kick'
+                    );
+                    finalState = checked.latestState;
+                    if (checked.droppedAfterMirage && !options?.shouldAbort?.()) {
+                        finalState = await retryDroppedUris(checked.latestState);
+                    }
+                } else {
+                    await this.delay(stepRetryDelayMs);
+                    if (options?.shouldAbort?.()) {
+                        return {
+                            confirmedPlaying: false,
+                            targetTrackLoaded: false,
+                            targetDeviceId,
+                            isMobileTarget,
+                            aborted: true,
+                        };
+                    }
+                    let secondState = await fetchPlaybackState();
+                    if (options?.shouldAbort?.()) {
+                        return {
+                            confirmedPlaying: false,
+                            targetTrackLoaded: false,
+                            targetDeviceId,
+                            isMobileTarget,
+                            aborted: true,
+                        };
+                    }
+                    if (secondState?.device?.is_active && secondState.device.id === targetDeviceId) {
+                        hadTargetActiveOnDevice = true;
+                    }
+
+                    // When an initially-inactive device is waking up to process `{ uris }`, its Connect
+                    // state can take ~1.5s to surface Track 1 in `/me/player` (`null` or idle device state
+                    // on the first two checks). Allow one additional settle check before declaring `{ uris }` dropped,
+                    // unless caller holds a live browser user gesture (5.0s Chromium/WebKit window) that needs
+                    // fast dead-device detection to auto-launch `spotify:` on the same tap.
+                    const isStillWakingOnTarget =
+                        !fastFailMobileGesture &&
+                        (didPreTransferToTarget || (isMobileTarget && wasInitiallyInactive)) &&
+                        !secondState?.is_playing &&
+                        (!secondState?.device?.id || secondState.device.id === targetDeviceId);
+                    if (!isTargetLoaded(secondState) && isStillWakingOnTarget) {
+                        await this.delay(this.options.retryDelayMs ?? (isMobileTarget ? 450 : 600));
+                        if (options?.shouldAbort?.()) {
+                            return {
+                                confirmedPlaying: false,
+                                targetTrackLoaded: false,
+                                targetDeviceId,
+                                isMobileTarget,
+                                aborted: true,
+                            };
+                        }
+                        secondState = await fetchPlaybackState();
+                        if (options?.shouldAbort?.()) {
+                            return {
+                                confirmedPlaying: false,
+                                targetTrackLoaded: false,
+                                targetDeviceId,
+                                isMobileTarget,
+                                aborted: true,
+                            };
+                        }
+                        if (secondState?.device?.is_active && secondState.device.id === targetDeviceId) {
+                            hadTargetActiveOnDevice = true;
+                        }
+                    }
+
+                    if (isTargetLoaded(secondState)) {
+                        const checked = await verifyLoadedState(
+                            secondState,
+                            stepRetryDelayMs,
+                            '⚡ Delayed track load landed paused; sending empty-body resume kick',
+                            '⚡ Delayed track load settled paused after 0ms mirage; sending empty-body resume kick'
+                        );
+                        finalState = checked.latestState;
+                        if (checked.droppedAfterMirage && !options?.shouldAbort?.()) {
+                            finalState = await retryDroppedUris(checked.latestState);
+                        }
+                    } else {
+                        const heldByOtherDeviceOnSecondCheck = Boolean(
+                            secondState?.device?.id && secondState.device.id !== targetDeviceId
+                        );
+                        if (fastFailMobileGesture && !heldByOtherDeviceOnSecondCheck && !secondState?.is_playing) {
+                            // Phone ignored `PUT /me/player/play { uris }` completely (frozen / BFGS-blocked)
+                            // while no other device holds Connect: return immediately (< 2.0s) so the caller's
+                            // active browser user gesture can synchronously launch `spotify:` on the first tap.
+                            finalState = secondState;
+                        } else {
+                            finalState = await retryDroppedUris(secondState);
+                        }
+                    }
+                }
+
+                if (options?.shouldAbort?.()) {
+                    return {
+                        confirmedPlaying: false,
+                        targetTrackLoaded: false,
+                        targetDeviceId,
+                        isMobileTarget,
+                        aborted: true,
+                    };
+                }
+
+                targetTrackLoaded = isTargetLoaded(finalState);
+                const isPersistentMobileZeroMirage = Boolean(
+                    isMobileTarget &&
+                    finalState?.is_playing &&
+                    typeof finalState.progress_ms === 'number' &&
+                    finalState.progress_ms === 0
+                );
+                confirmedPlaying = Boolean(
+                    targetTrackLoaded &&
+                    finalState?.is_playing &&
+                    !isPersistentMobileZeroMirage
+                );
+            } catch (verifyErr) {
+                if (options?.shouldAbort?.()) {
+                    return {
+                        confirmedPlaying: false,
+                        targetTrackLoaded: false,
+                        targetDeviceId,
+                        isMobileTarget,
+                        aborted: true,
+                    };
+                }
+                console.warn('Post-play playback verification warning (non-fatal):', verifyErr);
+                if (isMobileTarget) {
+                    confirmedPlaying = false;
+                    targetTrackLoaded = false;
+                }
+            }
+        } else if (options?.shouldAbort?.()) {
+            return {
+                confirmedPlaying: false,
+                targetTrackLoaded: false,
+                targetDeviceId,
+                isMobileTarget,
+                aborted: true,
+            };
+        }
+
+        if (confirmedPlaying) {
+            console.log('▶️ Playback started successfully (Fetch)');
+        } else {
+            console.warn(
+                `⚠️ Playback command accepted (204), but device ${targetDeviceId} remained paused/asleep (targetTrackLoaded=${targetTrackLoaded}, isMobileTarget=${isMobileTarget})`
+            );
+        }
+
+        return {
+            confirmedPlaying,
+            targetTrackLoaded,
+            targetDeviceId,
+            isMobileTarget,
+        };
     }
 
     /**
@@ -654,7 +1303,12 @@ export class SpotifyPlayerClient {
         }
     }
 
-    async safeControlRequest(endpoint: string, method: 'POST' | 'PUT', body?: unknown): Promise<SpotifyControlResult> {
+    async safeControlRequest(
+        endpoint: string,
+        method: 'POST' | 'PUT',
+        body?: unknown,
+        options?: { silent?: boolean }
+    ): Promise<SpotifyControlResult> {
         const token = this.spotify.getAccessToken();
         if (!token) return { ok: false };
         const operationName = endpoint.split('?')[0] || endpoint;
@@ -669,7 +1323,9 @@ export class SpotifyPlayerClient {
                 const retryAfter = res.headers?.get?.('Retry-After');
                 const errInfo = classifySpotifyError(res.status, operationName, retryAfter, res.statusText);
                 console.warn(`Control request ${endpoint} failed: ${res.status} - ${errInfo.message}`);
-                this.notifyError(errInfo);
+                if (!options?.silent) {
+                    this.notifyError(errInfo);
+                }
                 return { ok: false, status: res.status, error: errInfo };
             }
             return { ok: true, status: res.status };
@@ -677,7 +1333,46 @@ export class SpotifyPlayerClient {
             const detail = e instanceof Error ? e.message : String(e);
             const errInfo = classifySpotifyError(undefined, operationName, null, detail);
             console.error(`Control request ${endpoint} error:`, e);
-            this.notifyError(errInfo);
+            if (!options?.silent) {
+                this.notifyError(errInfo);
+            }
+            return { ok: false, error: errInfo };
+        }
+    }
+
+    private async transferPlaybackWithPlay(
+        deviceId: string,
+        options?: { silent?: boolean }
+    ): Promise<SpotifyControlResult> {
+        const token = this.spotify.getAccessToken();
+        if (!token) return { ok: false };
+
+        try {
+            const res = await fetch('https://api.spotify.com/v1/me/player', {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ device_ids: [deviceId], play: true }),
+            });
+            if (!res.ok && res.status !== 204) {
+                const retryAfter = res.headers?.get?.('Retry-After');
+                const errInfo = classifySpotifyError(res.status, 'transfer_play', retryAfter, res.statusText);
+                console.warn(`Active play transfer to ${deviceId} failed: ${res.status} - ${errInfo.message}`);
+                if (!options?.silent) {
+                    this.notifyError(errInfo);
+                }
+                return { ok: false, status: res.status, error: errInfo };
+            }
+            return { ok: true, status: res.status };
+        } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            const errInfo = classifySpotifyError(undefined, 'transfer_play', null, detail);
+            console.error(`Active play transfer to ${deviceId} error:`, e);
+            if (!options?.silent) {
+                this.notifyError(errInfo);
+            }
             return { ok: false, error: errInfo };
         }
     }
@@ -689,9 +1384,15 @@ export class SpotifyPlayerClient {
     async next() { return this.safeControlRequest('next', 'POST'); }
     async previous() { return this.safeControlRequest('previous', 'POST'); }
     async pause() { return this.safeControlRequest('pause', 'PUT'); }
-    async resume(deviceId?: string) {
+    async resume(deviceId?: string, options?: { silent?: boolean; forcePlayTransfer?: boolean }) {
+        if (options?.forcePlayTransfer && deviceId) {
+            const transferRes = await this.transferPlaybackWithPlay(deviceId, options);
+            if (transferRes.ok) {
+                return transferRes;
+            }
+        }
         const endpoint = deviceId ? `play?device_id=${encodeURIComponent(deviceId)}` : 'play';
-        return this.safeControlRequest(endpoint, 'PUT');
+        return this.safeControlRequest(endpoint, 'PUT', undefined, options);
     }
 }
 

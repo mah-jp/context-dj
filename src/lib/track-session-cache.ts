@@ -20,6 +20,16 @@ export class TrackSessionCache {
     private hasInitiatedSessionInRuntime = false;
     private hasNormalizedSessionModes = false;
     private isExternalContextActive = false;
+    private batchOriginSessionIndex = 0;
+    private maxConfirmedSessionIndex = 0;
+    private lastConfirmedPlayingAtMs = 0;
+    private lastConfirmedProgressMs = 0;
+    private batchExhausted = false;
+    private refillCarryoverUris = new Map<string, number>();
+    private refillCarryoverKeys = new Map<string, number>();
+
+    private static readonly REFILL_CARRYOVER_TTL_MS = 4 * 3600_000;
+    private static readonly MAX_REFILL_CARRYOVER_ENTRIES = 200;
 
     constructor() {
         // Restore track metadata cache from localStorage
@@ -66,15 +76,21 @@ export class TrackSessionCache {
 
     setSessionTracks(tracks: Track[], persist: boolean = true, startIndex: number = 0) {
         this.currentSessionTracks = tracks;
-        this.sessionStartIndex = tracks.length > 0
+        const normalizedStart = tracks.length > 0
             ? Math.max(0, Math.min(startIndex, tracks.length - 1))
             : 0;
+        this.sessionStartIndex = normalizedStart;
+        this.batchOriginSessionIndex = normalizedStart;
         if (tracks.length === 0) {
             this.hasInitiatedSessionInRuntime = false;
         }
         this.hasConfirmedSessionPlayback = false;
         this.hasNormalizedSessionModes = false;
         this.isExternalContextActive = false;
+        this.maxConfirmedSessionIndex = 0;
+        this.lastConfirmedPlayingAtMs = 0;
+        this.lastConfirmedProgressMs = 0;
+        this.batchExhausted = false;
         this.sessionVersion++;
         if (persist) {
             setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, tracks);
@@ -84,8 +100,13 @@ export class TrackSessionCache {
     clearSessionTracks(persist: boolean = true) {
         this.currentSessionTracks = [];
         this.sessionStartIndex = 0;
+        this.batchOriginSessionIndex = 0;
         this.hasInitiatedSessionInRuntime = false;
         this.hasNormalizedSessionModes = false;
+        this.maxConfirmedSessionIndex = 0;
+        this.lastConfirmedPlayingAtMs = 0;
+        this.lastConfirmedProgressMs = 0;
+        this.batchExhausted = false;
         this.sessionVersion++;
         if (persist) {
             removeStorageItem(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS);
@@ -94,6 +115,7 @@ export class TrackSessionCache {
 
     appendSessionTracks(tracks: Track[]) {
         this.currentSessionTracks.push(...tracks);
+        this.batchExhausted = false;
         this.sessionVersion++;
         setStoredJSON(STORAGE_KEYS.DJ_CURRENT_SESSION_TRACKS, this.currentSessionTracks);
     }
@@ -104,12 +126,18 @@ export class TrackSessionCache {
 
     activateDJSession(tracks: Track[], persist: boolean = true, startIndex: number = 0) {
         this.setSessionTracks(tracks, persist, startIndex);
+        const normalizedStart = this.sessionStartIndex;
         this.lastPlayTime = Date.now();
-        this.setLastPlayingTrack(tracks[startIndex] ?? null, persist);
+        this.setLastPlayingTrack(tracks[normalizedStart] ?? null, persist);
         this.hasConfirmedSessionPlayback = false;
         this.hasNormalizedSessionModes = false;
         this.hasInitiatedSessionInRuntime = tracks.length > 0;
         this.isExternalContextActive = false;
+        this.batchOriginSessionIndex = normalizedStart;
+        this.maxConfirmedSessionIndex = 0;
+        this.lastConfirmedPlayingAtMs = 0;
+        this.lastConfirmedProgressMs = 0;
+        this.batchExhausted = false;
     }
 
     activateExternalContext(clearTracks: boolean = true, persist: boolean = true) {
@@ -117,17 +145,81 @@ export class TrackSessionCache {
         if (clearTracks) {
             this.clearSessionTracks(persist);
         } else {
+            this.batchOriginSessionIndex = 0;
             this.sessionVersion++;
         }
         this.hasConfirmedSessionPlayback = false;
         this.hasNormalizedSessionModes = false;
         this.hasInitiatedSessionInRuntime = false;
+        this.maxConfirmedSessionIndex = 0;
+        this.lastConfirmedPlayingAtMs = 0;
+        this.lastConfirmedProgressMs = 0;
+        this.batchExhausted = false;
         this.lastPlayTime = 0;
     }
 
     confirmSessionPlayback() {
         this.hasConfirmedSessionPlayback = true;
         this.isExternalContextActive = false;
+        this.batchExhausted = false;
+    }
+
+    recordConfirmedPlaybackProgress(
+        sessionIndex: number,
+        progressMs: number = 0,
+        now: number = Date.now()
+    ) {
+        this.confirmSessionPlayback();
+        this.setSessionStartIndex(sessionIndex);
+        this.maxConfirmedSessionIndex = Math.max(this.maxConfirmedSessionIndex, sessionIndex);
+        this.lastConfirmedPlayingAtMs = now;
+        this.lastConfirmedProgressMs = Math.max(0, progressMs);
+    }
+
+    getBatchOriginSessionIndex(): number {
+        return this.batchOriginSessionIndex;
+    }
+
+    getLastConfirmedProgressMs(): number {
+        return this.lastConfirmedProgressMs;
+    }
+
+    getMaxConfirmedSessionIndex(): number {
+        return this.maxConfirmedSessionIndex;
+    }
+
+    isBatchExhausted(): boolean {
+        return this.batchExhausted;
+    }
+
+    setBatchExhausted(exhausted: boolean) {
+        if (this.batchExhausted !== exhausted) {
+            this.batchExhausted = exhausted;
+            this.sessionVersion++;
+        }
+    }
+
+    hasElapsedExpectedBatchDuration(now: number = Date.now()): boolean {
+        const total = this.currentSessionTracks.length;
+        if (total === 0 || this.lastConfirmedPlayingAtMs <= 0) {
+            return false;
+        }
+        const elapsedMs = now - this.lastConfirmedPlayingAtMs;
+        if (elapsedMs <= 0) {
+            return false;
+        }
+        if (total === 1) {
+            const singleDur = this.currentSessionTracks[0]?.duration_ms || 210_000;
+            const remainingSingle = Math.max(0, singleDur - this.lastConfirmedProgressMs);
+            return elapsedMs >= Math.max(15_000, remainingSingle * 0.75);
+        }
+        const startIdx = Math.max(0, Math.min(this.maxConfirmedSessionIndex, total - 1));
+        let remainingMs = 0;
+        for (let i = startIdx; i < total; i++) {
+            remainingMs += this.currentSessionTracks[i]?.duration_ms || 210_000;
+        }
+        remainingMs = Math.max(0, remainingMs - this.lastConfirmedProgressMs);
+        return elapsedMs >= Math.max(30_000, remainingMs * 0.78);
     }
 
     getLastPlayTime(): number {
@@ -221,6 +313,55 @@ export class TrackSessionCache {
             this.sessionPlayedUris.has(track.uri) ||
             (Boolean(linkedUri) && this.sessionPlayedUris.has(linkedUri!)) ||
             (Boolean(key) && this.sessionPlayedKeys.has(key))
+        );
+    }
+
+    recordRefillQueuedTrack(track: Track, now: number = Date.now()) {
+        this.cacheTrackMetadata([track]);
+        const setBounded = (map: Map<string, number>, k: string) => {
+            if (!k) return;
+            map.delete(k);
+            map.set(k, now);
+            while (map.size > TrackSessionCache.MAX_REFILL_CARRYOVER_ENTRIES) {
+                const oldestKey = map.keys().next().value;
+                if (oldestKey === undefined) break;
+                map.delete(oldestKey);
+            }
+        };
+        if (track.uri) {
+            setBounded(this.refillCarryoverUris, track.uri);
+        }
+        const linkedUri = (track as { linked_from?: { uri?: string } }).linked_from?.uri;
+        if (linkedUri) {
+            setBounded(this.refillCarryoverUris, linkedUri);
+        }
+        const key = generateTrackKey(track);
+        if (key && key !== '|') {
+            setBounded(this.refillCarryoverKeys, key);
+        }
+    }
+
+    isKnownRefillCarryoverTrack(
+        track: Track | SpotifyApi.TrackObjectFull | null | undefined,
+        now: number = Date.now()
+    ): boolean {
+        if (!track) return false;
+        const isFresh = (map: Map<string, number>, k: string | undefined): boolean => {
+            if (!k) return false;
+            const ts = map.get(k);
+            if (ts === undefined) return false;
+            if (now - ts > TrackSessionCache.REFILL_CARRYOVER_TTL_MS) {
+                map.delete(k);
+                return false;
+            }
+            return true;
+        };
+        const linkedUri = (track as { linked_from?: { uri?: string } }).linked_from?.uri;
+        const key = generateTrackKey(track);
+        return (
+            isFresh(this.refillCarryoverUris, track.uri) ||
+            isFresh(this.refillCarryoverUris, linkedUri) ||
+            (Boolean(key && key !== '|') && isFresh(this.refillCarryoverKeys, key))
         );
     }
 
