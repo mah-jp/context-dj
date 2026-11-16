@@ -5349,6 +5349,251 @@ describe('DJCore', () => {
             assert.strictEqual(bareResumeCalls, 1);
             assert.strictEqual(startedUrisHistory.length, 0);
         });
+
+        it('never raises mobileWakeRequired ("Spotifyがスリープ中です") when mobile Spotify is already actively playing another track, switches cleanly via next/offset, and clears stale wake state on live audio progress', async () => {
+            const origNavDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+            const origFetch = globalThis.fetch;
+
+            try {
+                Object.defineProperty(globalThis, 'navigator', {
+                    value: {
+                        userAgent:
+                            'Mozilla/5.0 (Linux; Android 17; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36',
+                    },
+                    configurable: true,
+                    writable: true,
+                });
+
+                const priorPlayingTrack = makeTrack({
+                    id: 'ref_rain',
+                    uri: 'spotify:track:ref_rain',
+                    name: 'Ref:rain',
+                    artistName: 'Aimer',
+                    duration_ms: 290_000,
+                });
+                const curatedTracks = [
+                    makeTrack({ id: 'nujabes_1', uri: 'spotify:track:nujabes_1', name: 'reflection eternal', artistName: 'Nujabes' }),
+                    makeTrack({ id: 'lofi_2', uri: 'spotify:track:lofi_2', name: 'black coffee', artistName: 'Elijah Who' }),
+                ];
+                const pixelDevice: SpotifyApi.UserDevice = {
+                    id: 'pixel_10_pro_xl',
+                    name: 'Pixel 10 Pro XL',
+                    type: 'Smartphone',
+                    is_active: true,
+                    is_private_session: false,
+                    is_restricted: false,
+                    volume_percent: 100,
+                };
+
+                // Part 1: Full DJCore + SpotifyPlayerClient end-to-end when Pixel 10 Pro XL is playing `Ref:rain`
+                // and queues `[reflection eternal, black coffee]` behind `Ref:rain` on `PUT /me/player/play { uris }`.
+                let hasSkippedStaleHead = false;
+                let blockAllSwitches = false;
+                globalThis.fetch = (async (input: RequestInfo | URL) => {
+                    const url = String(input);
+                    if (!blockAllSwitches && url.includes('/player/next')) {
+                        hasSkippedStaleHead = true;
+                    }
+                    return {
+                        ok: true,
+                        status: 204,
+                        statusText: 'No Content',
+                        headers: { get: () => null },
+                        text: async () => '',
+                    } as unknown as Response;
+                }) as typeof fetch;
+
+                const dj = new DJCore('token_active_mobile_switch');
+                const playedMetaHistory: ({ confirmedPlaying: boolean; mobileWakeRequired: boolean } | undefined)[] = [];
+                dj.setOnTracksPlayedCallback((_tracks, meta) => {
+                    playedMetaHistory.push(meta);
+                });
+
+                const internal = dj as unknown as {
+                    spotify: {
+                        getMyDevices: () => Promise<{ devices: SpotifyApi.UserDevice[] }>;
+                        getMyCurrentPlaybackState: () => Promise<SpotifyApi.CurrentPlaybackResponse | null>;
+                        getGeneric: (url: string) => Promise<unknown>;
+                    };
+                    playerClient: {
+                        options: {
+                            postPlayVerifyDelayMs?: number;
+                            retryDelayMs?: number;
+                            transferSettleDelayMs?: number;
+                            devicePollDelayMs?: number;
+                        };
+                    };
+                    searchTracks: () => Promise<Track[]>;
+                };
+                internal.playerClient.options = {
+                    ...internal.playerClient.options,
+                    postPlayVerifyDelayMs: 0,
+                    retryDelayMs: 0,
+                    transferSettleDelayMs: 0,
+                    devicePollDelayMs: 0,
+                };
+                internal.spotify.getMyDevices = async () => ({ devices: [pixelDevice] });
+                internal.spotify.getGeneric = async () =>
+                    blockAllSwitches
+                        ? { currently_playing: priorPlayingTrack, queue: [] }
+                        : { currently_playing: priorPlayingTrack, queue: curatedTracks };
+                internal.spotify.getMyCurrentPlaybackState = async () =>
+                    hasSkippedStaleHead && !blockAllSwitches
+                        ? ({
+                              is_playing: true,
+                              progress_ms: 520,
+                              shuffle_state: false,
+                              repeat_state: 'off',
+                              context: null,
+                              device: pixelDevice,
+                              item: curatedTracks[0],
+                          } as unknown as SpotifyApi.CurrentPlaybackResponse)
+                        : ({
+                              is_playing: true,
+                              progress_ms: 170,
+                              shuffle_state: false,
+                              repeat_state: 'off',
+                              context: blockAllSwitches ? ({ type: 'playlist', uri: 'spotify:playlist:locked' } as SpotifyApi.ContextObject) : null,
+                              device: pixelDevice,
+                              item: priorPlayingTrack,
+                          } as unknown as SpotifyApi.CurrentPlaybackResponse);
+                internal.searchTracks = async () => curatedTracks;
+
+                dj.setSchedule([{ start: '00:00', end: '23:59', query: 'lo-fi study', queries: ['lo-fi study'] }]);
+                await dj.processDJLoop(false, true);
+
+                assert.strictEqual(hasSkippedStaleHead, true);
+                assert.strictEqual(dj.isMobileWakeRequired(), false);
+                assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+                assert.deepStrictEqual(playedMetaHistory[0], {
+                    confirmedPlaying: true,
+                    mobileWakeRequired: false,
+                });
+
+                // Part 2: Even if Spotify refuses every switch attempt while actively playing another track
+                // (`deviceActivelyPlaying: true`), `DJCore` MUST NOT set `mobileWakeRequired = true` or claim Spotify is asleep!
+                blockAllSwitches = true;
+                hasSkippedStaleHead = false;
+                playedMetaHistory.length = 0;
+                await dj.playTracks(curatedTracks, { isDJSession: true });
+
+                assert.strictEqual(dj.isMobileWakeRequired(), false);
+                assert.match(dj.getStateSnapshot().status, /^⚠️/);
+                assert.doesNotMatch(dj.getStateSnapshot().status, /^📱/);
+                assert.deepStrictEqual(playedMetaHistory[0], {
+                    confirmedPlaying: false,
+                    mobileWakeRequired: false,
+                });
+
+                const failedSwitchResume = await dj.resume();
+                assert.strictEqual(failedSwitchResume.ok, false);
+                assert.strictEqual(Boolean(failedSwitchResume.mobileWakeRequired), false);
+                assert.strictEqual(dj.isMobileWakeRequired(), false);
+
+                // Failed `dj.next()` against a switch-blocked active device must roll back `sessionStartIndex`
+                // and `lastPlayingTrack` cleanly to index 0 (never drifting out of sync with UI!)
+                const failedSwitchNext = await dj.next();
+                assert.strictEqual(failedSwitchNext.ok, false);
+                assert.strictEqual(Boolean(failedSwitchNext.mobileWakeRequired), false);
+                assert.strictEqual(dj.getSessionCache().getSessionStartIndex(), 0);
+                assert.strictEqual(dj.getSessionCache().getLastPlayingTrack()?.uri, 'spotify:track:nujabes_1');
+
+                // Background polling (`processDJLoop(false, false)`) after 65s cooldown MUST NOT hammer `PUT /play`
+                // in an infinite rewind loop while the blocking external track is still actively playing!
+                let backgroundPlayCalls = 0;
+                const origPlayTracks = dj.playTracks.bind(dj);
+                dj.playTracks = (async (...args: Parameters<typeof dj.playTracks>) => {
+                    backgroundPlayCalls++;
+                    return await origPlayTracks(...args);
+                }) as typeof dj.playTracks;
+                (dj as unknown as { lastRefillAttemptTime: number }).lastRefillAttemptTime = Date.now() - 65_000;
+                await dj.processDJLoop(false, false);
+                assert.strictEqual(backgroundPlayCalls, 0);
+                dj.playTracks = origPlayTracks;
+
+                // Part 3: If `mobileWakeRequired` WAS previously armed while Spotify was genuinely asleep,
+                // and the user then started playing any song in Spotify on the phone (`progress_ms > 0`),
+                // `getPlaybackState()` immediately clears `mobileWakeRequired` and returns real `is_playing: true`!
+                (dj as unknown as { setMobileWakeRequiredState: (v: boolean) => void }).setMobileWakeRequiredState(true);
+                (dj as unknown as { updateStatus: (s: string) => void }).updateStatus(
+                    '📱 Tap "Wake Spotify & Play" to resume backgrounded Spotify (Spotifyを起動して再生を開始してください)'
+                );
+                assert.strictEqual(dj.isMobileWakeRequired(), true);
+
+                const liveExternalPoll = await dj.getPlaybackState();
+                assert.strictEqual(dj.isMobileWakeRequired(), false);
+                assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+                assert.strictEqual(liveExternalPoll?.is_playing, true);
+
+                // Part 4: When Session 1 Auto-Refill queued carryover tracks (`refill_carry_1`, `refill_carry_2`)
+                // in Spotify's User Queue ahead of Session 2 (`[jazz_0, jazz_1]`), Android FGS switch skips past
+                // the active track + carryover refill tracks (`3` skips) directly onto `jazz_0`, and clears `⚠️` status!
+                const refillCarry1 = makeTrack({ id: 'refill_carry_1', uri: 'spotify:track:refill_carry_1', name: 'Carry 1', artistName: 'Artist A' });
+                const refillCarry2 = makeTrack({ id: 'refill_carry_2', uri: 'spotify:track:refill_carry_2', name: 'Carry 2', artistName: 'Artist B' });
+                dj.getSessionCache().recordRefillQueuedTrack(refillCarry1);
+                dj.getSessionCache().recordRefillQueuedTrack(refillCarry2);
+                const jazzTracks = [
+                    makeTrack({ id: 'jazz_0', uri: 'spotify:track:jazz_0', name: 'Waltz for Debby', artistName: 'Bill Evans' }),
+                    makeTrack({ id: 'jazz_1', uri: 'spotify:track:jazz_1', name: 'Blue in Green', artistName: 'Miles Davis' }),
+                ];
+                let skipCounter = 0;
+                globalThis.fetch = (async (input: RequestInfo | URL) => {
+                    if (String(input).includes('/player/next')) {
+                        skipCounter++;
+                    }
+                    return {
+                        ok: true,
+                        status: 204,
+                        statusText: 'No Content',
+                        headers: { get: () => null },
+                        text: async () => '',
+                    } as unknown as Response;
+                }) as typeof fetch;
+                internal.spotify.getGeneric = async () => ({
+                    currently_playing: priorPlayingTrack,
+                    queue: [refillCarry1, refillCarry2, ...jazzTracks],
+                });
+                internal.spotify.getMyCurrentPlaybackState = async () =>
+                    skipCounter >= 3
+                        ? ({
+                              is_playing: true,
+                              progress_ms: 640,
+                              shuffle_state: false,
+                              repeat_state: 'off',
+                              context: null,
+                              device: pixelDevice,
+                              item: jazzTracks[0],
+                          } as unknown as SpotifyApi.CurrentPlaybackResponse)
+                        : ({
+                              is_playing: true,
+                              progress_ms: 250,
+                              shuffle_state: false,
+                              repeat_state: 'off',
+                              context: null,
+                              device: pixelDevice,
+                              item: skipCounter === 1 ? refillCarry1 : skipCounter === 2 ? refillCarry2 : priorPlayingTrack,
+                          } as unknown as SpotifyApi.CurrentPlaybackResponse);
+
+                (dj as unknown as { updateStatus: (s: string) => void }).updateStatus('⚠️ Previous switch warning');
+                await dj.playTracks(jazzTracks, { isDJSession: true });
+                assert.strictEqual(skipCounter, 3);
+                assert.strictEqual(dj.isMobileWakeRequired(), false);
+                assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+
+                // Also if `⚠️` status was set before Spotify naturally progressed to `jazz_0`, `getPlaybackState()` clears it to `Ready`
+                (dj as unknown as { updateStatus: (s: string) => void }).updateStatus('⚠️ Stale warning');
+                await dj.getPlaybackState();
+                assert.strictEqual(dj.getStateSnapshot().status, 'Ready');
+                assert.strictEqual(dj.hasConfirmedPlayback(), true);
+            } finally {
+                globalThis.fetch = origFetch;
+                if (origNavDescriptor) {
+                    Object.defineProperty(globalThis, 'navigator', origNavDescriptor);
+                } else {
+                    delete (globalThis as Record<string, unknown>).navigator;
+                }
+            }
+        });
     });
 });
 

@@ -157,6 +157,7 @@ export interface MobileWakeSequenceTarget {
     getDevices: () => Promise<SpotifyApi.UserDevice[]>;
     resume: (options?: { fromMobileWake?: boolean }) => Promise<SpotifyControlResult>;
     getPreferredDeviceId?: () => string | null;
+    isMobileWakeRequired?: () => boolean;
 }
 
 export interface RunMobileSpotifyWakeOptions {
@@ -166,6 +167,7 @@ export interface RunMobileSpotifyWakeOptions {
     pollDelaysMs?: number[];
     delayFn?: (ms: number) => Promise<void>;
     onDevicesPolled?: (devices: SpotifyApi.UserDevice[]) => void;
+    onTerminalStop?: () => void;
 }
 
 /**
@@ -176,9 +178,10 @@ export interface RunMobileSpotifyWakeOptions {
  */
 export function shouldRetainPendingMobileWake(
     started: boolean,
-    visibilityState?: string
+    visibilityState?: string,
+    wakeStillRequired: boolean = true
 ): boolean {
-    return !started && visibilityState === 'hidden';
+    return !started && wakeStillRequired && visibilityState === 'hidden';
 }
 
 /**
@@ -228,6 +231,18 @@ export async function runMobileSpotifyWakeSequence(
             }
             if (res.ok) {
                 return { launched, started: true };
+            }
+            const isNonRetryableError =
+                res.error?.category === 'forbidden' ||
+                res.error?.category === 'rate_limited' ||
+                res.error?.category === 'auth_expired';
+            const wakeNoLongerRequired =
+                !res.mobileWakeRequired &&
+                typeof options.dj.isMobileWakeRequired === 'function' &&
+                !options.dj.isMobileWakeRequired();
+            if (isNonRetryableError || wakeNoLongerRequired) {
+                options.onTerminalStop?.();
+                return { launched, started: false };
             }
         } catch (wakeErr) {
             console.warn('Mobile Spotify wake poll attempt warning:', wakeErr);
@@ -1144,12 +1159,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setError(null);
         setStatus('📱 Waking Spotify... (Spotifyアプリを起動しています...)');
 
+        let stoppedTerminally = false;
         const result = await runMobileSpotifyWakeSequence({
             dj,
             shouldAbort: () => seqId !== wakeSeqIdRef.current || djRef.current !== dj,
             onDevicesPolled: (freshDevices) => {
                 lastDevicesFetchRef.current = Date.now();
                 updateDevicesState(freshDevices);
+            },
+            onTerminalStop: () => {
+                stoppedTerminally = true;
             },
         });
 
@@ -1173,9 +1192,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         } else {
             const currentVisibility =
                 typeof document !== 'undefined' ? document.visibilityState : 'visible';
-            if (!shouldRetainPendingMobileWake(false, currentVisibility)) {
+            const wakeStillNeeded = !stoppedTerminally && dj.isMobileWakeRequired();
+            if (!shouldRetainPendingMobileWake(false, currentVisibility, wakeStillNeeded)) {
                 pendingMobileWakeTimestampRef.current = 0;
             }
+            setMobileWakeRequired(dj.isMobileWakeRequired());
             updateIsPlaying(false);
             setStatus(dj.getStateSnapshot().status);
             if (currentVisibility !== 'hidden') {
@@ -1245,6 +1266,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                         syncUIState
                     );
                 } else {
+                    setMobileWakeRequired(dj.isMobileWakeRequired());
                     updateIsPlaying(false);
                     setStatus(dj.getStateSnapshot().status);
                     void syncUIState({ forceAll: true });

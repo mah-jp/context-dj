@@ -228,6 +228,13 @@ export default function Home() {
           });
         } else if (latestStatus.startsWith('⚠️')) {
           setStatus(latestStatus);
+          setToast({
+            msg: latestStatus.replace(/^⚠️\s*/, ''),
+            type: 'error',
+          });
+        } else if (latestStatus.startsWith('⏳')) {
+          setStatus(latestStatus);
+          setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });
         } else {
           setStatus('Ready');
           setToast({ msg: `Schedule created with ${schedule.length} blocks! (スケジュールを作成しました)`, type: 'success' });

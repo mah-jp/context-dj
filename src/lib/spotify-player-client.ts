@@ -363,6 +363,7 @@ export interface SpotifyPlayerClientOptions {
 export interface StartPlaybackOptions {
     shouldAbort?: () => boolean;
     expectedTrackKeys?: string[];
+    isSkippablePriorTrack?: (track: Track) => boolean;
     onResumeKickSent?: () => void;
     fastFailForUserGesture?: boolean;
 }
@@ -370,6 +371,7 @@ export interface StartPlaybackOptions {
 export interface StartPlaybackResult {
     confirmedPlaying: boolean;
     targetTrackLoaded: boolean;
+    deviceActivelyPlaying?: boolean;
     targetDeviceId: string;
     isMobileTarget: boolean;
     aborted?: boolean;
@@ -756,6 +758,15 @@ export class SpotifyPlayerClient {
         // Only use quiet pre-transfer on inactive non-mobile Connect targets (Desktop / Speaker).
         if (wasInitiallyInactive && !isMobileTarget) {
             const transferred = await this.transferPlaybackQuietly(deviceId, token);
+            if (options?.shouldAbort?.()) {
+                return {
+                    confirmedPlaying: false,
+                    targetTrackLoaded: false,
+                    targetDeviceId: deviceId,
+                    isMobileTarget,
+                    aborted: true,
+                };
+            }
             if (transferred) {
                 didPreTransferToTarget = true;
                 await this.delay(this.options.transferSettleDelayMs ?? 650);
@@ -772,6 +783,9 @@ export class SpotifyPlayerClient {
         }
 
         const playBody = uris.length > 0 ? JSON.stringify({ uris }) : undefined;
+        const playWithOffsetBody = uris.length > 0
+            ? JSON.stringify({ uris, offset: { position: 0 }, position_ms: 0 })
+            : undefined;
         const executePlay = async (targetId: string, bearerToken: string) => {
             const playUrl = `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(targetId)}`;
             return fetch(playUrl, {
@@ -787,6 +801,21 @@ export class SpotifyPlayerClient {
                 ...(playBody ? { body: playBody } : {}),
             });
         };
+        const executePlayWithOffset = async (targetId: string, bearerToken: string) => {
+            const playUrl = `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(targetId)}`;
+            return fetch(playUrl, {
+                method: 'PUT',
+                headers: playWithOffsetBody
+                    ? {
+                        'Authorization': `Bearer ${bearerToken}`,
+                        'Content-Type': 'application/json',
+                    }
+                    : {
+                        'Authorization': `Bearer ${bearerToken}`,
+                    },
+                ...(playWithOffsetBody ? { body: playWithOffsetBody } : {}),
+            });
+        };
         const executeEmptyResume = async (targetId: string, bearerToken: string) => {
             const resumeUrl = targetId
                 ? `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(targetId)}`
@@ -798,9 +827,29 @@ export class SpotifyPlayerClient {
                 },
             });
         };
+        const executeNextOnDevice = async (targetId: string, bearerToken: string) => {
+            const nextUrl = targetId
+                ? `https://api.spotify.com/v1/me/player/next?device_id=${encodeURIComponent(targetId)}`
+                : 'https://api.spotify.com/v1/me/player/next';
+            return fetch(nextUrl, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${bearerToken}`,
+                },
+            });
+        };
 
         let targetDeviceId = deviceId;
         let res = await executePlay(targetDeviceId, token);
+        if (options?.shouldAbort?.()) {
+            return {
+                confirmedPlaying: false,
+                targetTrackLoaded: false,
+                targetDeviceId,
+                isMobileTarget,
+                aborted: true,
+            };
+        }
 
         const isTransientPlayFailure =
             !res.ok &&
@@ -816,6 +865,15 @@ export class SpotifyPlayerClient {
                     const rawList = Array.isArray(refreshed?.devices) ? refreshed.devices : [];
                     this.rememberDevices(rawList);
                     this.options.onDevicesResolved?.(rawList);
+                    if (options?.shouldAbort?.()) {
+                        return {
+                            confirmedPlaying: false,
+                            targetTrackLoaded: false,
+                            targetDeviceId,
+                            isMobileTarget,
+                            aborted: true,
+                        };
+                    }
                     const filteredList = canRetryDifferentUnrestrictedDevice
                         ? rawList.filter(d => d.id !== targetDeviceId && !d.is_restricted)
                         : rawList;
@@ -828,6 +886,15 @@ export class SpotifyPlayerClient {
                     });
                 } catch (e) {
                     console.warn('Device re-discovery before play retry failed:', e);
+                    if (options?.shouldAbort?.()) {
+                        return {
+                            confirmedPlaying: false,
+                            targetTrackLoaded: false,
+                            targetDeviceId,
+                            isMobileTarget,
+                            aborted: true,
+                        };
+                    }
                 }
             }
 
@@ -846,6 +913,15 @@ export class SpotifyPlayerClient {
                 const retryTransferred = retryIsMobile
                     ? false
                     : await this.transferPlaybackQuietly(retryDeviceId, latestToken);
+                if (options?.shouldAbort?.()) {
+                    return {
+                        confirmedPlaying: false,
+                        targetTrackLoaded: false,
+                        targetDeviceId: retryDeviceId,
+                        isMobileTarget: retryIsMobile,
+                        aborted: true,
+                    };
+                }
                 await this.delay(this.options.retryDelayMs ?? (retryIsMobile ? 400 : 500));
                 if (options?.shouldAbort?.()) {
                     return {
@@ -889,12 +965,17 @@ export class SpotifyPlayerClient {
 
         let confirmedPlaying = true;
         let targetTrackLoaded = uris.length > 0;
+        let deviceActivelyPlaying = false;
+        let hadConfirmedActivePlaybackOnTarget = false;
 
         // Spotify mobile clients may reset their internal queue parser when `{ uris }` is injected
         // (leaving Track 1 loaded in `is_playing: false`), OR Android 14+ Cached App Freezer / BFGS
-        // restrictions may cause Spotify Cloud to return HTTP 204 while the phone stays frozen/stopped.
-        // Verify post-play state (across `progress_ms === 0` cloud mirages and relinked tracks), send an
-        // empty-body resume kick if paused, and report accurate `confirmedPlaying` so callers never fake playback.
+        // restrictions may cause Spotify Cloud to return HTTP 204 while the phone stays frozen/stopped,
+        // OR Android `com.spotify.music` actively streaming in background FGS may reset the current track
+        // to 0ms while queuing `uris[0..N]` immediately behind it (`queue[0] === uris[0]` or behind carryover refill items).
+        // Verify post-play state (across `progress_ms === 0` cloud mirages and relinked tracks), advance/retry
+        // if stuck on a prior playing track, send an empty-body resume kick if paused, and report accurate
+        // `confirmedPlaying` + `deviceActivelyPlaying` so callers never fake playback or falsely show "asleep".
         if (
             uris.length > 0 &&
             typeof this.spotify.getMyCurrentPlaybackState === 'function' &&
@@ -908,19 +989,127 @@ export class SpotifyPlayerClient {
                 const stepRetryDelayMs =
                     this.options.retryDelayMs ??
                     (fastFailMobileGesture ? 350 : isMobileTarget ? 400 : 500);
+                let hadTargetActiveOnDevice = false;
+                const isTargetLoaded = (st: SpotifyApi.CurrentPlaybackResponse | null | undefined) => {
+                    const candidateUris = st?.shuffle_state ? uris : uris.slice(0, 1);
+                    const candidateKeys = st?.shuffle_state
+                        ? options?.expectedTrackKeys
+                        : options?.expectedTrackKeys?.slice(0, 1);
+                    return isTargetTrackLoadedOnState(st, candidateUris, targetDeviceId, candidateKeys);
+                };
+                const observeStateOnTarget = (st: SpotifyApi.CurrentPlaybackResponse | null | undefined) => {
+                    if (!st) return;
+                    if (st.device?.is_active && st.device.id === targetDeviceId) {
+                        hadTargetActiveOnDevice = true;
+                    }
+                    const onTargetDevice = !st.device?.id || st.device.id === targetDeviceId;
+                    if (!onTargetDevice || !st.is_playing) {
+                        return;
+                    }
+                    const hasNonZeroProgress =
+                        typeof st.progress_ms !== 'number' || st.progress_ms > 0;
+                    const isPlayingNonRequestedItem = !isTargetTrackLoadedOnState(
+                        st,
+                        uris,
+                        targetDeviceId,
+                        options?.expectedTrackKeys
+                    );
+                    if (hasNonZeroProgress || isPlayingNonRequestedItem) {
+                        hadConfirmedActivePlaybackOnTarget = true;
+                    }
+                };
                 const fetchPlaybackState = async () => {
                     try {
-                        return await this.spotify.getMyCurrentPlaybackState({ market: 'from_token' });
+                        const st = await this.spotify.getMyCurrentPlaybackState({ market: 'from_token' });
+                        observeStateOnTarget(st);
+                        return st;
                     } catch (err) {
                         await this.delay(stepRetryDelayMs);
                         if (options?.shouldAbort?.()) {
                             throw err;
                         }
-                        return await this.spotify.getMyCurrentPlaybackState({ market: 'from_token' });
+                        const retrySt = await this.spotify.getMyCurrentPlaybackState({ market: 'from_token' });
+                        observeStateOnTarget(retrySt);
+                        return retrySt;
                     }
                 };
-                const isTargetLoaded = (st: SpotifyApi.CurrentPlaybackResponse | null | undefined) =>
-                    isTargetTrackLoadedOnState(st, uris, targetDeviceId, options?.expectedTrackKeys);
+                const matchesTargetQueueItem = (
+                    item: SpotifyQueueItem | SpotifyApi.TrackObjectFull | SpotifyApi.EpisodeObjectFull | null | undefined,
+                    shuffleActive?: boolean
+                ): boolean => {
+                    if (!item || item.type !== 'track') {
+                        return false;
+                    }
+                    const trackItem = item as Track;
+                    const candidateUris = shuffleActive ? uris : uris.slice(0, 1);
+                    const candidateKeys = shuffleActive
+                        ? options?.expectedTrackKeys
+                        : options?.expectedTrackKeys?.slice(0, 1);
+                    const uriSet = new Set(candidateUris);
+                    const linkedUri = (trackItem as { linked_from?: { uri?: string } }).linked_from?.uri;
+                    if ((trackItem.uri && uriSet.has(trackItem.uri)) || (linkedUri && uriSet.has(linkedUri))) {
+                        return true;
+                    }
+                    const validKeys = Array.isArray(candidateKeys)
+                        ? candidateKeys.filter(k => Boolean(k && k !== '|'))
+                        : [];
+                    if (validKeys.length > 0) {
+                        const key = generateTrackKey(trackItem);
+                        if (key && key !== '|' && validKeys.includes(key)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                const inspectQueueForTarget = async (
+                    priorState: SpotifyApi.CurrentPlaybackResponse | null | undefined,
+                    shuffleActive?: boolean
+                ): Promise<
+                    | { status: 'already_current' }
+                    | { status: 'queued'; skipsNeeded: number }
+                    | { status: 'not_queued' }
+                > => {
+                    if (typeof this.spotify.getGeneric !== 'function') {
+                        return { status: 'not_queued' };
+                    }
+                    try {
+                        const rawQueueRes = (await this.spotify.getGeneric(
+                            'https://api.spotify.com/v1/me/player/queue'
+                        )) as {
+                            currently_playing?: SpotifyQueueItem | null;
+                            queue?: SpotifyQueueItem[];
+                        } | null;
+                        if (
+                            matchesTargetQueueItem(rawQueueRes?.currently_playing, shuffleActive) &&
+                            !matchesTargetQueueItem(priorState?.item, shuffleActive)
+                        ) {
+                            return { status: 'already_current' };
+                        }
+                        // Inspect raw `queue` positions directly WITHOUT pre-filtering out episodes so
+                        // non-track items (`type === 'episode'`) at index 0 never shift subsequent track indices.
+                        const rawQueue = Array.isArray(rawQueueRes?.queue) ? rawQueueRes.queue : [];
+                        const MAX_PRIOR_CARRYOVER_SKIPS = 5;
+                        for (let idx = 0; idx <= MAX_PRIOR_CARRYOVER_SKIPS && idx < rawQueue.length; idx++) {
+                            const qItem = rawQueue[idx];
+                            if (!qItem || qItem.type !== 'track') {
+                                break;
+                            }
+                            if (matchesTargetQueueItem(qItem, shuffleActive)) {
+                                return { status: 'queued', skipsNeeded: idx + 1 };
+                            }
+                            if (
+                                idx < MAX_PRIOR_CARRYOVER_SKIPS &&
+                                options?.isSkippablePriorTrack?.(qItem as Track)
+                            ) {
+                                continue;
+                            }
+                            break;
+                        }
+                        return { status: 'not_queued' };
+                    } catch {
+                        return { status: 'not_queued' };
+                    }
+                };
                 const kickResume = async (stateDeviceId?: string | null) => {
                     const latestToken = this.spotify.getAccessToken() || token;
                     const resumeDeviceId = stateDeviceId || targetDeviceId;
@@ -932,6 +1121,9 @@ export class SpotifyPlayerClient {
                 const confirmAfterResumeKick = async (
                     priorState: SpotifyApi.CurrentPlaybackResponse | null | undefined
                 ): Promise<SpotifyApi.CurrentPlaybackResponse | null | undefined> => {
+                    if (options?.shouldAbort?.()) {
+                        return priorState;
+                    }
                     await this.delay(stepRetryDelayMs);
                     if (options?.shouldAbort?.()) {
                         return priorState;
@@ -964,6 +1156,9 @@ export class SpotifyPlayerClient {
                     if (!loadedState?.is_playing) {
                         console.log(pausedLog);
                         await kickResume(loadedState?.device?.id);
+                        if (options?.shouldAbort?.()) {
+                            return { droppedAfterMirage: false, latestState: loadedState };
+                        }
                         const postKickState = await confirmAfterResumeKick(loadedState);
                         return { droppedAfterMirage: false, latestState: postKickState };
                     }
@@ -974,7 +1169,7 @@ export class SpotifyPlayerClient {
                         if (options?.shouldAbort?.()) {
                             return { droppedAfterMirage: false, latestState: loadedState };
                         }
-                        const afterMirageState = await fetchPlaybackState();
+                        let afterMirageState = await fetchPlaybackState();
                         if (options?.shouldAbort?.()) {
                             return { droppedAfterMirage: false, latestState: afterMirageState };
                         }
@@ -982,8 +1177,21 @@ export class SpotifyPlayerClient {
                             if (!afterMirageState?.is_playing) {
                                 console.log(mirageLog);
                                 await kickResume(afterMirageState?.device?.id);
+                                if (options?.shouldAbort?.()) {
+                                    return { droppedAfterMirage: false, latestState: afterMirageState };
+                                }
                                 const postKickState = await confirmAfterResumeKick(afterMirageState);
                                 return { droppedAfterMirage: false, latestState: postKickState };
+                            }
+                            if (
+                                hadConfirmedActivePlaybackOnTarget &&
+                                typeof afterMirageState.progress_ms === 'number' &&
+                                afterMirageState.progress_ms === 0
+                            ) {
+                                await this.delay(stepRetryDelayMs);
+                                if (!options?.shouldAbort?.()) {
+                                    afterMirageState = await fetchPlaybackState();
+                                }
                             }
                             return { droppedAfterMirage: false, latestState: afterMirageState };
                         }
@@ -992,7 +1200,27 @@ export class SpotifyPlayerClient {
                     return { droppedAfterMirage: false, latestState: loadedState };
                 };
 
-                let hadTargetActiveOnDevice = false;
+                const isSameStaleItemOnTarget = (
+                    st: SpotifyApi.CurrentPlaybackResponse | null | undefined,
+                    prior: SpotifyApi.CurrentPlaybackResponse | null | undefined
+                ): boolean => {
+                    if (!st || (st.device?.id && st.device.id !== targetDeviceId)) {
+                        return false;
+                    }
+                    if (st.item?.uri && prior?.item?.uri) {
+                        return st.item.uri === prior.item.uri;
+                    }
+                    if (
+                        !st.item &&
+                        !prior?.item &&
+                        st.currently_playing_type === 'episode' &&
+                        prior?.currently_playing_type === 'episode'
+                    ) {
+                        return true;
+                    }
+                    return false;
+                };
+
                 const retryDroppedUris = async (
                     lastState: SpotifyApi.CurrentPlaybackResponse | null | undefined
                 ): Promise<SpotifyApi.CurrentPlaybackResponse | null | undefined> => {
@@ -1000,12 +1228,242 @@ export class SpotifyPlayerClient {
                     const heldByOtherDevice = Boolean(
                         lastState?.device?.id && lastState.device.id !== targetDeviceId
                     );
+                    const isActivelyPlayingWrongTrackOnTarget = Boolean(
+                        !heldByOtherDevice &&
+                        lastState?.is_playing &&
+                        !isTargetLoaded(lastState)
+                    );
+
+                    if (isActivelyPlayingWrongTrackOnTarget) {
+                        // Target device IS awake and actively playing another track/episode (`is_playing === true`),
+                        // yet `PUT /me/player/play { uris }` (HTTP 204) kept the prior item at the active head
+                        // (e.g. Android `com.spotify.music` background FGS resetting the current item to 0ms while
+                        // queuing `uris[0..N]` behind it at `queue[0]` or behind ContextDJ's carryover refill items).
+                        if (lastState?.repeat_state && lastState.repeat_state !== 'off') {
+                            try {
+                                await fetch(
+                                    `https://api.spotify.com/v1/me/player/repeat?state=off&device_id=${encodeURIComponent(targetDeviceId)}`,
+                                    {
+                                        method: 'PUT',
+                                        headers: { 'Authorization': `Bearer ${latestToken}` },
+                                    }
+                                );
+                            } catch (repeatErr) {
+                                console.warn('Pre-switch disable repeat warning (non-fatal):', repeatErr);
+                            }
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
+                            }
+                        }
+
+                        const advanceQueuedHeadViaNext = async (
+                            priorState: SpotifyApi.CurrentPlaybackResponse | null | undefined,
+                            skipsCount: number = 1
+                        ): Promise<{
+                            switched: boolean;
+                            sentAnyNext: boolean;
+                            state: SpotifyApi.CurrentPlaybackResponse | null | undefined;
+                        }> => {
+                            const totalSkips = Math.max(1, skipsCount);
+                            for (let step = 0; step < totalSkips; step++) {
+                                const currentToken = this.spotify.getAccessToken() || latestToken;
+                                const nextRes = await executeNextOnDevice(targetDeviceId, currentToken);
+                                if (!(nextRes.ok || nextRes.status === 204) || options?.shouldAbort?.()) {
+                                    return { switched: false, sentAnyNext: step > 0, state: priorState };
+                                }
+                                if (step < totalSkips - 1) {
+                                    await this.delay(Math.min(180, stepRetryDelayMs));
+                                    if (options?.shouldAbort?.()) {
+                                        return { switched: false, sentAnyNext: true, state: priorState };
+                                    }
+                                }
+                            }
+                            await this.delay(verifyDelayMs);
+                            if (options?.shouldAbort?.()) {
+                                return { switched: false, sentAnyNext: true, state: priorState };
+                            }
+                            let postNextState = await fetchPlaybackState();
+                            if (options?.shouldAbort?.()) {
+                                return { switched: false, sentAnyNext: true, state: postNextState };
+                            }
+                            if (
+                                !isTargetLoaded(postNextState) &&
+                                (isSameStaleItemOnTarget(postNextState, priorState) || totalSkips > 1)
+                            ) {
+                                await this.delay(stepRetryDelayMs);
+                                if (options?.shouldAbort?.()) {
+                                    return { switched: false, sentAnyNext: true, state: postNextState };
+                                }
+                                postNextState = await fetchPlaybackState();
+                                if (options?.shouldAbort?.()) {
+                                    return { switched: false, sentAnyNext: true, state: postNextState };
+                                }
+                            }
+                            if (isTargetLoaded(postNextState)) {
+                                const checked = await verifyLoadedState(
+                                    postNextState,
+                                    stepRetryDelayMs,
+                                    '⚡ Track loaded paused after next-skip onto queued { uris }; sending empty-body resume kick',
+                                    '⚡ Track settled paused after 0ms mirage following next-skip; sending empty-body resume kick'
+                                );
+                                return {
+                                    switched: isTargetLoaded(checked.latestState) && !checked.droppedAfterMirage,
+                                    sentAnyNext: true,
+                                    state: checked.latestState,
+                                };
+                            }
+                            return { switched: false, sentAnyNext: true, state: postNextState };
+                        };
+
+                        const queueBeforeRetry = await inspectQueueForTarget(
+                            lastState,
+                            Boolean(lastState?.shuffle_state)
+                        );
+                        if (options?.shouldAbort?.()) {
+                            return lastState;
+                        }
+                        if (queueBeforeRetry.status === 'already_current') {
+                            const convergedState = await fetchPlaybackState();
+                            if (options?.shouldAbort?.() || !isTargetLoaded(convergedState)) {
+                                return convergedState;
+                            }
+                            const checked = await verifyLoadedState(
+                                convergedState,
+                                stepRetryDelayMs,
+                                '⚡ Target track converged paused on queue snapshot; sending empty-body resume kick',
+                                '⚡ Target track settled paused after 0ms mirage; sending empty-body resume kick'
+                            );
+                            return checked.latestState;
+                        }
+                        if (queueBeforeRetry.status === 'queued') {
+                            console.log(
+                                `⚡ Target track queued behind active item (skipsNeeded=${queueBeforeRetry.skipsNeeded}); advancing to target`
+                            );
+                            const skipped = await advanceQueuedHeadViaNext(lastState, queueBeforeRetry.skipsNeeded);
+                            if (skipped.switched || options?.shouldAbort?.()) {
+                                return skipped.state;
+                            }
+                            if (skipped.sentAnyNext) {
+                                const postSkipQueue = await inspectQueueForTarget(
+                                    skipped.state,
+                                    Boolean(skipped.state?.shuffle_state)
+                                );
+                                if (options?.shouldAbort?.()) {
+                                    return skipped.state;
+                                }
+                                if (postSkipQueue.status === 'already_current') {
+                                    await this.delay(stepRetryDelayMs);
+                                    if (options?.shouldAbort?.()) {
+                                        return skipped.state;
+                                    }
+                                    const settledAfterSkip = await fetchPlaybackState();
+                                    if (options?.shouldAbort?.() || !isTargetLoaded(settledAfterSkip)) {
+                                        return settledAfterSkip;
+                                    }
+                                    const checked = await verifyLoadedState(
+                                        settledAfterSkip,
+                                        stepRetryDelayMs,
+                                        '⚡ Track settled paused after next-skip; sending empty-body resume kick',
+                                        '⚡ Track settled paused after 0ms mirage; sending empty-body resume kick'
+                                    );
+                                    return checked.latestState;
+                                }
+                            }
+                        }
+
+                        // Disable shuffle before explicit `offset: { position: 0 }` retry when `context === null`
+                        // so `uris[0]` (priorityTrack / intro opener) is guaranteed to start first.
+                        if (lastState?.shuffle_state === true && !lastState.context?.uri) {
+                            try {
+                                const shuffleToken = this.spotify.getAccessToken() || latestToken;
+                                await fetch(
+                                    `https://api.spotify.com/v1/me/player/shuffle?state=false&device_id=${encodeURIComponent(targetDeviceId)}`,
+                                    {
+                                        method: 'PUT',
+                                        headers: { 'Authorization': `Bearer ${shuffleToken}` },
+                                    }
+                                );
+                            } catch (shuffleErr) {
+                                console.warn('Pre-offset disable shuffle warning (non-fatal):', shuffleErr);
+                            }
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
+                            }
+                        }
+
+                        // Retry `PUT /me/player/play` with explicit `offset: { position: 0 }, position_ms: 0`
+                        // to force Spotify's ContextPlayer onto index 0 of `{ uris }`.
+                        const currentToken = this.spotify.getAccessToken() || latestToken;
+                        const offsetPlayRes = await executePlayWithOffset(targetDeviceId, currentToken);
+                        if ((offsetPlayRes.ok || offsetPlayRes.status === 204) && !options?.shouldAbort?.()) {
+                            await this.delay(verifyDelayMs);
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
+                            }
+                            const thirdState = await fetchPlaybackState();
+                            if (options?.shouldAbort?.()) {
+                                return thirdState;
+                            }
+                            if (isTargetLoaded(thirdState)) {
+                                const checked = await verifyLoadedState(
+                                    thirdState,
+                                    stepRetryDelayMs,
+                                    '⚡ Offset play retry loaded track in paused state; sending empty-body resume kick',
+                                    '⚡ Offset play retry settled paused after 0ms mirage; sending empty-body resume kick'
+                                );
+                                return checked.latestState;
+                            }
+                            const stillPlayingWrongTrackOnTarget = Boolean(
+                                thirdState?.is_playing &&
+                                (!thirdState.device?.id || thirdState.device.id === targetDeviceId)
+                            );
+                            if (stillPlayingWrongTrackOnTarget) {
+                                const queueAfterOffset = await inspectQueueForTarget(
+                                    thirdState,
+                                    Boolean(thirdState?.shuffle_state)
+                                );
+                                if (options?.shouldAbort?.()) {
+                                    return thirdState;
+                                }
+                                if (queueAfterOffset.status === 'already_current') {
+                                    const converged = await fetchPlaybackState();
+                                    if (!options?.shouldAbort?.() && isTargetLoaded(converged)) {
+                                        const checked = await verifyLoadedState(
+                                            converged,
+                                            stepRetryDelayMs,
+                                            '⚡ Offset play converged paused; sending empty-body resume kick',
+                                            '⚡ Offset play settled paused after 0ms mirage; sending empty-body resume kick'
+                                        );
+                                        return checked.latestState;
+                                    }
+                                    return converged;
+                                }
+                                if (
+                                    queueAfterOffset.status === 'queued' ||
+                                    (queueBeforeRetry.status === 'not_queued' && !thirdState?.context?.uri)
+                                ) {
+                                    const skips =
+                                        queueAfterOffset.status === 'queued' ? queueAfterOffset.skipsNeeded : 1;
+                                    console.log(
+                                        `⚡ Offset play retry kept prior track at head (skipsNeeded=${skips}); advancing via next`
+                                    );
+                                    const skippedAfterOffset = await advanceQueuedHeadViaNext(thirdState, skips);
+                                    return skippedAfterOffset.state;
+                                }
+                            }
+                            return thirdState;
+                        }
+                        return lastState;
+                    }
 
                     if (isMobileTarget) {
                         // On mobile targets, NEVER send `play: false` (`transferPlaybackQuietly`).
                         // Reclaim Connect via `play: true` ONLY when a different device holds the session.
                         if (heldByOtherDevice) {
                             await this.transferPlaybackWithPlay(targetDeviceId, { silent: true });
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
+                            }
                             await this.delay(this.options.transferSettleDelayMs ?? stepRetryDelayMs);
                             if (options?.shouldAbort?.()) {
                                 return lastState;
@@ -1022,6 +1480,9 @@ export class SpotifyPlayerClient {
                             const retryTransferred = await this.transferPlaybackQuietly(targetDeviceId, latestToken);
                             if (retryTransferred) {
                                 didPreTransferToTarget = true;
+                            }
+                            if (options?.shouldAbort?.()) {
+                                return lastState;
                             }
                             await this.delay(
                                 this.options.transferSettleDelayMs ?? this.options.retryDelayMs ?? 650
@@ -1091,9 +1552,6 @@ export class SpotifyPlayerClient {
                         aborted: true,
                     };
                 }
-                if (postState?.device?.is_active && postState.device.id === targetDeviceId) {
-                    hadTargetActiveOnDevice = true;
-                }
 
                 if (isTargetLoaded(postState)) {
                     const checked = await verifyLoadedState(
@@ -1127,9 +1585,6 @@ export class SpotifyPlayerClient {
                             aborted: true,
                         };
                     }
-                    if (secondState?.device?.is_active && secondState.device.id === targetDeviceId) {
-                        hadTargetActiveOnDevice = true;
-                    }
 
                     // When an initially-inactive device is waking up to process `{ uris }`, its Connect
                     // state can take ~1.5s to surface Track 1 in `/me/player` (`null` or idle device state
@@ -1161,9 +1616,6 @@ export class SpotifyPlayerClient {
                                 isMobileTarget,
                                 aborted: true,
                             };
-                        }
-                        if (secondState?.device?.is_active && secondState.device.id === targetDeviceId) {
-                            hadTargetActiveOnDevice = true;
                         }
                     }
 
@@ -1204,16 +1656,26 @@ export class SpotifyPlayerClient {
                 }
 
                 targetTrackLoaded = isTargetLoaded(finalState);
-                const isPersistentMobileZeroMirage = Boolean(
+                const isTargetZeroMirage = Boolean(
                     isMobileTarget &&
+                    targetTrackLoaded &&
                     finalState?.is_playing &&
                     typeof finalState.progress_ms === 'number' &&
                     finalState.progress_ms === 0
                 );
+                const isFinalPlayingOnTarget = Boolean(
+                    finalState?.is_playing &&
+                    (!finalState.device?.id || finalState.device.id === targetDeviceId)
+                );
+                deviceActivelyPlaying = Boolean(
+                    hadConfirmedActivePlaybackOnTarget
+                        ? isFinalPlayingOnTarget
+                        : (isFinalPlayingOnTarget && !isTargetZeroMirage)
+                );
                 confirmedPlaying = Boolean(
                     targetTrackLoaded &&
                     finalState?.is_playing &&
-                    !isPersistentMobileZeroMirage
+                    !isTargetZeroMirage
                 );
             } catch (verifyErr) {
                 if (options?.shouldAbort?.()) {
@@ -1229,6 +1691,9 @@ export class SpotifyPlayerClient {
                 if (isMobileTarget) {
                     confirmedPlaying = false;
                     targetTrackLoaded = false;
+                    if (hadConfirmedActivePlaybackOnTarget) {
+                        deviceActivelyPlaying = true;
+                    }
                 }
             }
         } else if (options?.shouldAbort?.()) {
@@ -1243,6 +1708,10 @@ export class SpotifyPlayerClient {
 
         if (confirmedPlaying) {
             console.log('▶️ Playback started successfully (Fetch)');
+        } else if (deviceActivelyPlaying) {
+            console.warn(
+                `⚠️ Playback command accepted (204), but device ${targetDeviceId} remained on prior playing track (targetTrackLoaded=${targetTrackLoaded}, isMobileTarget=${isMobileTarget})`
+            );
         } else {
             console.warn(
                 `⚠️ Playback command accepted (204), but device ${targetDeviceId} remained paused/asleep (targetTrackLoaded=${targetTrackLoaded}, isMobileTarget=${isMobileTarget})`
@@ -1252,6 +1721,7 @@ export class SpotifyPlayerClient {
         return {
             confirmedPlaying,
             targetTrackLoaded,
+            ...(deviceActivelyPlaying ? { deviceActivelyPlaying: true } : {}),
             targetDeviceId,
             isMobileTarget,
         };

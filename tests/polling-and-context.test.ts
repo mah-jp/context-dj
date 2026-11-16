@@ -810,8 +810,35 @@ describe('Context, DJCore Subscriptions, and Polling Loop Controller', () => {
             assert.deepStrictEqual(hiddenWake, { launched: true, started: false });
             assert.deepStrictEqual(launchedHrefs, [SPOTIFY_ANDROID_WAKE_INTENT_URI]);
             assert.strictEqual(shouldRetainPendingMobileWake(hiddenWake.started, 'hidden'), true);
+            assert.strictEqual(shouldRetainPendingMobileWake(hiddenWake.started, 'hidden', false), false);
             assert.strictEqual(shouldRetainPendingMobileWake(hiddenWake.started, 'visible'), false);
             assert.strictEqual(shouldRetainPendingMobileWake(true, 'hidden'), false);
+
+            // 5. Stops polling immediately when `dj.isMobileWakeRequired()` becomes `false` (device already awake
+            //    and playing) or when a non-retryable 403/429 error occurs, instead of hammering `resume` 5 times
+            let awakeResumeAttempts = 0;
+            let terminalStopCount = 0;
+            const alreadyAwakeWake = await runMobileSpotifyWakeSequence({
+                dj: {
+                    getDevices: async () => [
+                        { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false } as SpotifyApi.UserDevice,
+                    ],
+                    isMobileWakeRequired: () => false,
+                    resume: async () => {
+                        awakeResumeAttempts++;
+                        return { ok: false };
+                    },
+                },
+                launchUri: () => true,
+                pollDelaysMs: [0, 0, 0, 0, 0],
+                delayFn: async () => {},
+                onTerminalStop: () => {
+                    terminalStopCount++;
+                },
+            });
+            assert.deepStrictEqual(alreadyAwakeWake, { launched: true, started: false });
+            assert.strictEqual(awakeResumeAttempts, 1);
+            assert.strictEqual(terminalStopCount, 1);
         } finally {
             if (origNav) {
                 Object.defineProperty(globalThis, 'navigator', origNav);

@@ -1487,4 +1487,532 @@ describe('SpotifyPlayerClient', () => {
         assert.strictEqual(resolvedId, 'phone_1');
         assert.strictEqual(restrictedAttempt, 2);
     });
+
+    it('switches off an already-playing mobile track when Android Spotify queues { uris } behind the active head or needs explicit offset, and reports deviceActivelyPlaying when stuck', async () => {
+        // 1. Exact Pixel 10 Pro XL background-FGS scenario:
+        //    Phone is actively playing `Ref:rain` (`repeat_state: 'track'`, `context: null`), and even when `Ref:rain`
+        //    also appears later at `uris[1]` (`shuffle_state: false`), `startPlaybackOnDevice` must require `uris[0]`
+        //    (`reflection_eternal`), disable repeat, detect `reflection_eternal` at `queue[0]`, and advance via `POST /next`
+        //    without resetting `Ref:rain` a second time!
+        fetchCalls = [];
+        let skippedToNext = false;
+        let statePollsAfterSkip = 0;
+        let kickedAfterSkip = false;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.includes('/player/next')) {
+                skippedToNext = true;
+            } else if (url.includes('/player/play') && !init?.body && skippedToNext) {
+                kickedAfterSkip = true;
+            }
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const pixelQueueHeadSpotify = {
+            getAccessToken: () => 'token_pixel_active',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async (url: string) => {
+                assert.strictEqual(url, 'https://api.spotify.com/v1/me/player/queue');
+                return {
+                    currently_playing: { id: 'ref_rain', uri: 'spotify:track:ref_rain', name: 'Ref:rain', type: 'track' },
+                    queue: [
+                        { id: 'reflection_eternal', uri: 'spotify:track:reflection_eternal', name: 'reflection eternal', type: 'track' },
+                        { id: 'ref_rain', uri: 'spotify:track:ref_rain', name: 'Ref:rain', type: 'track' },
+                    ],
+                };
+            },
+            getMyCurrentPlaybackState: async () => {
+                if (!skippedToNext) {
+                    return {
+                        is_playing: true,
+                        progress_ms: 170,
+                        shuffle_state: false,
+                        repeat_state: 'track',
+                        context: null,
+                        device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                        item: { id: 'ref_rain', uri: 'spotify:track:ref_rain', name: 'Ref:rain', artists: [{ name: 'Aimer' }], type: 'track' },
+                    } as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                statePollsAfterSkip++;
+                if (statePollsAfterSkip === 1) {
+                    // Simulate 1 stale cloud poll still showing `Ref:rain` right after `POST /next`
+                    return {
+                        is_playing: true,
+                        progress_ms: 210,
+                        shuffle_state: false,
+                        repeat_state: 'off',
+                        context: null,
+                        device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                        item: { id: 'ref_rain', uri: 'spotify:track:ref_rain', name: 'Ref:rain', artists: [{ name: 'Aimer' }], type: 'track' },
+                    } as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: kickedAfterSkip,
+                    progress_ms: kickedAfterSkip ? 480 : 0,
+                    shuffle_state: false,
+                    repeat_state: 'off',
+                    context: null,
+                    device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                    item: {
+                        id: 'reflection_eternal',
+                        uri: 'spotify:track:reflection_eternal',
+                        name: 'reflection eternal',
+                        artists: [{ name: 'Nujabes' }],
+                        type: 'track',
+                    },
+                } as unknown as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const pixelClient = new SpotifyPlayerClient(pixelQueueHeadSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await pixelClient.resolveTargetDevice();
+        const queueSkipRes = await pixelClient.startPlaybackOnDevice(
+            'pixel_10_pro_xl',
+            ['spotify:track:reflection_eternal', 'spotify:track:ref_rain'],
+            { expectedTrackKeys: ['reflection eternal|nujabes', 'ref:rain|aimer'] }
+        );
+        assert.strictEqual(queueSkipRes.confirmedPlaying, true);
+        assert.strictEqual(queueSkipRes.targetTrackLoaded, true);
+        assert.strictEqual(queueSkipRes.deviceActivelyPlaying, true);
+        // 0: initial clean `{ uris }`, 1: `PUT /repeat?state=off`, 2: `POST /next`, 3: empty-body kick
+        assert.strictEqual(fetchCalls.length, 4);
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[0].init?.body)), {
+            uris: ['spotify:track:reflection_eternal', 'spotify:track:ref_rain'],
+        });
+        assert.strictEqual(fetchCalls[1].url, 'https://api.spotify.com/v1/me/player/repeat?state=off&device_id=pixel_10_pro_xl');
+        assert.strictEqual(fetchCalls[2].url, 'https://api.spotify.com/v1/me/player/next?device_id=pixel_10_pro_xl');
+        assert.strictEqual(fetchCalls[2].init?.method, 'POST');
+        assert.strictEqual(fetchCalls[3].url, 'https://api.spotify.com/v1/me/player/play?device_id=pixel_10_pro_xl');
+        assert.strictEqual(fetchCalls[3].init?.body, undefined);
+
+        // 2. When `/queue` does not have `uris[0]` yet (external playlist playing), retries with explicit
+        //    `{ uris, offset: { position: 0 }, position_ms: 0 }` and switches cleanly!
+        fetchCalls = [];
+        let sawOffsetPlay = false;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.includes('/player/play') && init?.body && String(init.body).includes('"offset"')) {
+                sawOffsetPlay = true;
+            }
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const offsetSwitchSpotify = {
+            getAccessToken: () => 'token_offset_switch',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async () => ({
+                currently_playing: { id: 'ext_1', uri: 'spotify:track:ext_1', name: 'External 1', type: 'track' },
+                queue: [{ id: 'ext_2', uri: 'spotify:track:ext_2', name: 'External 2', type: 'track' }],
+            }),
+            getMyCurrentPlaybackState: async () =>
+                sawOffsetPlay
+                    ? ({
+                          is_playing: true,
+                          progress_ms: 620,
+                          shuffle_state: false,
+                          repeat_state: 'off',
+                          context: null,
+                          device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: { id: 'dj_new_0', uri: 'spotify:track:dj_new_0', name: 'New Track 0', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse)
+                    : ({
+                          is_playing: true,
+                          progress_ms: 35_000,
+                          shuffle_state: false,
+                          repeat_state: 'off',
+                          context: { type: 'playlist', uri: 'spotify:playlist:ext' },
+                          device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: { id: 'ext_1', uri: 'spotify:track:ext_1', name: 'External 1', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const offsetClient = new SpotifyPlayerClient(offsetSwitchSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await offsetClient.resolveTargetDevice();
+        const offsetRes = await offsetClient.startPlaybackOnDevice('pixel_10_pro_xl', ['spotify:track:dj_new_0']);
+        assert.strictEqual(offsetRes.confirmedPlaying, true);
+        assert.strictEqual(sawOffsetPlay, true);
+        assert.deepStrictEqual(JSON.parse(String(fetchCalls[1].init?.body)), {
+            uris: ['spotify:track:dj_new_0'],
+            offset: { position: 0 },
+            position_ms: 0,
+        });
+
+        // 3. When `/queue` endpoint is unavailable (`getGeneric` undefined) and `context === null` keeps old track
+        //    at head even after `{ uris, offset: { position: 0 } }`, falls back to `POST /next` and lands on `uris[0]`!
+        fetchCalls = [];
+        let postOffsetSkipped = false;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.includes('/player/next')) {
+                postOffsetSkipped = true;
+            }
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const noQueueEndpointSpotify = {
+            getAccessToken: () => 'token_no_queue_ep',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getMyCurrentPlaybackState: async () =>
+                postOffsetSkipped
+                    ? ({
+                          is_playing: true,
+                          progress_ms: 410,
+                          shuffle_state: false,
+                          repeat_state: 'off',
+                          context: null,
+                          device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: { id: 'dj_target_0', uri: 'spotify:track:dj_target_0', name: 'Target 0', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse)
+                    : ({
+                          is_playing: true,
+                          progress_ms: 120,
+                          shuffle_state: false,
+                          repeat_state: 'off',
+                          context: null,
+                          device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: { id: 'old_session_0', uri: 'spotify:track:old_session_0', name: 'Old 0', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const fallbackNextClient = new SpotifyPlayerClient(noQueueEndpointSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await fallbackNextClient.resolveTargetDevice();
+        const fallbackNextRes = await fallbackNextClient.startPlaybackOnDevice('pixel_10_pro_xl', ['spotify:track:dj_target_0']);
+        assert.strictEqual(fallbackNextRes.confirmedPlaying, true);
+        assert.strictEqual(postOffsetSkipped, true);
+
+        // 4. When external playlist completely ignores all switch attempts (`context.uri` non-null and `queue[0]` not target),
+        //    does NOT blindly skip the external playlist and reports `confirmedPlaying: false, deviceActivelyPlaying: true`!
+        fetchCalls = [];
+        const stuckExternalSpotify = {
+            getAccessToken: () => 'token_stuck_external',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async () => ({
+                currently_playing: { id: 'ext_locked', uri: 'spotify:track:ext_locked', name: 'Locked', type: 'track' },
+                queue: [{ id: 'ext_next', uri: 'spotify:track:ext_next', name: 'Locked Next', type: 'track' }],
+            }),
+            getMyCurrentPlaybackState: async () => ({
+                is_playing: true,
+                progress_ms: 42_000,
+                shuffle_state: true,
+                repeat_state: 'off',
+                context: { type: 'playlist', uri: 'spotify:playlist:locked_jam' },
+                device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                item: { id: 'ext_locked', uri: 'spotify:track:ext_locked', name: 'Locked', type: 'track' },
+            } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const stuckExternalClient = new SpotifyPlayerClient(stuckExternalSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await stuckExternalClient.resolveTargetDevice();
+        const stuckRes = await stuckExternalClient.startPlaybackOnDevice('pixel_10_pro_xl', ['spotify:track:dj_blocked']);
+        assert.strictEqual(stuckRes.confirmedPlaying, false);
+        assert.strictEqual(stuckRes.targetTrackLoaded, false);
+        assert.strictEqual(stuckRes.deviceActivelyPlaying, true);
+        assert.strictEqual(fetchCalls.some(c => c.url.includes('/player/next')), false);
+    });
+
+    it('preserves deviceActivelyPlaying on 0ms-rewound prior tracks, handles podcast episode queues & carryover refill skips, converges via queue snapshot, and aborts immediately on 404', async () => {
+        // 1. Foreign/prior track rewound to `progress_ms: 0` by `PUT /play` on mobile MUST still report
+        //    `deviceActivelyPlaying: true` (never mistaking a 0ms-rewound foreign song for a frozen 0ms mirage!)
+        fetchCalls = [];
+        let rewoundToZero = false;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.includes('/player/play') && init?.body && String(init.body).includes('"offset"')) {
+                rewoundToZero = true;
+            }
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const rewoundForeignSpotify = {
+            getAccessToken: () => 'token_rewound_foreign',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async () => ({
+                currently_playing: { id: 'ext_locked', uri: 'spotify:track:ext_locked', name: 'Locked', type: 'track' },
+                queue: [],
+            }),
+            getMyCurrentPlaybackState: async () => ({
+                is_playing: true,
+                progress_ms: rewoundToZero ? 0 : 12_000,
+                shuffle_state: false,
+                repeat_state: 'off',
+                context: { type: 'playlist', uri: 'spotify:playlist:jam' },
+                device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                item: { id: 'ext_locked', uri: 'spotify:track:ext_locked', name: 'Locked', type: 'track' },
+            } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const rewoundClient = new SpotifyPlayerClient(rewoundForeignSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await rewoundClient.resolveTargetDevice();
+        const rewoundRes = await rewoundClient.startPlaybackOnDevice('pixel_10_pro_xl', ['spotify:track:dj_target']);
+        assert.strictEqual(rewoundRes.confirmedPlaying, false);
+        assert.strictEqual(rewoundRes.targetTrackLoaded, false);
+        assert.strictEqual(rewoundRes.deviceActivelyPlaying, true);
+
+        // 2. Podcast episode (`item: null, currently_playing_type: 'episode'`):
+        //    (a) When `queue[0]` is another episode (`ep_2`) ahead of `dj_0`, does NOT misindex `queue` or skip into `ep_2`,
+        //        instead switching cleanly via explicit `offset: { position: 0 }`.
+        fetchCalls = [];
+        let episodeOffsetSent = false;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.includes('/player/play') && init?.body && String(init.body).includes('"offset"')) {
+                episodeOffsetSent = true;
+            }
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const podcastWithQueuedEpisodeSpotify = {
+            getAccessToken: () => 'token_podcast_ep2',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async () => ({
+                currently_playing: { id: 'ep_1', uri: 'spotify:episode:ep_1', name: 'Episode 1', type: 'episode' },
+                queue: [
+                    { id: 'ep_2', uri: 'spotify:episode:ep_2', name: 'Episode 2', type: 'episode' },
+                    { id: 'dj_0', uri: 'spotify:track:dj_0', name: 'DJ Track 0', type: 'track' },
+                ],
+            }),
+            getMyCurrentPlaybackState: async () =>
+                episodeOffsetSent
+                    ? ({
+                          is_playing: true,
+                          progress_ms: 350,
+                          shuffle_state: false,
+                          repeat_state: 'off',
+                          context: null,
+                          currently_playing_type: 'track',
+                          device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: { id: 'dj_0', uri: 'spotify:track:dj_0', name: 'DJ Track 0', type: 'track' },
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse)
+                    : ({
+                          is_playing: true,
+                          progress_ms: 90_000,
+                          shuffle_state: false,
+                          repeat_state: 'off',
+                          context: { type: 'show', uri: 'spotify:show:tech' },
+                          currently_playing_type: 'episode',
+                          device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                          item: null,
+                      } as unknown as SpotifyApi.CurrentPlaybackResponse),
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const podcastClient = new SpotifyPlayerClient(podcastWithQueuedEpisodeSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await podcastClient.resolveTargetDevice();
+        const podcastRes = await podcastClient.startPlaybackOnDevice('pixel_10_pro_xl', ['spotify:track:dj_0']);
+        assert.strictEqual(podcastRes.confirmedPlaying, true);
+        assert.strictEqual(fetchCalls.some(c => c.url.includes('/player/next')), false);
+
+        //    (b) When `item: null` episode queues `dj_0` at `queue[0]` and first post-skip poll is still stale `item: null`,
+        //        waits `stepRetryDelayMs` and lands cleanly on `dj_0`.
+        fetchCalls = [];
+        let epSkipped = false;
+        let epPostSkipPolls = 0;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            fetchCalls.push({ url, init });
+            if (url.includes('/player/next')) epSkipped = true;
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const podcastQueuedTrackSpotify = {
+            getAccessToken: () => 'token_podcast_skip',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async () => ({
+                currently_playing: null,
+                queue: [{ id: 'dj_0', uri: 'spotify:track:dj_0', name: 'DJ Track 0', type: 'track' }],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                if (!epSkipped) {
+                    return {
+                        is_playing: true,
+                        progress_ms: 45_000,
+                        shuffle_state: false,
+                        repeat_state: 'off',
+                        context: null,
+                        currently_playing_type: 'episode',
+                        device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                        item: null,
+                    } as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                epPostSkipPolls++;
+                if (epPostSkipPolls === 1) {
+                    return {
+                        is_playing: true,
+                        progress_ms: 45_100,
+                        shuffle_state: false,
+                        repeat_state: 'off',
+                        context: null,
+                        currently_playing_type: 'episode',
+                        device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                        item: null,
+                    } as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: true,
+                    progress_ms: 420,
+                    shuffle_state: false,
+                    repeat_state: 'off',
+                    context: null,
+                    currently_playing_type: 'track',
+                    device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                    item: { id: 'dj_0', uri: 'spotify:track:dj_0', name: 'DJ Track 0', type: 'track' },
+                } as unknown as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const podcastSkipClient = new SpotifyPlayerClient(podcastQueuedTrackSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await podcastSkipClient.resolveTargetDevice();
+        const podcastSkipRes = await podcastSkipClient.startPlaybackOnDevice('pixel_10_pro_xl', ['spotify:track:dj_0']);
+        assert.strictEqual(podcastSkipRes.confirmedPlaying, true);
+        assert.strictEqual(epPostSkipPolls >= 2, true);
+
+        // 3. Atomic `currently_playing` convergence on `/v1/me/player/queue` avoids sending unnecessary `POST /next` or `PUT /play`
+        fetchCalls = [];
+        let stateReads = 0;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            fetchCalls.push({ url: String(input), init });
+            return { ok: true, status: 204, statusText: 'No Content', text: async () => '' } as Response;
+        }) as typeof fetch;
+
+        const queueConvergedSpotify = {
+            getAccessToken: () => 'token_queue_converged',
+            getMyDevices: async () => ({
+                devices: [
+                    { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                ] as SpotifyApi.UserDevice[],
+            }),
+            getGeneric: async () => ({
+                currently_playing: { id: 'dj_converged', uri: 'spotify:track:dj_converged', name: 'Converged', type: 'track' },
+                queue: [{ id: 'dj_next', uri: 'spotify:track:dj_next', name: 'Next', type: 'track' }],
+            }),
+            getMyCurrentPlaybackState: async () => {
+                stateReads++;
+                if (stateReads <= 2) {
+                    return {
+                        is_playing: true,
+                        progress_ms: 8000,
+                        shuffle_state: false,
+                        repeat_state: 'off',
+                        context: null,
+                        device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                        item: { id: 'old_song', uri: 'spotify:track:old_song', name: 'Old', type: 'track' },
+                    } as unknown as SpotifyApi.CurrentPlaybackResponse;
+                }
+                return {
+                    is_playing: true,
+                    progress_ms: 510,
+                    shuffle_state: false,
+                    repeat_state: 'off',
+                    context: null,
+                    device: { id: 'pixel_10_pro_xl', name: 'Pixel 10 Pro XL', type: 'Smartphone', is_active: true, is_restricted: false },
+                    item: { id: 'dj_converged', uri: 'spotify:track:dj_converged', name: 'Converged', type: 'track' },
+                } as unknown as SpotifyApi.CurrentPlaybackResponse;
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+
+        const queueConvergedClient = new SpotifyPlayerClient(queueConvergedSpotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        await queueConvergedClient.resolveTargetDevice();
+        const convergedRes = await queueConvergedClient.startPlaybackOnDevice('pixel_10_pro_xl', [
+            'spotify:track:dj_converged',
+            'spotify:track:dj_next',
+        ]);
+        assert.strictEqual(convergedRes.confirmedPlaying, true);
+        assert.strictEqual(fetchCalls.length, 1);
+
+        // 4. Immediate abort when `shouldAbort()` turns true during initial `executePlay` returning 404
+        fetchCalls = [];
+        let abortedOnInitial404 = false;
+        let devicesRequeriedAfterAbort = 0;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            fetchCalls.push({ url: String(input), init });
+            abortedOnInitial404 = true;
+            return { ok: false, status: 404, statusText: 'Not Found', text: async () => 'Not found' } as Response;
+        }) as typeof fetch;
+
+        const abortOn404Spotify = {
+            getAccessToken: () => 'token_abort_404',
+            getMyDevices: async () => {
+                devicesRequeriedAfterAbort++;
+                return { devices: [] };
+            },
+        } as unknown as SpotifyWebApi.SpotifyWebApiJs;
+        const abort404Client = new SpotifyPlayerClient(abortOn404Spotify, undefined, {
+            isMobile: () => true,
+            postPlayVerifyDelayMs: 0,
+            retryDelayMs: 0,
+        });
+        const abort404Res = await abort404Client.startPlaybackOnDevice(
+            'pixel_10_pro_xl',
+            ['spotify:track:dj_0'],
+            { shouldAbort: () => abortedOnInitial404 }
+        );
+        assert.strictEqual(abort404Res.aborted, true);
+        assert.strictEqual(abort404Res.confirmedPlaying, false);
+        assert.strictEqual(devicesRequeriedAfterAbort, 0);
+        assert.strictEqual(fetchCalls.length, 1);
+    });
 });
